@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "io.github.kurue.bram.runtime.openai"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 29

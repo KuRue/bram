@@ -56,7 +56,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and [ROADMAP.md](ROADM
 Requirements:
 
 - Android Studio with JDK 17
-- Android SDK Platform 37 and SDK Build Tools 36.0.0
+- Android SDK Platform 36 and SDK Build Tools 36.0.0
 - An API 29+ ARM64 device for the intended runtime path
 
 Open the repository in Android Studio and let it sync, or use the checked-in wrapper:

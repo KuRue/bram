@@ -7,7 +7,7 @@
 | JDK                        |      17 |
 | Android Gradle Plugin      |   9.3.1 |
 | Gradle                     |   9.5.0 |
-| Android compile/target SDK |      37 |
+| Android compile/target SDK |      36 |
 | Android minimum SDK        |      29 |
 | Android SDK Build Tools    |  36.0.0 |
 | Kotlin                     |  2.3.21 |
@@ -23,7 +23,7 @@ CMake versions in that module and install those exact packages in CI in the same
 ## Android Studio
 
 1. Install JDK 17 and an Android Studio version that supports AGP 9.3.
-2. In **SDK Manager**, install Android SDK Platform 37 and SDK Build Tools 36.0.0.
+2. In **SDK Manager**, install Android SDK Platform 36 and SDK Build Tools 36.0.0.
 3. Open the repository and allow the checked-in Gradle wrapper to sync.
 4. Select an API 29+ device and run the `app` configuration.
 

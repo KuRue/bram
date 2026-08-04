@@ -2,7 +2,7 @@
 
 ## Milestone 0 — reproducible build baseline
 
-- Clean-room GitHub Actions build with JDK 17 and Android SDK 37.
+- Clean-room GitHub Actions build with JDK 17 and Android SDK 36.
 - JVM tests, Android lint, and debug APK assembly as one required verification command.
 - Checked-in Gradle wrapper with distribution checksum verification.
 - Debug APK and test/lint reports retained as workflow artifacts.

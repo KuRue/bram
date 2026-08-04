@@ -31,14 +31,14 @@ jobs:
                   java-version: "17"
                   cache: gradle
 
-            - name: Install Android 17 SDK
+            - name: Install Android 16 SDK
               shell: bash
               run: |
                   BRAM_SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
                   set +o pipefail
                   yes | "$BRAM_SDKMANAGER" --licenses >/dev/null
                   set -o pipefail
-                  "$BRAM_SDKMANAGER" "platforms;android-37" "build-tools;36.0.0"
+                  "$BRAM_SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
 
             - name: Verify Gradle wrapper and build
               shell: bash
