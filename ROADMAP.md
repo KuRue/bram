@@ -1,5 +1,15 @@
 # Roadmap
 
+## Milestone 0 — reproducible build baseline
+
+- Clean-room GitHub Actions build with JDK 17 and Android SDK 36.
+- JVM tests, Android lint, and debug APK assembly as one required verification command.
+- Checked-in Gradle wrapper with distribution checksum verification.
+- Debug APK and test/lint reports retained as workflow artifacts.
+- Install and smoke-test the CI-built APK on the S25 Ultra.
+
+Exit criterion: green CI plus a successful install and launch of its debug APK on the S25 Ultra.
+
 ## Phase 1 — runnable control plane (this scaffold)
 
 - Device profiler and execution-plan data model.

@@ -19,7 +19,7 @@ The model is only one component. Bram is designed from the start for tool use, d
 
 The harness supplies a versioned `AgentIdentity` to each run. Version `bram/0.1` is intentionally small: Bram is direct, tool-aware, evidence-conscious, and prefers private local execution when policy and capability allow.
 
-The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/kotlin/com/localllm/app/BramDefaults.kt). We can develop Bram’s fuller persona later without coupling it to GGUF, a vendor backend, or a particular endpoint. Prompt or identity changes should increment the identity version so future prompt/KV caches can invalidate safely.
+The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/kotlin/io/github/kurue/bram/app/BramDefaults.kt). We can develop Bram’s fuller persona later without coupling it to GGUF, a vendor backend, or a particular endpoint. Prompt or identity changes should increment the identity version so future prompt/KV caches can invalidate safely.
 
 ## Current vertical slice
 
@@ -56,17 +56,22 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and [ROADMAP.md](ROADM
 Requirements:
 
 - Android Studio with JDK 17
-- Android SDK 37
+- Android SDK Platform 36 and SDK Build Tools 36.0.0
 - An API 29+ ARM64 device for the intended runtime path
 
 Open the repository in Android Studio and let it sync, or use the checked-in wrapper:
 
 ```bash
-./gradlew :core:agent:test
-./gradlew assembleDebug
+./gradlew --no-daemon --stacktrace \
+  :core:agent:test \
+  :platform:android:lintDebug \
+  :runtime:openai:lintDebug \
+  :runtime:llamacpp:lintDebug \
+  :app:lintDebug \
+  :app:assembleDebug
 ```
 
-This source environment has JDK 17 but no Android SDK, so the repository is structurally validated here but an APK has not yet been compiled in this environment.
+The same clean-room build runs in GitHub Actions and publishes the debug APK as a workflow artifact. See [Building Bram](docs/BUILDING.md) for the pinned toolchain, Android Studio setup, and install command.
 
 ## Security boundaries
 

@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "io.github.kurue.bram.runtime.llamacpp"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 29
