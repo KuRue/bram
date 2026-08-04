@@ -4,7 +4,10 @@ Bram is an Android-first local AI runtime and agent harness. Its goal is to make
 
 The model is only one component. Bram is designed from the start for tool use, durable memory, versioned skills, scheduled work, and optional OpenAI-compatible remote models.
 
-> **Status: pre-alpha scaffold.** Remote chat and the orchestration control plane are implemented. Local GGUF inference and autonomous agent capabilities are intentionally represented by interfaces until their safety and lifecycle behavior can be implemented and tested.
+> **Status: local CPU alpha in development.** The model-first UI, verified GGUF catalog, and
+> isolated llama.cpp CPU path are implemented. CI and S25 Ultra
+> validation are still required before this path is called working. Accelerator and autonomous
+> agent capabilities remain staged work.
 
 ## What makes Bram different
 
@@ -25,7 +28,8 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 
 | Area | State |
 |---|---|
-| Compose hardware dashboard, chat, and endpoint management | Working |
+| Model-first Compose chat, Models, Settings, and diagnostics | Implemented; device validation pending |
+| Persisted GGUF import, metadata validation, and SHA-256 | Implemented; device validation pending |
 | Android RAM, storage, CPU, Vulkan-feature, and thermal profiling | Working |
 | Encrypted-at-rest endpoint API keys using Android Keystore | Working |
 | OpenAI-compatible `/chat/completions` with function tools | Working, non-streaming |
@@ -33,8 +37,9 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 | Permission-gated iterative tool loop | Working |
 | Read-only `device_status` phone tool | Working |
 | Hardware execution-plan generation | Working |
-| Separate `:inference` process and AIDL protocol | Protocol ready |
-| llama.cpp/GGUF generation | Not linked yet |
+| Separate `:inference` process and AIDL protocol | Implemented |
+| Pinned ARM64 llama.cpp CPU generation | Implemented; CI/device validation pending |
+| Chat-template application, exact token counts, streaming, cancel, unload | Implemented; validation pending |
 | Hexagon, Adreno, Vulkan, and LiteRT native self-tests | Not implemented yet |
 | Durable conversations, memory, skills, and automations | Interfaces only |
 
@@ -45,9 +50,9 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 | `app` | Compose UI, Bram’s default identity, app state, dependency assembly |
 | `core:domain` | Runtime-neutral agent, model, memory, tool, and scheduling contracts |
 | `core:agent` | Context planning, routing, execution planning, and the tool loop |
-| `platform:android` | Device profiling, Keystore persistence, and isolated inference service |
+| `platform:android` | Device profiling and Keystore persistence |
 | `runtime:openai` | OpenAI-compatible Chat Completions adapter |
-| `runtime:llamacpp` | Stable boundary for future llama.cpp/JNI integration |
+| `runtime:llamacpp` | GGUF catalog, AIDL process, llama.cpp/JNI CPU runtime |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and [ROADMAP.md](ROADMAP.md) for the staged implementation plan.
 
@@ -64,6 +69,7 @@ Open the repository in Android Studio and let it sync, or use the checked-in wra
 ```bash
 ./gradlew --no-daemon --stacktrace \
   :core:agent:test \
+  :runtime:llamacpp:testDebugUnitTest \
   :platform:android:lintDebug \
   :runtime:openai:lintDebug \
   :runtime:llamacpp:lintDebug \

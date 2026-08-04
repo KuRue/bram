@@ -18,7 +18,7 @@ jobs:
     verify:
         name: Test, lint, and assemble
         runs-on: ubuntu-latest
-        timeout-minutes: 30
+        timeout-minutes: 60
 
         steps:
             - name: Check out source
@@ -31,14 +31,18 @@ jobs:
                   java-version: "17"
                   cache: gradle
 
-            - name: Install Android 16 SDK
+            - name: Install Android 16 and native toolchains
               shell: bash
               run: |
                   BRAM_SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
                   set +o pipefail
                   yes | "$BRAM_SDKMANAGER" --licenses >/dev/null
                   set -o pipefail
-                  "$BRAM_SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+                  "$BRAM_SDKMANAGER" \
+                    "platforms;android-36" \
+                    "build-tools;36.0.0" \
+                    "ndk;28.2.13676358" \
+                    "cmake;3.22.1"
 
             - name: Verify Gradle wrapper and build
               shell: bash
@@ -46,6 +50,7 @@ jobs:
                   chmod +x gradlew
                   ./gradlew --no-daemon --stacktrace \
                     :core:agent:test \
+                    :runtime:llamacpp:testDebugUnitTest \
                     :platform:android:lintDebug \
                     :runtime:openai:lintDebug \
                     :runtime:llamacpp:lintDebug \

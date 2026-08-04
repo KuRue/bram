@@ -10,20 +10,23 @@
 | Android compile/target SDK |      36 |
 | Android minimum SDK        |      29 |
 | Android SDK Build Tools    |  36.0.0 |
+| Android NDK                | 28.2.13676358 |
+| CMake                      |  3.22.1 |
 | Kotlin                     |  2.3.21 |
 
 AGP 9.3 provides built-in Kotlin for Android modules. Do not add the legacy
 `org.jetbrains.kotlin.android` plugin to `app`, `platform:android`, or the runtime Android
 libraries. The pure JVM `core` modules continue to use `org.jetbrains.kotlin.jvm`.
 
-The NDK and CMake are intentionally not installed by the current CI job because no native target
-is linked yet. When `runtime:llamacpp` adds its first `externalNativeBuild`, pin the tested NDK and
-CMake versions in that module and install those exact packages in CI in the same change.
+`runtime:llamacpp` pins llama.cpp commit
+`474c92e722ce77aee2060cd08629b9afb008d81b`. CMake fetches that immutable commit during native
+configuration and builds only Bram's ARM64 CPU baseline. It does not track an upstream branch.
 
 ## Android Studio
 
 1. Install JDK 17 and an Android Studio version that supports AGP 9.3.
-2. In **SDK Manager**, install Android SDK Platform 36 and SDK Build Tools 36.0.0.
+2. In **SDK Manager**, install Android SDK Platform 36, SDK Build Tools 36.0.0,
+   NDK 28.2.13676358, and CMake 3.22.1.
 3. Open the repository and allow the checked-in Gradle wrapper to sync.
 4. Select an API 29+ device and run the `app` configuration.
 
@@ -37,6 +40,7 @@ Run the same checks used by CI:
 ```bash
 ./gradlew --no-daemon --stacktrace \
   :core:agent:test \
+  :runtime:llamacpp:testDebugUnitTest \
   :platform:android:lintDebug \
   :runtime:openai:lintDebug \
   :runtime:llamacpp:lintDebug \
@@ -58,6 +62,6 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 It uses a fresh Linux runner, installs the exact Android SDK packages above, runs tests and lint,
 assembles the debug APK, and retains the APK and reports for 14 days.
 
-This is the build gate for Milestone 0. A passing emulator or JVM-only build does not validate
-native accelerator behavior; CPU, Adreno, and Hexagon support will require separate correctness
-tests on physical devices.
+CI verifies that the pinned native CPU library compiles and is packaged. CPU is only reported as
+validated after a selected GGUF passes Bram's on-device tokenizer and one-token decode self-test.
+Adreno and Hexagon still require later physical-device correctness tests.

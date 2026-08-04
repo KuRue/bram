@@ -15,7 +15,7 @@ import java.security.MessageDigest
 class AndroidDeviceProfiler(
     private val context: Context,
 ) {
-    fun snapshot(): DeviceProfile {
+    fun snapshot(cpuValidated: Boolean = false): DeviceProfile {
         val activityManager = context.getSystemService(ActivityManager::class.java)
         val memory = ActivityManager.MemoryInfo().also(activityManager::getMemoryInfo)
         val storage = StatFs(context.filesDir.absolutePath)
@@ -49,8 +49,12 @@ class AndroidDeviceProfiler(
             accelerators = listOf(
                 AcceleratorCapability(
                     AcceleratorKind.CPU,
-                    CapabilityState.AVAILABLE,
-                    "$abi with ${Runtime.getRuntime().availableProcessors()} visible cores",
+                    if (cpuValidated) CapabilityState.AVAILABLE else CapabilityState.DETECTED_NOT_VALIDATED,
+                    if (cpuValidated) {
+                        "$abi with ${Runtime.getRuntime().availableProcessors()} visible cores; llama.cpp tokenizer + decode self-test passed"
+                    } else {
+                        "$abi with ${Runtime.getRuntime().availableProcessors()} visible cores; native correctness test has not passed yet"
+                    },
                 ),
                 AcceleratorCapability(
                     AcceleratorKind.VULKAN_GPU,

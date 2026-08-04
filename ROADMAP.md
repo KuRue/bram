@@ -18,12 +18,14 @@ Exit criterion: green CI plus a successful install and launch of its debug APK o
 - Native inference process contract.
 - Versioned Bram default identity, independent of model runtime.
 
-## Phase 2 — first local vertical slice
+## Milestone 1 — local CPU alpha (in progress)
 
 - Vendor a pinned llama.cpp revision and record its license/build fingerprint.
-- GGUF metadata parser and tokenizer-backed exact token counts.
+- Model-first Chat/Models UI; remote endpoints move under Settings.
+- Persisted Storage Access Framework GGUF catalog, bounded metadata parser, and SHA-256 verification.
+- GGUF chat-template application and tokenizer-backed exact token counts.
 - CPU ARM64 backend with cancellation, progress, metrics, and safe cleanup.
-- Model import/download verification and resumable transfers.
+- Model import verification. Built-in downloads and resumable transfers remain deferred.
 - LFM2.5-2.6B Q4_0 as an initial reference model.
 
 Exit criterion: install, load, chat, cancel, unload, and recover from a killed inference process on the S25 Ultra.

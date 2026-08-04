@@ -16,9 +16,9 @@
 | `app` | Compose UI, Bram's default identity, app state, dependency assembly |
 | `core:domain` | Runtime-neutral models and interfaces |
 | `core:agent` | Context planning, routing, execution planning, tool loop |
-| `platform:android` | Device profiling, Keystore persistence, AIDL inference process |
+| `platform:android` | Device profiling and Keystore persistence |
 | `runtime:openai` | OpenAI-compatible Chat Completions adapter |
-| `runtime:llamacpp` | llama.cpp boundary and future JNI/vendor integration |
+| `runtime:llamacpp` | GGUF catalog, AIDL inference process, pinned llama.cpp/JNI runtime |
 
 ```mermaid
 flowchart TD
@@ -103,9 +103,15 @@ Every autonomous run needs a time/token/tool budget, network and charging constr
 
 ## Process and failure isolation
 
-Native inference belongs in `:inference`, a separate Android process exposed through AIDL. The UI process owns conversation state and checkpoints prompts before generation. If a driver or native backend crashes, the UI can mark the plan failed, reconnect, select a fallback candidate, and resume from the checkpoint.
+Native inference belongs in `:inference`, a separate Android process exposed through AIDL. The
+service, its JNI bridge, and native library live together in `runtime:llamacpp`; this avoids a
+module dependency cycle and prevents model browsing from loading native code in the UI process.
+The UI process owns conversation state and checkpoints prompts before generation. If a driver or
+native backend crashes, the UI marks the loaded plan unavailable while keeping the chat visible.
 
-The AIDL scaffold uses JSON payloads so the contract can evolve before the native protocol stabilizes. Once profiling identifies high-volume binder traffic, token deltas can move to a pipe/shared-memory transport while control remains in AIDL.
+The AIDL control plane uses JSON payloads so the contract can evolve before the native protocol
+stabilizes. Token deltas currently use one-way Binder callbacks. Once physical profiling identifies
+Binder overhead, deltas can move to a pipe/shared-memory transport while control remains in AIDL.
 
 ## Remote providers and routing
 
