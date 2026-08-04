@@ -14,7 +14,7 @@ Bram is pre-alpha. Changes should strengthen one complete boundary or vertical s
 
 ## Bram identity changes
 
-The bundled identity lives in `app/src/main/kotlin/com/localllm/app/BramDefaults.kt`. Increment its version whenever behaviorally meaningful prompt text changes. Identity-specific policy must not leak into model adapters.
+The bundled identity lives in `app/src/main/kotlin/io/github/kurue/bram/app/BramDefaults.kt`. Increment its version whenever behaviorally meaningful prompt text changes. Identity-specific policy must not leak into model adapters.
 
 ## Verification
 
@@ -27,8 +27,16 @@ Run the focused JVM tests while iterating:
 Before merging Android or runtime work, also run:
 
 ```bash
-./gradlew test assembleDebug
+./gradlew --no-daemon --stacktrace \
+  :core:agent:test \
+  :platform:android:lintDebug \
+  :runtime:openai:lintDebug \
+  :runtime:llamacpp:lintDebug \
+  :app:lintDebug \
+  :app:assembleDebug
 ```
+
+See [Building Bram](docs/BUILDING.md) for the pinned toolchain and CI behavior.
 
 Native backend changes additionally require correctness, cancellation, process-death, low-memory, and thermal-soak testing on real devices. Performance results are not valid until correctness passes.
 
