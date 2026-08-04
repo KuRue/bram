@@ -1,0 +1,36 @@
+# Gradle and Android build output
+.gradle/
+**/build/
+local.properties
+.cxx/
+.externalNativeBuild/
+captures/
+*.apk
+*.aab
+*.apks
+
+# IDE and OS state
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local credentials and configuration
+.env
+.env.*
+*.keystore
+*.jks
+secrets.properties
+
+# Large model artifacts and generated backend caches
+*.gguf
+*.litertlm
+*.safetensors
+*.onnx
+*.onnx_data
+models/
+model-cache/
+
+# Logs and scratch output
+*.log
+tmp/
