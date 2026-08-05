@@ -35,6 +35,31 @@ class LocalModelStore(
             .sortedByDescending(LocalModelRecord::importedAtEpochMillis)
     }
 
+    /** Total bytes the imported copies occupy in app-private storage. */
+    suspend fun storageBytesUsed(): Long = withContext(Dispatchers.IO) {
+        modelsDirectory.listFiles()?.sumOf(java.io.File::length) ?: 0L
+    }
+
+    /**
+     * Deletes model copies no catalog record points at, and reports the bytes reclaimed.
+     *
+     * Each copy is roughly the size of the original GGUF, so an interrupted import or a cleared
+     * catalog can strand well over a gigabyte with nothing in the UI referencing it. Partial
+     * `.gguf.part` files from a failed copy are removed too.
+     */
+    suspend fun deleteOrphanedCopies(): Long = withContext(Dispatchers.IO) {
+        val referenced = decode(preferences.getString(KEY_MODELS, null))
+            .map(LocalModelRecord::localPath)
+            .filter(String::isNotBlank)
+            .toSet()
+        modelsDirectory.listFiles().orEmpty()
+            .filter { file -> file.isFile && file.absolutePath !in referenced }
+            .sumOf { file ->
+                val size = file.length()
+                if (file.delete()) size else 0L
+            }
+    }
+
     suspend fun importModel(
         uri: Uri,
         progress: (ModelImportProgress) -> Unit = {},

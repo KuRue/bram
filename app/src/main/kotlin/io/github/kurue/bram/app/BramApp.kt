@@ -125,6 +125,7 @@ fun BramApp(viewModel: MainViewModel) {
                     onContext = viewModel::setPreferredContext,
                     onValidateAccelerator = viewModel::validateAccelerator,
                     onBisectAccelerator = viewModel::bisectAccelerator,
+                    onReclaimStorage = viewModel::reclaimModelStorage,
                 )
                 AppSection.SETTINGS -> SettingsScreen(
                     state = state,
@@ -313,6 +314,7 @@ private fun ModelsScreen(
     onContext: (String, Int) -> Unit,
     onValidateAccelerator: (String, AcceleratorTarget) -> Unit,
     onBisectAccelerator: (String, AcceleratorTarget) -> Unit,
+    onReclaimStorage: () -> Unit,
 ) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -370,6 +372,23 @@ private fun ModelsScreen(
             )
         }
         state.modelLoadDetail?.let { detail -> item { InfoCard("Validated CPU plan", detail) } }
+        if (state.modelStorageBytes > 0) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Model storage", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Imported models are copied into Bram's private storage, which currently " +
+                                "holds ${formatBytes(state.modelStorageBytes)}. Copies left behind by an " +
+                                "interrupted import can be removed safely.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(onClick = onReclaimStorage) { Text("Remove unreferenced copies") }
+                    }
+                }
+            }
+        }
         state.selectedLocalModel?.let { model ->
             item {
                 AcceleratorValidationCard(

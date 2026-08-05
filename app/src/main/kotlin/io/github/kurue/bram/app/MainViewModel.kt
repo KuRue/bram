@@ -3,9 +3,11 @@ package io.github.kurue.bram.app
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.kurue.bram.core.domain.AcceleratorAgreement
 import io.github.kurue.bram.core.domain.AgentEvent
 import io.github.kurue.bram.core.domain.AgentRunRequest
 import io.github.kurue.bram.core.domain.ConversationId
+import io.github.kurue.bram.core.domain.findOffloadBoundary
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.GenerationMetrics
@@ -78,7 +80,7 @@ data class AcceleratorProbe(
      * fp16 accelerators legitimately disagree with an fp32 CPU on a few near-tie predictions, so
      * exact equality is too strict. Near-total agreement means the backend computes correctly.
      */
-    val usable: Boolean get() = agreement >= 0.9
+    val usable: Boolean get() = AcceleratorAgreement.isUsable(agreement)
 }
 
 /** Accelerator families Bram can validate against the CPU reference. */
@@ -104,6 +106,7 @@ data class AppUiState(
     val error: String? = null,
     val lastUsage: TokenUsage? = null,
     val lastMetrics: GenerationMetrics? = null,
+    val modelStorageBytes: Long = 0,
     val isValidatingAccelerator: Boolean = false,
     val acceleratorReport: AcceleratorReport? = null,
     val acceleratorBisection: AcceleratorBisection? = null,
@@ -149,6 +152,37 @@ class MainViewModel(
         }
         refreshDeviceProfile()
         reloadCatalogs()
+    }
+
+    /** Removes model copies nothing in the catalog references and reports what was reclaimed. */
+    fun reclaimModelStorage() {
+        viewModelScope.launch {
+            runCatching { container.localModelStore.deleteOrphanedCopies() }
+                .onSuccess { reclaimed ->
+                    mutableState.update {
+                        it.copy(
+                            status = if (reclaimed > 0) {
+                                "Reclaimed ${reclaimed / 1_048_576L} MB of unreferenced model copies"
+                            } else {
+                                "No unreferenced model copies to remove"
+                            },
+                        )
+                    }
+                    refreshModelStorage()
+                }
+                .onFailure { error ->
+                    mutableState.update {
+                        it.copy(error = error.message ?: "Could not reclaim model storage")
+                    }
+                }
+        }
+    }
+
+    private fun refreshModelStorage() {
+        viewModelScope.launch {
+            val bytes = runCatching { container.localModelStore.storageBytesUsed() }.getOrDefault(0L)
+            mutableState.update { it.copy(modelStorageBytes = bytes) }
+        }
     }
 
     fun refreshDeviceProfile() {
@@ -396,29 +430,26 @@ class MainViewModel(
                         .optJSONArray("predictions").toIntList()
                     // Position i predicts reference[i]; both backends see identical inputs, so a
                     // disagreement is a real numerical difference rather than compounded drift.
+                    val score = AcceleratorAgreement.score(reference, predicted)
                     val comparable = minOf(predicted.size, reference.size)
-                    val agreed = (0 until comparable).count { predicted[it] == reference[it] }
                     val probe = AcceleratorProbe(
                         gpuLayers = layers,
-                        agreement = if (comparable == 0) 0.0 else agreed.toDouble() / comparable,
+                        agreement = score,
                         millis = System.currentTimeMillis() - started,
-                        text = "$agreed/$comparable predictions agree",
+                        text = "${(score * comparable).toInt()}/$comparable predictions agree",
                     )
                     probes += probe
                     return probe
                 }
 
-                if (probeAt(totalLayers).usable) {
-                    AcceleratorBisection(deviceName, totalLayers, totalLayers, null, probes.toList())
-                } else {
-                    var good = 0
-                    var bad = totalLayers
-                    while (bad - good > 1) {
-                        val middle = good + (bad - good) / 2
-                        if (probeAt(middle).usable) good = middle else bad = middle
-                    }
-                    AcceleratorBisection(deviceName, totalLayers, good, bad, probes.toList())
-                }
+                val boundary = findOffloadBoundary(totalLayers) { layers -> probeAt(layers).usable }
+                AcceleratorBisection(
+                    deviceName = deviceName,
+                    totalLayers = totalLayers,
+                    lastGoodLayers = boundary.lastGoodLayers,
+                    firstBadLayers = boundary.firstBadLayers,
+                    probes = probes.toList(),
+                )
             }.onSuccess { bisection ->
                 mutableState.update { it.copy(acceleratorBisection = bisection) }
             }.onFailure { error ->
@@ -636,6 +667,7 @@ class MainViewModel(
                     ?: models.firstOrNull()?.id?.value
                 current.copy(localModels = models, selectedRuntimeId = selected, error = null)
             }
+            refreshModelStorage()
         }
     }
 
