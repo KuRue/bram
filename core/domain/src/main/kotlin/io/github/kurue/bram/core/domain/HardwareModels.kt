@@ -78,6 +78,11 @@ data class LocalModelRecord(
     val hasChatTemplate: Boolean,
     val importedAtEpochMillis: Long = System.currentTimeMillis(),
     val preferredContextTokens: Int = trainedContextTokens.takeIf { it > 0 }?.coerceAtMost(8_192) ?: 4_096,
+    /**
+     * Which processor this model should load onto, remembered per model because the best choice
+     * depends on the model as much as the device. Empty means CPU.
+     */
+    val preferredBackendId: String = "",
 ) {
     fun asModelDescriptor(): ModelDescriptor = ModelDescriptor(
         id = id,
