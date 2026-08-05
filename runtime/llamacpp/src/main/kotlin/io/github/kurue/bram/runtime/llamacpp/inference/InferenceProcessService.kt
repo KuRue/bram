@@ -18,9 +18,19 @@ class InferenceProcessService : Service() {
         Thread(task, "bram-local-inference").apply { priority = Thread.NORM_PRIORITY }
     }
     private val requests = ConcurrentHashMap<String, Future<*>>()
-    private val bridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { NativeLlamaBridge() }
+    private val bridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        // The Hexagon NPU loader resolves its DSP-side skels through ADSP_LIBRARY_PATH, and reads
+        // it when the backend initialises, so it has to be set before the native library loads.
+        runCatching {
+            val nativeDir = applicationInfo.nativeLibraryDir
+            android.system.Os.setenv("ADSP_LIBRARY_PATH", nativeDir, true)
+        }
+        NativeLlamaBridge()
+    }
     private var loadedModelId: String? = null
     private var loadedContextTokens: Int = 0
+    private var loadedGpuLayers: Int = 0
+    private var loadedDeviceFilter: String = ""
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
@@ -30,6 +40,16 @@ class InferenceProcessService : Service() {
                 .put("process", ":inference")
                 .put("llamaCppCommit", BuildConfig.LLAMA_CPP_COMMIT)
                 .toString()
+        }
+
+        override fun devices(): String = runSerialized { bridge.devices() }
+
+        override fun referenceDecode(tokenCount: Int): String = runSerialized {
+            bridge.referenceDecode(tokenCount)
+        }
+
+        override fun teacherForced(forcedTokens: IntArray?): String = runSerialized {
+            bridge.teacherForced(forcedTokens ?: IntArray(0))
         }
 
         override fun load(requestJson: String): String = runSerialized {
@@ -138,7 +158,16 @@ class InferenceProcessService : Service() {
     private fun loadModel(request: JSONObject): String {
         val modelId = request.getString("modelId")
         val contextTokens = request.getInt("contextTokens").coerceAtLeast(256)
-        if (modelId == loadedModelId && contextTokens == loadedContextTokens && cpuValidated) {
+        val gpuLayers = request.optInt("gpuLayers", 0).coerceAtLeast(0)
+        val deviceFilter = request.optString("deviceFilter")
+        // The offload plan is part of the load identity: reusing a CPU-resident model for a GPU
+        // request would silently validate the accelerator against itself.
+        if (modelId == loadedModelId &&
+            contextTokens == loadedContextTokens &&
+            gpuLayers == loadedGpuLayers &&
+            deviceFilter == loadedDeviceFilter &&
+            cpuValidated
+        ) {
             return JSONObject(bridge.state())
                 .put("alreadyLoaded", true)
                 .put("modelId", modelId)
@@ -169,6 +198,8 @@ class InferenceProcessService : Service() {
                     batchTokens = request.optInt("batchTokens", 512).coerceIn(32, contextTokens),
                     threads = request.optInt("threads", Runtime.getRuntime().availableProcessors())
                         .coerceIn(1, Runtime.getRuntime().availableProcessors()),
+                    gpuLayers = gpuLayers,
+                    deviceFilter = deviceFilter,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())
@@ -177,6 +208,8 @@ class InferenceProcessService : Service() {
             }
             loadedModelId = modelId
             loadedContextTokens = contextTokens
+            loadedGpuLayers = gpuLayers
+            loadedDeviceFilter = deviceFilter
             cpuValidated = true
             return loadResult
                 .put("alreadyLoaded", false)
@@ -189,6 +222,8 @@ class InferenceProcessService : Service() {
             runCatching { bridge.unload() }
             loadedModelId = null
             loadedContextTokens = 0
+            loadedGpuLayers = 0
+            loadedDeviceFilter = ""
             cpuValidated = false
             throw error
         }
@@ -199,6 +234,8 @@ class InferenceProcessService : Service() {
         val result = bridge.unload()
         loadedModelId = null
         loadedContextTokens = 0
+        loadedGpuLayers = 0
+        loadedDeviceFilter = ""
         cpuValidated = false
         return result
     }

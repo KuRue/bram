@@ -3,9 +3,11 @@ package io.github.kurue.bram.app
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.kurue.bram.core.domain.AcceleratorAgreement
 import io.github.kurue.bram.core.domain.AgentEvent
 import io.github.kurue.bram.core.domain.AgentRunRequest
 import io.github.kurue.bram.core.domain.ConversationId
+import io.github.kurue.bram.core.domain.findOffloadBoundary
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.GenerationMetrics
@@ -27,6 +29,66 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/**
+ * Outcome of comparing an accelerator against the CPU reference decode. [matchesCpu] is the
+ * milestone's acceptance signal: the accelerator must reproduce the CPU token sequence exactly
+ * before it may be reported as validated.
+ */
+data class AcceleratorReport(
+    val deviceName: String,
+    val matchesCpu: Boolean,
+    val cpuTokens: List<Int>,
+    val acceleratorTokens: List<Int>,
+    val cpuMillis: Long,
+    val acceleratorMillis: Long,
+    val cpuText: String,
+    val acceleratorText: String,
+    val detail: String,
+) {
+    val speedup: Double
+        get() = if (acceleratorMillis > 0) cpuMillis.toDouble() / acceleratorMillis.toDouble() else 0.0
+}
+
+/**
+ * Result of narrowing down how many layers can be offloaded before output stops matching CPU.
+ * [lastGoodLayers] is the largest offload that still reproduced the reference exactly.
+ */
+data class AcceleratorBisection(
+    val deviceName: String,
+    val totalLayers: Int,
+    val lastGoodLayers: Int,
+    val firstBadLayers: Int?,
+    val probes: List<AcceleratorProbe>,
+) {
+    val detail: String
+        get() = when {
+            firstBadLayers == null -> "All $totalLayers layers agreed with the CPU reference."
+            lastGoodLayers == 0 -> "Even one offloaded layer disagrees, so the failure is in an " +
+                "operation every layer uses."
+            else -> "Predictions agree up to $lastGoodLayers offloaded layers and break at " +
+                "$firstBadLayers."
+        }
+}
+
+data class AcceleratorProbe(
+    val gpuLayers: Int,
+    val agreement: Double,
+    val millis: Long,
+    val text: String,
+) {
+    /**
+     * fp16 accelerators legitimately disagree with an fp32 CPU on a few near-tie predictions, so
+     * exact equality is too strict. Near-total agreement means the backend computes correctly.
+     */
+    val usable: Boolean get() = AcceleratorAgreement.isUsable(agreement)
+}
+
+/** Accelerator families Bram can validate against the CPU reference. */
+enum class AcceleratorTarget(val label: String, val devicePrefix: String) {
+    VULKAN("Adreno (Vulkan)", "Vulkan"),
+    HEXAGON("Hexagon NPU", "HTP"),
+}
+
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
@@ -44,6 +106,10 @@ data class AppUiState(
     val error: String? = null,
     val lastUsage: TokenUsage? = null,
     val lastMetrics: GenerationMetrics? = null,
+    val modelStorageBytes: Long = 0,
+    val isValidatingAccelerator: Boolean = false,
+    val acceleratorReport: AcceleratorReport? = null,
+    val acceleratorBisection: AcceleratorBisection? = null,
 ) {
     val selectedLocalModel: LocalModelRecord?
         get() = localModels.firstOrNull { it.id.value == selectedRuntimeId }
@@ -86,6 +152,37 @@ class MainViewModel(
         }
         refreshDeviceProfile()
         reloadCatalogs()
+    }
+
+    /** Removes model copies nothing in the catalog references and reports what was reclaimed. */
+    fun reclaimModelStorage() {
+        viewModelScope.launch {
+            runCatching { container.localModelStore.deleteOrphanedCopies() }
+                .onSuccess { reclaimed ->
+                    mutableState.update {
+                        it.copy(
+                            status = if (reclaimed > 0) {
+                                "Reclaimed ${reclaimed / 1_048_576L} MB of unreferenced model copies"
+                            } else {
+                                "No unreferenced model copies to remove"
+                            },
+                        )
+                    }
+                    refreshModelStorage()
+                }
+                .onFailure { error ->
+                    mutableState.update {
+                        it.copy(error = error.message ?: "Could not reclaim model storage")
+                    }
+                }
+        }
+    }
+
+    private fun refreshModelStorage() {
+        viewModelScope.launch {
+            val bytes = runCatching { container.localModelStore.storageBytesUsed() }.getOrDefault(0L)
+            mutableState.update { it.copy(modelStorageBytes = bytes) }
+        }
     }
 
     fun refreshDeviceProfile() {
@@ -193,6 +290,176 @@ class MainViewModel(
                 refreshDeviceProfile()
             }
             mutableState.update { it.copy(isLoadingModel = false, status = null) }
+        }
+    }
+
+    /**
+     * Validates the Vulkan/Adreno backend against CPU output. The model is loaded on CPU to record
+     * a deterministic greedy-decode reference, then reloaded with full GPU offload and asked for
+     * the same sequence. Loading twice in sequence (rather than side by side) keeps peak memory to
+     * one model, which matters on a phone.
+     */
+    fun validateAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
+        val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
+        val state = mutableState.value
+        if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(
+                    isValidatingAccelerator = true,
+                    acceleratorReport = null,
+                    error = null,
+                    status = "Recording the CPU reference…",
+                )
+            }
+            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            val threads = (visibleCores - 2).coerceIn(1, 4)
+            runCatching {
+                val devices = container.llamaCppClient.devices()
+                val deviceName = (0 until devices.optJSONArray("devices")?.length().orZero())
+                    .map { index -> devices.getJSONArray("devices").getJSONObject(index) }
+                    .firstOrNull { device -> device.optString("name").startsWith(target.devicePrefix) }
+                    ?.let { device -> device.optString("description").ifBlank { device.optString("name") } }
+                    ?: throw IllegalStateException(
+                        "This build found no ${target.label} device, so it cannot be validated.",
+                    )
+
+                container.llamaCppClient.load(model, threads, gpuLayers = 0)
+                val cpuStarted = System.currentTimeMillis()
+                val cpuResult = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                val cpuMillis = System.currentTimeMillis() - cpuStarted
+                val cpuTokens = cpuResult.optJSONArray("tokens").toIntList()
+
+                mutableState.update { it.copy(status = "Replaying the reference on $deviceName…") }
+                container.llamaCppClient.load(
+                    model,
+                    threads,
+                    gpuLayers = FULL_GPU_OFFLOAD,
+                    deviceFilter = target.devicePrefix,
+                )
+                val gpuStarted = System.currentTimeMillis()
+                val gpuResult = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                val gpuMillis = System.currentTimeMillis() - gpuStarted
+                val gpuTokens = gpuResult.optJSONArray("tokens").toIntList()
+
+                val matches = cpuTokens.isNotEmpty() && cpuTokens == gpuTokens
+                AcceleratorReport(
+                    deviceName = deviceName,
+                    matchesCpu = matches,
+                    cpuTokens = cpuTokens,
+                    acceleratorTokens = gpuTokens,
+                    cpuMillis = cpuMillis,
+                    acceleratorMillis = gpuMillis,
+                    cpuText = cpuResult.optString("text"),
+                    acceleratorText = gpuResult.optString("text"),
+                    detail = if (matches) {
+                        "$deviceName reproduced all ${cpuTokens.size} reference tokens exactly."
+                    } else {
+                        "$deviceName diverged from the CPU reference and is not validated."
+                    },
+                )
+            }.onSuccess { report ->
+                mutableState.update { it.copy(acceleratorReport = report) }
+            }.onFailure { error ->
+                mutableState.update {
+                    it.copy(error = error.message ?: "Could not validate the accelerator")
+                }
+            }
+            // The comparison leaves the runtime in whatever state the last load produced; drop it
+            // so the user always returns to a clean, explicitly chosen load.
+            runCatching { unloadModelInternal() }
+            mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
+            refreshDeviceProfile()
+        }
+    }
+
+    /**
+     * Narrows a failing accelerator down to a layer boundary. Records the CPU reference once, then
+     * binary-searches the offload count for the largest value that still reproduces it. Whether the
+     * boundary lands at zero or partway through separates "a shared operation is broken" from
+     * "one layer's operation is broken".
+     */
+    fun bisectAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
+        val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
+        val state = mutableState.value
+        if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(
+                    isValidatingAccelerator = true,
+                    acceleratorBisection = null,
+                    acceleratorReport = null,
+                    error = null,
+                    status = "Recording the CPU reference…",
+                )
+            }
+            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            val threads = (visibleCores - 2).coerceIn(1, 4)
+            val probes = mutableListOf<AcceleratorProbe>()
+            runCatching {
+                val devices = container.llamaCppClient.devices()
+                val deviceName = (0 until devices.optJSONArray("devices")?.length().orZero())
+                    .map { index -> devices.getJSONArray("devices").getJSONObject(index) }
+                    .firstOrNull { device -> device.optString("name").startsWith(target.devicePrefix) }
+                    ?.let { device -> device.optString("description").ifBlank { device.optString("name") } }
+                    ?: throw IllegalStateException(
+                        "This build found no ${target.label} device to bisect.",
+                    )
+
+                container.llamaCppClient.load(model, threads, gpuLayers = 0)
+                val reference = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                    .optJSONArray("tokens").toIntList()
+                check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
+
+                // llama.cpp counts the output layer too, so probe one past the repeating layers.
+                val totalLayers = model.layerCount.takeIf { it > 0 }?.plus(1) ?: 32
+
+                val forced = reference.toIntArray()
+                suspend fun probeAt(layers: Int): AcceleratorProbe {
+                    mutableState.update {
+                        it.copy(status = "Testing $layers of $totalLayers layers on ${target.label}…")
+                    }
+                    container.llamaCppClient.load(
+                        model,
+                        threads,
+                        gpuLayers = layers,
+                        deviceFilter = target.devicePrefix,
+                    )
+                    val started = System.currentTimeMillis()
+                    val predicted = container.llamaCppClient.teacherForced(forced)
+                        .optJSONArray("predictions").toIntList()
+                    // Position i predicts reference[i]; both backends see identical inputs, so a
+                    // disagreement is a real numerical difference rather than compounded drift.
+                    val score = AcceleratorAgreement.score(reference, predicted)
+                    val comparable = minOf(predicted.size, reference.size)
+                    val probe = AcceleratorProbe(
+                        gpuLayers = layers,
+                        agreement = score,
+                        millis = System.currentTimeMillis() - started,
+                        text = "${(score * comparable).toInt()}/$comparable predictions agree",
+                    )
+                    probes += probe
+                    return probe
+                }
+
+                val boundary = findOffloadBoundary(totalLayers) { layers -> probeAt(layers).usable }
+                AcceleratorBisection(
+                    deviceName = deviceName,
+                    totalLayers = totalLayers,
+                    lastGoodLayers = boundary.lastGoodLayers,
+                    firstBadLayers = boundary.firstBadLayers,
+                    probes = probes.toList(),
+                )
+            }.onSuccess { bisection ->
+                mutableState.update { it.copy(acceleratorBisection = bisection) }
+            }.onFailure { error ->
+                mutableState.update {
+                    it.copy(error = error.message ?: "Could not bisect the accelerator")
+                }
+            }
+            runCatching { unloadModelInternal() }
+            mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
+            refreshDeviceProfile()
         }
     }
 
@@ -400,6 +667,7 @@ class MainViewModel(
                     ?: models.firstOrNull()?.id?.value
                 current.copy(localModels = models, selectedRuntimeId = selected, error = null)
             }
+            refreshModelStorage()
         }
     }
 
@@ -454,3 +722,16 @@ class MainViewModel(
 
 internal const val REMOTE_PREFIX = "remote:"
 internal fun remoteRuntimeId(endpointId: String): String = "$REMOTE_PREFIX$endpointId"
+
+/** Tokens compared between backends. Long enough to catch drift, short enough to stay quick. */
+private const val REFERENCE_TOKENS = 24
+
+/** llama.cpp clamps this to the model's layer count, so it means "offload everything". */
+private const val FULL_GPU_OFFLOAD = 999
+
+private fun Int?.orZero(): Int = this ?: 0
+
+private fun org.json.JSONArray?.toIntList(): List<Int> {
+    val array = this ?: return emptyList()
+    return (0 until array.length()).map(array::getInt)
+}

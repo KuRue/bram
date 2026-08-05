@@ -123,6 +123,9 @@ fun BramApp(viewModel: MainViewModel) {
                     onUnload = viewModel::unloadModel,
                     onRemove = viewModel::removeLocalModel,
                     onContext = viewModel::setPreferredContext,
+                    onValidateAccelerator = viewModel::validateAccelerator,
+                    onBisectAccelerator = viewModel::bisectAccelerator,
+                    onReclaimStorage = viewModel::reclaimModelStorage,
                 )
                 AppSection.SETTINGS -> SettingsScreen(
                     state = state,
@@ -309,6 +312,9 @@ private fun ModelsScreen(
     onUnload: () -> Unit,
     onRemove: (String) -> Unit,
     onContext: (String, Int) -> Unit,
+    onValidateAccelerator: (String, AcceleratorTarget) -> Unit,
+    onBisectAccelerator: (String, AcceleratorTarget) -> Unit,
+    onReclaimStorage: () -> Unit,
 ) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -366,13 +372,126 @@ private fun ModelsScreen(
             )
         }
         state.modelLoadDetail?.let { detail -> item { InfoCard("Validated CPU plan", detail) } }
+        if (state.modelStorageBytes > 0) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Model storage", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Imported models are copied into Bram's private storage, which currently " +
+                                "holds ${formatBytes(state.modelStorageBytes)}. Copies left behind by an " +
+                                "interrupted import can be removed safely.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(onClick = onReclaimStorage) { Text("Remove unreferenced copies") }
+                    }
+                }
+            }
+        }
+        state.selectedLocalModel?.let { model ->
+            item {
+                AcceleratorValidationCard(
+                    state = state,
+                    onValidate = { chosen -> onValidateAccelerator(model.id.value, chosen) },
+                    onBisect = { chosen -> onBisectAccelerator(model.id.value, chosen) },
+                )
+            }
+        }
         state.error?.let { error -> item { ErrorCard(error) } }
         item {
             Text(
-                "GPU, Hexagon NPU, LiteRT, downloads, and storage-assisted oversized models remain intentionally disabled in this CPU baseline.",
+                "Hexagon NPU, LiteRT, downloads, and storage-assisted oversized models remain intentionally disabled in this baseline.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+@Composable
+private fun AcceleratorValidationCard(
+    state: AppUiState,
+    onValidate: (AcceleratorTarget) -> Unit,
+    onBisect: (AcceleratorTarget) -> Unit,
+) {
+    var target by rememberSaveable { mutableStateOf(AcceleratorTarget.VULKAN) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Accelerator validation", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Records a deterministic CPU reference, then feeds the same tokens to the accelerator " +
+                    "and compares each next-token prediction. Teacher forcing keeps one difference " +
+                    "from cascading, so the score reflects compute accuracy rather than drift.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AcceleratorTarget.entries.forEach { option ->
+                    FilterChip(
+                        selected = target == option,
+                        onClick = { target = option },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+            val busy = state.isValidatingAccelerator || state.isLoadingModel || state.isGenerating
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { onValidate(target) }, enabled = !busy) {
+                    if (state.isValidatingAccelerator) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(if (state.isValidatingAccelerator) "Working…" else "Compare GPU against CPU")
+                }
+                OutlinedButton(onClick = { onBisect(target) }, enabled = !busy) { Text("Bisect layers") }
+            }
+            state.status?.takeIf { state.isValidatingAccelerator }?.let { status ->
+                Text(status, style = MaterialTheme.typography.bodySmall)
+            }
+            state.acceleratorBisection?.let { bisection ->
+                HorizontalDivider()
+                Text("Layer bisection", fontWeight = FontWeight.SemiBold)
+                Text(bisection.detail, style = MaterialTheme.typography.bodySmall)
+                bisection.probes.forEach { probe ->
+                    Text(
+                        "${if (probe.usable) "AGREES" else "DIFFERS"} · ${probe.gpuLayers} layers · " +
+                            "%.0f%% · ".format(probe.agreement * 100) + "${probe.millis} ms",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (probe.usable) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                    )
+                }
+            }
+            state.acceleratorReport?.let { report ->
+                HorizontalDivider()
+                Text(
+                    if (report.matchesCpu) "Validated: output matches CPU" else "Not validated: output diverged",
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (report.matchesCpu) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                )
+                Text(report.detail, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "CPU ${report.cpuMillis} ms · ${report.deviceName} ${report.acceleratorMillis} ms" +
+                        if (report.speedup > 0) " · %.2f× ".format(report.speedup) + "vs CPU" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!report.matchesCpu) {
+                    Text(
+                        "CPU: ${report.cpuText.take(120)}\nGPU: ${report.acceleratorText.take(120)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
 }

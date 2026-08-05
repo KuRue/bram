@@ -25,8 +25,13 @@ struct runtime_state {
     int context_tokens = 0;
     int batch_tokens = 0;
     int threads = 0;
+    int gpu_layers = 0;
     std::string model_path;
 };
+
+// Fixed prompt for the cross-backend correctness comparison. Changing it invalidates every
+// recorded CPU reference, so treat it as part of the validation contract.
+constexpr const char * kReferencePrompt = "List the first five prime numbers in order.";
 
 runtime_state g_state;
 std::mutex g_mutex;
@@ -319,7 +324,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_probe(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
-    JNIEnv * env, jobject, jstring path, jint context_tokens, jint batch_tokens, jint threads) {
+    JNIEnv * env, jobject, jstring path, jint context_tokens, jint batch_tokens, jint threads,
+    jint gpu_layers, jstring device_filter) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         ensure_backend();
@@ -327,11 +333,38 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_cancelled.store(false, std::memory_order_relaxed);
         const std::string model_path = from_jstring(env, path);
         llama_model_params params = llama_model_default_params();
-        params.n_gpu_layers = 0;
+        params.n_gpu_layers = gpu_layers;
+
+        // Without an explicit list llama.cpp offloads to whichever accelerator it considers best,
+        // which makes "validate the NPU" ambiguous on a device that also exposes a GPU. When a
+        // filter is supplied, restrict offload to devices whose name matches it. The vector must
+        // outlive the load call because llama_model_params only borrows the pointer.
+        const std::string filter = device_filter == nullptr ? std::string() : from_jstring(env, device_filter);
+        std::vector<ggml_backend_dev_t> selected;
+        if (!filter.empty()) {
+            const size_t count = ggml_backend_dev_count();
+            for (size_t index = 0; index < count; ++index) {
+                ggml_backend_dev_t device = ggml_backend_dev_get(index);
+                if (device == nullptr) continue;
+                const char * name = ggml_backend_dev_name(device);
+                if (name != nullptr && std::string(name).rfind(filter, 0) == 0) {
+                    selected.push_back(device);
+                }
+            }
+            if (selected.empty()) {
+                throw std::runtime_error("No backend device matches '" + filter + "' on this build");
+            }
+            selected.push_back(nullptr);  // llama.cpp expects a null-terminated list
+            params.devices = selected.data();
+        }
         params.load_mode = LLAMA_LOAD_MODE_MMAP;
         params.vocab_only = false;
         params.check_tensors = false;
         drain_recent_log();
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_load: requesting n_gpu_layers=%d device_filter='%s' matched=%d",
+            static_cast<int>(gpu_layers), filter.c_str(),
+            selected.empty() ? 0 : static_cast<int>(selected.size() - 1));
         g_state.model = llama_model_load_from_file(model_path.c_str(), params);
         if (g_state.model == nullptr) {
             std::string detail = drain_recent_log();
@@ -344,6 +377,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.context_tokens = context_tokens;
         g_state.batch_tokens = batch_tokens;
         g_state.threads = threads;
+        g_state.gpu_layers = gpu_layers;
         g_state.model_path = model_path;
 
         char description[512] = {};
@@ -358,7 +392,9 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
                << ",\"parameterCount\":" << llama_model_n_params(g_state.model)
                << ",\"tensorBytes\":" << llama_model_size(g_state.model)
                << ",\"contextTokens\":" << g_state.context_tokens
-               << ",\"threads\":" << g_state.threads << "}";
+               << ",\"threads\":" << g_state.threads
+               << ",\"requestedGpuLayers\":" << g_state.gpu_layers
+               << ",\"offloadedToGpu\":" << (g_state.gpu_layers > 0 ? "true" : "false") << "}";
         return result.str();
     });
 }
@@ -494,6 +530,146 @@ extern "C" JNIEXPORT void JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_cancel(
     JNIEnv *, jobject) {
     g_cancelled.store(true, std::memory_order_relaxed);
+}
+
+// Enumerates the ggml backend devices this build can actually see, so accelerator capability is
+// reported from the runtime rather than from Android feature flags alone.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_devices(
+    JNIEnv * env, jobject) {
+    return guarded_string(env, [] {
+        ensure_backend();
+        std::ostringstream result;
+        result << "{\"devices\":[";
+        const size_t count = ggml_backend_dev_count();
+        bool first = true;
+        bool vulkan_present = false;
+        for (size_t index = 0; index < count; ++index) {
+            ggml_backend_dev_t device = ggml_backend_dev_get(index);
+            if (device == nullptr) continue;
+            const char * name = ggml_backend_dev_name(device);
+            const char * description = ggml_backend_dev_description(device);
+            const int type = static_cast<int>(ggml_backend_dev_type(device));
+            size_t free_bytes = 0;
+            size_t total_bytes = 0;
+            ggml_backend_dev_memory(device, &free_bytes, &total_bytes);
+            const std::string device_name = name == nullptr ? "" : name;
+            if (device_name.rfind("Vulkan", 0) == 0) vulkan_present = true;
+            if (!first) result << ",";
+            first = false;
+            result << "{\"name\":\"" << json_escape(device_name) << "\""
+                   << ",\"description\":\"" << json_escape(description == nullptr ? "" : description) << "\""
+                   << ",\"type\":" << type
+                   << ",\"freeBytes\":" << static_cast<uint64_t>(free_bytes)
+                   << ",\"totalBytes\":" << static_cast<uint64_t>(total_bytes) << "}";
+        }
+        result << "],\"vulkanAvailable\":" << (vulkan_present ? "true" : "false") << "}";
+        return result.str();
+    });
+}
+
+// Deterministic greedy decode over a fixed prompt. Milestone 2 records this sequence once on CPU
+// and then requires the accelerator to reproduce it exactly before its capability is validated.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_referenceDecode(
+    JNIEnv * env, jobject, jint token_count) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_state.model == nullptr) throw std::runtime_error("Load a model before running the reference decode");
+        g_cancelled.store(false, std::memory_order_relaxed);
+        const int wanted = std::max(1, std::min(static_cast<int>(token_count), 64));
+        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true);
+        const auto tokens = tokenize(prompt);
+        if (tokens.empty()) throw std::runtime_error("Reference decode tokenizer returned no tokens");
+        llama_context * context = create_context();
+        const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);
+        decode_prompt(context, tokens);
+        llama_sampler * sampler = llama_sampler_init_greedy();
+        const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
+        const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
+
+        std::ostringstream ids;
+        std::string text;
+        ids << "[";
+        for (int index = 0; index < wanted; ++index) {
+            const llama_token token = llama_sampler_sample(sampler, context, -1);
+            if (index > 0) ids << ",";
+            ids << token;
+            if (llama_vocab_is_eog(vocab, token)) break;
+            text += token_piece(vocab, token);
+            llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(&token), 1);
+            if (llama_decode(context, batch) != 0) {
+                throw std::runtime_error("Reference decode failed while advancing the context");
+            }
+        }
+        ids << "]";
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_reference: gpu_layers=%d tokens=%s text=\"%s\"",
+            g_state.gpu_layers, ids.str().c_str(), text.c_str());
+        std::ostringstream result;
+        result << "{\"tokens\":" << ids.str()
+               << ",\"text\":\"" << json_escape(text) << "\""
+               << ",\"promptTokens\":" << tokens.size()
+               << ",\"gpuLayers\":" << g_state.gpu_layers << "}";
+        return result.str();
+    });
+}
+
+// Teacher-forced agreement check. Both backends are fed the identical token sequence and asked
+// only for the next-token prediction at each position, so a numerical difference cannot compound
+// into unrelated text the way free-running generation does. This isolates "does the accelerator
+// compute the same thing" from "did one early token send generation somewhere else".
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherForced(
+    JNIEnv * env, jobject, jintArray forced_tokens) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_state.model == nullptr) throw std::runtime_error("Load a model before the agreement check");
+        g_cancelled.store(false, std::memory_order_relaxed);
+
+        std::vector<llama_token> forced;
+        if (forced_tokens != nullptr) {
+            const jsize length = env->GetArrayLength(forced_tokens);
+            forced.resize(static_cast<size_t>(length));
+            if (length > 0) {
+                env->GetIntArrayRegion(forced_tokens, 0, length, reinterpret_cast<jint *>(forced.data()));
+            }
+        }
+
+        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true);
+        auto tokens = tokenize(prompt);
+        if (tokens.empty()) throw std::runtime_error("Agreement check tokenizer returned no tokens");
+
+        llama_context * context = create_context();
+        const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);
+        decode_prompt(context, tokens);
+        llama_sampler * sampler = llama_sampler_init_greedy();
+        const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
+
+        // With no forced sequence this behaves as a plain greedy run and produces the reference.
+        const size_t steps = forced.empty() ? 24 : forced.size();
+        std::ostringstream predictions;
+        predictions << "[";
+        for (size_t index = 0; index < steps; ++index) {
+            const llama_token predicted = llama_sampler_sample(sampler, context, -1);
+            if (index > 0) predictions << ",";
+            predictions << predicted;
+            // Advance with the reference token when teacher forcing, otherwise with our own.
+            const llama_token advance = forced.empty() ? predicted : forced[index];
+            llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(&advance), 1);
+            if (llama_decode(context, batch) != 0) {
+                throw std::runtime_error("Agreement check failed while advancing the context");
+            }
+        }
+        predictions << "]";
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_teacher_forced: gpu_layers=%d predictions=%s",
+            g_state.gpu_layers, predictions.str().c_str());
+        std::ostringstream result;
+        result << "{\"predictions\":" << predictions.str()
+               << ",\"gpuLayers\":" << g_state.gpu_layers << "}";
+        return result.str();
+    });
 }
 
 extern "C" JNIEXPORT jstring JNICALL

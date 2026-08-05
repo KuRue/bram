@@ -7,7 +7,17 @@ internal fun interface NativeTokenSink {
 /** Loaded only by [InferenceProcessService] inside the `:inference` process. */
 internal class NativeLlamaBridge {
     external fun probe(): String
-    external fun load(modelPath: String, contextTokens: Int, batchTokens: Int, threads: Int): String
+    external fun devices(): String
+    external fun load(
+        modelPath: String,
+        contextTokens: Int,
+        batchTokens: Int,
+        threads: Int,
+        gpuLayers: Int,
+        deviceFilter: String,
+    ): String
+    external fun referenceDecode(tokenCount: Int): String
+    external fun teacherForced(forcedTokens: IntArray): String
     external fun formatChat(roles: Array<String>, contents: Array<String>, addAssistant: Boolean): String
     external fun countTokens(prompt: String): Int
     external fun generate(

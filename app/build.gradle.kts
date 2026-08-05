@@ -24,8 +24,36 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // Gradle otherwise signs debug builds with whichever debug keystore the build host generated,
+    // so an APK from CI, from Windows, and from WSL each carry a different signature and cannot be
+    // installed over one another without an uninstall that clears imported models. Point
+    // BRAM_DEBUG_KEYSTORE at a keystore shared between hosts to make debug installs interchangeable.
+    // Keystores stay out of version control by policy, see .gitignore.
+    val debugKeystore = providers.environmentVariable("BRAM_DEBUG_KEYSTORE").orNull
+        ?: providers.gradleProperty("bram.debugKeystore").orNull
+    if (!debugKeystore.isNullOrBlank() && file(debugKeystore).exists()) {
+        signingConfigs {
+            getByName("debug") {
+                storeFile = file(debugKeystore)
+                storePassword = providers.environmentVariable("BRAM_DEBUG_KEYSTORE_PASSWORD")
+                    .orNull ?: "android"
+                keyAlias = providers.environmentVariable("BRAM_DEBUG_KEY_ALIAS")
+                    .orNull ?: "androiddebugkey"
+                keyPassword = providers.environmentVariable("BRAM_DEBUG_KEY_PASSWORD")
+                    .orNull ?: "android"
+            }
+        }
+    }
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        jniLibs {
+            // The Hexagon HTP skels are QUALCOMM DSP6 binaries, not ARM64, so the ARM strip tool
+            // cannot process them. They also have to exist as real files on disk because the NPU
+            // loader resolves them through ADSP_LIBRARY_PATH rather than the APK.
+            keepDebugSymbols += "**/libggml-htp-*.so"
+            useLegacyPackaging = true
+        }
     }
 }
 
