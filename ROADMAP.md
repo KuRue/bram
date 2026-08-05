@@ -1,6 +1,6 @@
 # Roadmap
 
-## Milestone 0 — reproducible build baseline
+## Milestone 0 — reproducible build baseline (complete)
 
 - Clean-room GitHub Actions build with JDK 17 and Android SDK 36.
 - JVM tests, Android lint, and debug APK assembly as one required verification command.
@@ -10,7 +10,10 @@
 
 Exit criterion: green CI plus a successful install and launch of its debug APK on the S25 Ultra.
 
-## Phase 1 — runnable control plane (this scaffold)
+Result: complete. PR #1 was squash-merged into `main`; its CI-built APK installed and launched on
+the S25 Ultra.
+
+## Foundation — runnable control plane (complete)
 
 - Device profiler and execution-plan data model.
 - Context budgeter and tool-loop orchestration.
@@ -18,7 +21,7 @@ Exit criterion: green CI plus a successful install and launch of its debug APK o
 - Native inference process contract.
 - Versioned Bram default identity, independent of model runtime.
 
-## Milestone 1 — local CPU alpha (in progress)
+## Milestone 1 — local CPU alpha (device validation pending)
 
 - Vendor a pinned llama.cpp revision and record its license/build fingerprint.
 - Model-first Chat/Models UI; remote endpoints move under Settings.
@@ -30,7 +33,12 @@ Exit criterion: green CI plus a successful install and launch of its debug APK o
 
 Exit criterion: install, load, chat, cancel, unload, and recover from a killed inference process on the S25 Ultra.
 
-## Phase 3 — hardware planner
+Implementation result: the full Android/Compose/NDK build, tests, lint, and APK assembly pass in
+CI. The remaining work is the physical-device acceptance test in
+[the current handoff](docs/HANDOFF.md). Keep PR #2 in draft until that test passes or the user
+explicitly decides to merge with a known limitation.
+
+## Milestone 2 — accelerator validation and hardware planner
 
 - Native Vulkan/OpenCL/Hexagon probes with tiny correctness tests.
 - CPU/Adreno/Hexagon candidate plans and automatic probation runs.
@@ -40,7 +48,7 @@ Exit criterion: install, load, chat, cancel, unload, and recover from a killed i
 
 Exit criterion: cached safe plan selection plus automatic fallback across a small Snapdragon, Tensor, and MediaTek device matrix.
 
-## Phase 4 — durable agent
+## Milestone 3 — durable agent
 
 - Room-backed conversations, run journal, memory provenance, and FTS retrieval.
 - Optional embeddings/vector index selected per device.
@@ -48,7 +56,7 @@ Exit criterion: cached safe plan selection plus automatic fallback across a smal
 - Versioned skill packages with validation, drafts, activation, and rollback.
 - WorkManager automation execution and result notifications.
 
-## Phase 5 — curated acceleration and routing
+## Milestone 4 — curated runtimes and routing
 
 - LiteRT-LM packages and device-specific compiled caches.
 - OpenAI Responses adapter where supported.

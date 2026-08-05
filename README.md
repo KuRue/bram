@@ -4,10 +4,11 @@ Bram is an Android-first local AI runtime and agent harness. Its goal is to make
 
 The model is only one component. Bram is designed from the start for tool use, durable memory, versioned skills, scheduled work, and optional OpenAI-compatible remote models.
 
-> **Status: local CPU alpha in development.** The model-first UI, verified GGUF catalog, and
-> isolated llama.cpp CPU path are implemented. CI and S25 Ultra
-> validation are still required before this path is called working. Accelerator and autonomous
-> agent capabilities remain staged work.
+> **Status: local CPU alpha awaiting device validation.** The model-first UI, verified GGUF
+> catalog, and isolated llama.cpp CPU path are implemented. The full Android/Compose/NDK build,
+> tests, lint, and APK assembly pass in CI. Local generation still needs to be validated on the
+> target S25 Ultra before this path is called working. Accelerator and autonomous agent
+> capabilities remain staged work.
 
 ## What makes Bram different
 
@@ -38,7 +39,7 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 | Read-only `device_status` phone tool | Working |
 | Hardware execution-plan generation | Working |
 | Separate `:inference` process and AIDL protocol | Implemented |
-| Pinned ARM64 llama.cpp CPU generation | Implemented; CI/device validation pending |
+| Pinned ARM64 llama.cpp CPU generation | Builds and packages in CI; device validation pending |
 | Chat-template application, exact token counts, streaming, cancel, unload | Implemented; validation pending |
 | Hexagon, Adreno, Vulkan, and LiteRT native self-tests | Not implemented yet |
 | Durable conversations, memory, skills, and automations | Interfaces only |
@@ -54,7 +55,9 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 | `runtime:openai` | OpenAI-compatible Chat Completions adapter |
 | `runtime:llamacpp` | GGUF catalog, AIDL process, llama.cpp/JNI CPU runtime |
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and [ROADMAP.md](ROADMAP.md) for the staged implementation plan.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for design details, [ROADMAP.md](ROADMAP.md) for the staged
+implementation plan, and the [current session handoff](docs/HANDOFF.md) for the exact branch,
+validation state, and next action.
 
 ## Build
 
