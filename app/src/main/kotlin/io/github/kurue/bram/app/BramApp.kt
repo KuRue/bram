@@ -126,6 +126,7 @@ fun BramApp(viewModel: MainViewModel) {
                     onValidateAccelerator = viewModel::validateAccelerator,
                     onBisectAccelerator = viewModel::bisectAccelerator,
                     onReclaimStorage = viewModel::reclaimModelStorage,
+                    onSelectBackend = viewModel::selectBackend,
                 )
                 AppSection.SETTINGS -> SettingsScreen(
                     state = state,
@@ -175,7 +176,7 @@ private fun ChatScreen(
                     Column(Modifier.weight(1f)) {
                         Text("${model.displayName} is selected", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Load it in the isolated CPU process before chatting.",
+                            "Load it in the isolated inference process before chatting.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -286,6 +287,11 @@ private fun RuntimeSelector(
                         buildString {
                             if (model.id.value == state.loadedModelId) append("● ")
                             append(model.displayName)
+                            // Name the backend on the loaded model so it is never ambiguous which
+                            // processor is answering.
+                            if (model.id.value == state.loadedModelId) {
+                                state.loadedBackend?.let { backend -> append(" · ${backend.label}") }
+                            }
                         },
                         maxLines = 1,
                     )
@@ -315,6 +321,7 @@ private fun ModelsScreen(
     onValidateAccelerator: (String, AcceleratorTarget) -> Unit,
     onBisectAccelerator: (String, AcceleratorTarget) -> Unit,
     onReclaimStorage: () -> Unit,
+    onSelectBackend: (RuntimeBackend) -> Unit,
 ) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -364,6 +371,9 @@ private fun ModelsScreen(
                 loaded = state.loadedModelId == model.id.value && state.cpuValidated,
                 loading = state.isLoadingModel && state.selectedRuntimeId == model.id.value,
                 generationActive = state.isGenerating,
+                availableBackends = state.availableBackends,
+                selectedBackend = state.selectedBackend,
+                onSelectBackend = onSelectBackend,
                 onSelect = { onSelect(model.id.value) },
                 onLoad = { onLoad(model.id.value) },
                 onUnload = onUnload,
@@ -469,7 +479,11 @@ private fun AcceleratorValidationCard(
             state.acceleratorReport?.let { report ->
                 HorizontalDivider()
                 Text(
-                    if (report.matchesCpu) "Validated: output matches CPU" else "Not validated: output diverged",
+                    if (report.matchesCpu) {
+                        "Validated · %.0f%% agreement".format(report.agreement * 100)
+                    } else {
+                        "Not validated · %.0f%% agreement".format(report.agreement * 100)
+                    },
                     fontWeight = FontWeight.SemiBold,
                     color = if (report.matchesCpu) {
                         MaterialTheme.colorScheme.primary
@@ -503,6 +517,9 @@ private fun LocalModelCard(
     loaded: Boolean,
     loading: Boolean,
     generationActive: Boolean,
+    availableBackends: List<RuntimeBackend>,
+    selectedBackend: RuntimeBackend,
+    onSelectBackend: (RuntimeBackend) -> Unit,
     onSelect: () -> Unit,
     onLoad: () -> Unit,
     onUnload: () -> Unit,
@@ -542,6 +559,23 @@ private fun LocalModelCard(
                     )
                 }
             }
+            if (availableBackends.size > 1) {
+                Text(
+                    "Run on",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    availableBackends.forEach { backend ->
+                        FilterChip(
+                            selected = selectedBackend == backend,
+                            onClick = { onSelectBackend(backend) },
+                            enabled = !loaded && !loading && !generationActive,
+                            label = { Text(backend.label) },
+                        )
+                    }
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!selected) OutlinedButton(onClick = onSelect) { Text("Select") }
                 if (loaded) {
@@ -552,7 +586,7 @@ private fun LocalModelCard(
                         enabled = !loading && !generationActive && model.hasChatTemplate,
                     ) {
                         if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        else Text("Load on CPU")
+                        else Text("Load on ${selectedBackend.label}")
                     }
                 }
                 TextButton(onClick = onRemove, enabled = !loaded && !loading && !generationActive) { Text("Remove") }
