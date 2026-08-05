@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,7 +25,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -33,14 +33,16 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +51,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -81,6 +84,10 @@ fun BramApp(viewModel: MainViewModel) {
     Scaffold(
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha),
+                    scrolledContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha),
+                ),
                 title = {
                     Column {
                         Text(BramDefaults.IDENTITY.displayName, fontWeight = FontWeight.SemiBold)
@@ -98,13 +105,21 @@ fun BramApp(viewModel: MainViewModel) {
             )
         },
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha),
+                tonalElevation = 0.dp,
+            ) {
                 AppSection.entries.forEach { item ->
                     NavigationBarItem(
                         selected = section == item,
                         onClick = { section = item },
                         icon = { Text(item.glyph) },
                         label = { Text(item.label) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                        ),
                     )
                 }
             }
@@ -180,7 +195,7 @@ private fun ChatScreen(
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
         if (!hasAnyRuntime) {
-            Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+            GlassSurface(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Run Bram locally", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text("Import a GGUF model from your phone. No endpoint or account is required.")
@@ -204,7 +219,10 @@ private fun ChatScreen(
         }
 
         state.selectedLocalModel?.takeIf { !state.selectedLocalModelIsLoaded }?.let { model ->
-            Card(Modifier.fillMaxWidth()) {
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(Glass.cornerMedium),
+            ) {
                 Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("${model.displayName} is not loaded", fontWeight = FontWeight.SemiBold)
@@ -284,33 +302,44 @@ private fun ChatScreen(
             )
         }
 
-        Row(
-            Modifier.fillMaxWidth().padding(bottom = 10.dp),
-            verticalAlignment = Alignment.Bottom,
+        GlassSurface(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+            shape = RoundedCornerShape(Glass.cornerLarge),
+            alpha = Glass.chromeAlpha,
         ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                modifier = Modifier.weight(1f),
-                label = { Text("Message Bram") },
-                minLines = 1,
-                maxLines = 5,
-                enabled = !state.isGenerating,
-            )
-            Spacer(Modifier.width(8.dp))
-            if (state.isGenerating) {
-                OutlinedButton(onClick = onStop, modifier = Modifier.height(56.dp)) { Text("Stop") }
-            } else {
-                Button(
-                    onClick = {
-                        onSend(input)
-                        input = ""
-                    },
-                    enabled = input.isNotBlank() && (
-                        state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
+            Row(
+                Modifier.fillMaxWidth().padding(6.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Message Bram") },
+                    minLines = 1,
+                    maxLines = 5,
+                    enabled = !state.isGenerating,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        disabledBorderColor = Color.Transparent,
                     ),
-                    modifier = Modifier.height(56.dp),
-                ) { Text("Send") }
+                )
+                Spacer(Modifier.width(4.dp))
+                if (state.isGenerating) {
+                    OutlinedButton(onClick = onStop, modifier = Modifier.height(56.dp)) { Text("Stop") }
+                } else {
+                    Button(
+                        onClick = {
+                            onSend(input)
+                            input = ""
+                        },
+                        enabled = input.isNotBlank() && (
+                            state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
+                        ),
+                        modifier = Modifier.height(56.dp),
+                    ) { Text("Send") }
+                }
             }
         }
     }
@@ -379,7 +408,10 @@ private fun RuntimeSelector(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 state.conversations.forEach { summary ->
-                    Card(Modifier.fillMaxWidth()) {
+                    GlassSurface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(Glass.cornerMedium),
+                    ) {
                         Row(
                             Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -458,7 +490,10 @@ private fun RuntimeOption(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        shape = RoundedCornerShape(Glass.cornerMedium),
+    ) {
         Row(
             Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -507,7 +542,7 @@ private fun ModelsScreen(
         }
         if (state.isImporting) {
             item {
-                Card(Modifier.fillMaxWidth()) {
+                GlassSurface(Modifier.fillMaxWidth()) {
                     Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(12.dp))
@@ -526,7 +561,7 @@ private fun ModelsScreen(
         }
         if (state.localModels.isEmpty() && !state.isImporting) {
             item {
-                Card(Modifier.fillMaxWidth()) {
+                GlassSurface(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("No local models yet", fontWeight = FontWeight.SemiBold)
                         Text(
@@ -563,7 +598,7 @@ private fun ModelsScreen(
         state.modelLoadDetail?.let { detail -> item { InfoCard("Active runtime", detail) } }
         if (state.modelStorageBytes > 0) {
             item {
-                Card(Modifier.fillMaxWidth()) {
+                GlassSurface(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Model storage", fontWeight = FontWeight.SemiBold)
                         Text(
@@ -612,7 +647,7 @@ private fun AcceleratorValidationCard(
         }
     }
     var target by rememberSaveable { mutableStateOf(targets.firstOrNull() ?: AcceleratorTarget.VULKAN) }
-    Card(Modifier.fillMaxWidth()) {
+    GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Accelerator validation", fontWeight = FontWeight.SemiBold)
             Text(
@@ -733,7 +768,7 @@ private fun LocalModelCard(
     onThinking: (Boolean) -> Unit,
 ) {
     val locked = loaded || loading || generationActive
-    Card(Modifier.fillMaxWidth()) {
+    GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             // Collapsed header: identity and status only. Everything else is opt-in, so a phone
             // with several models does not present a wall of chips.
@@ -956,7 +991,7 @@ private fun SettingsScreen(
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
         SectionHeader("Agent foundation", "Kept behind the local model experience")
-        Card(Modifier.fillMaxWidth()) {
+        GlassSurface(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ReadinessRow("Context budgeting", "Working")
                 ReadinessRow("Remote tool loop", "Working")
@@ -989,63 +1024,86 @@ private fun ChatBubble(
     val isUser = message.role == MessageRole.USER
     var editing by rememberSaveable(message.id.value) { mutableStateOf(false) }
     var draft by rememberSaveable(message.id.value) { mutableStateOf(message.content) }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
-        Surface(
-            color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
-            shape = MaterialTheme.shapes.large,
-            modifier = Modifier.fillMaxWidth(if (isUser) 0.86f else 0.94f),
-        ) {
-            Column(Modifier.padding(12.dp)) {
-                Text(
-                    when (message.role) {
-                        MessageRole.USER -> "You"
-                        MessageRole.ASSISTANT -> BramDefaults.IDENTITY.displayName
-                        MessageRole.TOOL -> "Tool"
-                        MessageRole.SYSTEM -> "System"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                message.activity.forEach { entry -> ActivityRow(entry) }
-                if (editing) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 1,
-                        maxLines = 6,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = {
-                            editing = false
-                            onEdit(draft)
-                        }) { Text("Send") }
-                        TextButton(onClick = {
-                            editing = false
-                            draft = message.content
-                        }) { Text("Cancel") }
-                    }
-                } else if (message.content.isNotBlank() || message.activity.isEmpty()) {
-                    // Models answer in Markdown whether or not anyone asked them to, so rendering
-                    // it is closer to showing the reply than showing the raw characters is.
-                    Text(renderMarkdown(message.content.ifBlank { "…" }))
-                }
 
-                if (canAct && !editing && message.content.isNotBlank()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { onCopy(message.content) }) { Text("Copy") }
-                        if (isUser) {
-                            TextButton(onClick = {
-                                draft = message.content
-                                editing = true
-                            }) { Text("Edit") }
-                        } else {
-                            TextButton(onClick = onRegenerate) { Text("Retry") }
-                        }
+    // Assistant replies run the full width with only a small label above them: they are long, often
+    // contain code, and a tinted container around several paragraphs makes them harder to read, not
+    // easier. Only the user's own turns are enclosed, which is what marks the alternation.
+    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            if (isUser) "You" else BramDefaults.IDENTITY.displayName,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (isUser) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
+            modifier = Modifier.padding(start = 2.dp, bottom = 4.dp),
+        )
+
+        if (isUser) {
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(Glass.cornerMedium),
+                alpha = Glass.BUBBLE_ALPHA,
+                tint = MaterialTheme.colorScheme.primaryContainer,
+            ) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    MessageBody(message, editing, draft, { draft = it }) {
+                        editing = false
+                        onEdit(draft)
                     }
                 }
             }
+        } else {
+            MessageBody(message, editing, draft, { draft = it }) {
+                editing = false
+                onEdit(draft)
+            }
         }
+
+        if (canAct && !editing && message.content.isNotBlank()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                TextButton(onClick = { onCopy(message.content) }) { Text("Copy") }
+                if (isUser) {
+                    TextButton(onClick = {
+                        draft = message.content
+                        editing = true
+                    }) { Text("Edit") }
+                } else {
+                    TextButton(onClick = onRegenerate) { Text("Retry") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageBody(
+    message: ConversationMessage,
+    editing: Boolean,
+    draft: String,
+    onDraftChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+) {
+    message.activity.forEach { entry -> ActivityRow(entry) }
+    if (editing) {
+        OutlinedTextField(
+            value = draft,
+            onValueChange = onDraftChange,
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 1,
+            maxLines = 6,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onSubmit) { Text("Send") }
+        }
+    } else if (message.content.isNotBlank() || message.activity.isEmpty()) {
+        // Models answer in Markdown whether or not anyone asked them to, so rendering it is closer
+        // to showing the reply than showing the raw characters is.
+        Text(
+            renderMarkdown(message.content.ifBlank { "…" }),
+            style = MaterialTheme.typography.bodyLarge,
+        )
     }
 }
 
@@ -1094,16 +1152,16 @@ private fun ActivityRow(entry: AgentActivity) {
             }
         }
         if (expanded && detail.isNotBlank()) {
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerLowest,
-                shape = MaterialTheme.shapes.small,
+            GlassSurface(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                shape = RoundedCornerShape(Glass.cornerMedium),
+                alpha = Glass.DETAIL_ALPHA,
             ) {
                 Text(
                     detail,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(8.dp),
+                    modifier = Modifier.padding(10.dp),
                 )
             }
         }
@@ -1112,7 +1170,7 @@ private fun ActivityRow(entry: AgentActivity) {
 
 @Composable
 private fun DeviceSummaryCard(profile: DeviceProfile) {
-    Card(Modifier.fillMaxWidth()) {
+    GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Text("${profile.manufacturer} ${profile.model}", style = MaterialTheme.typography.titleMedium)
             Text(profile.soc, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1127,7 +1185,10 @@ private fun DeviceSummaryCard(profile: DeviceProfile) {
 
 @Composable
 private fun AcceleratorRow(capability: AcceleratorCapability) {
-    Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Glass.cornerMedium),
+    ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
             val marker = when (capability.state) {
                 CapabilityState.AVAILABLE -> "✓"
@@ -1146,7 +1207,7 @@ private fun AcceleratorRow(capability: AcceleratorCapability) {
 
 @Composable
 private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
+    GlassSurface(Modifier.fillMaxWidth()) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(endpoint.displayName, fontWeight = FontWeight.SemiBold)
@@ -1164,7 +1225,7 @@ private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
 
 @Composable
 private fun InfoCard(title: String, detail: String) {
-    Card(Modifier.fillMaxWidth()) {
+    GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp)) {
             Text(title, fontWeight = FontWeight.SemiBold)
             Text(detail, style = MaterialTheme.typography.bodySmall)
@@ -1174,7 +1235,11 @@ private fun InfoCard(title: String, detail: String) {
 
 @Composable
 private fun ErrorCard(error: String) {
-    Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Glass.cornerMedium),
+        tint = MaterialTheme.colorScheme.errorContainer,
+    ) {
         Text(error, modifier = Modifier.padding(12.dp), color = MaterialTheme.colorScheme.onErrorContainer)
     }
 }
