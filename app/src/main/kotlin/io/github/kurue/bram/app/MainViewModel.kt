@@ -722,8 +722,36 @@ class MainViewModel(
 
     fun send(text: String) {
         val prompt = text.trim()
+        if (prompt.isEmpty()) return
+        val priorMessages = mutableState.value.messages
+        runTurn(priorMessages + ConversationMessage(role = MessageRole.USER, content = prompt))
+    }
+
+    /**
+     * Discards the last reply and asks again from the same point. Useful when a small model wanders
+     * or stops early, which is common enough on a phone that retrying should not mean retyping.
+     */
+    fun regenerateLastReply() {
+        val messages = mutableState.value.messages
+        val lastUser = messages.indexOfLast { it.role == MessageRole.USER }
+        if (lastUser < 0) return
+        runTurn(messages.take(lastUser + 1))
+    }
+
+    /** Rewrites a message and continues from there, dropping everything that followed it. */
+    fun editAndResend(messageId: String, text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        val messages = mutableState.value.messages
+        val index = messages.indexOfFirst { it.id.value == messageId }
+        if (index < 0) return
+        val rewritten = messages[index].copy(content = trimmed)
+        runTurn(messages.take(index) + rewritten)
+    }
+
+    private fun runTurn(requestMessages: List<ConversationMessage>) {
         val snapshot = mutableState.value
-        if (prompt.isEmpty() || snapshot.isGenerating) return
+        if (snapshot.isGenerating) return
 
         val selection = selectedRuntime(snapshot)
         if (selection == null) {
@@ -734,10 +762,7 @@ class MainViewModel(
             mutableState.update { it.copy(error = "Load ${selection.localModel.displayName} before chatting.") }
             return
         }
-
-        val priorMessages = snapshot.messages
-        val userMessage = ConversationMessage(role = MessageRole.USER, content = prompt)
-        val requestMessages = priorMessages + userMessage
+        val prompt = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
         mutableState.update {
             it.copy(
                 messages = requestMessages,
