@@ -101,6 +101,12 @@ enum class RuntimeBackend(val label: String, val devicePrefix: String) {
     ;
 
     val offloadsToAccelerator: Boolean get() = this != CPU
+
+    companion object {
+        /** Persisted as the enum name; anything unrecognised falls back to CPU. */
+        fun fromId(id: String?): RuntimeBackend =
+            entries.firstOrNull { it.name == id } ?: CPU
+    }
 }
 
 data class AppUiState(
@@ -123,8 +129,6 @@ data class AppUiState(
     val modelStorageBytes: Long = 0,
     /** Backends this build found on the device, CPU always included. */
     val availableBackends: List<RuntimeBackend> = listOf(RuntimeBackend.CPU),
-    /** What the next load will use. */
-    val selectedBackend: RuntimeBackend = RuntimeBackend.CPU,
     /** What the currently loaded model is actually running on. */
     val loadedBackend: RuntimeBackend? = null,
     val isValidatingAccelerator: Boolean = false,
@@ -139,6 +143,11 @@ data class AppUiState(
 
     val selectedLocalModelIsLoaded: Boolean
         get() = selectedLocalModel?.id?.value == loadedModelId && cpuValidated
+
+    /** The backend a given model will load onto, falling back to CPU when unavailable. */
+    fun backendFor(model: LocalModelRecord): RuntimeBackend =
+        RuntimeBackend.fromId(model.preferredBackendId).takeIf { it in availableBackends }
+            ?: RuntimeBackend.CPU
 }
 
 data class EndpointDraft(
@@ -190,11 +199,7 @@ class MainViewModel(
                 }
             }.getOrDefault(listOf(RuntimeBackend.CPU))
             mutableState.update { current ->
-                current.copy(
-                    availableBackends = detected,
-                    selectedBackend = current.selectedBackend.takeIf { it in detected }
-                        ?: RuntimeBackend.CPU,
-                )
+                current.copy(availableBackends = detected)
             }
         }
     }
@@ -285,14 +290,21 @@ class MainViewModel(
         }
     }
 
-    fun selectBackend(backend: RuntimeBackend) {
-        mutableState.update { it.copy(selectedBackend = backend, error = null) }
+    fun selectBackend(modelId: String, backend: RuntimeBackend) {
+        viewModelScope.launch {
+            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
+            container.localModelStore.updatePreferredBackend(
+                io.github.kurue.bram.core.domain.ModelId(modelId),
+                backend.name,
+            )
+            reloadLocalModels(selectId = modelId)
+        }
     }
 
     fun loadModel(modelId: String) {
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         if (mutableState.value.isLoadingModel || mutableState.value.isGenerating) return
-        val backend = mutableState.value.selectedBackend
+        val backend = mutableState.value.backendFor(model)
         viewModelScope.launch {
             mutableState.update {
                 it.copy(

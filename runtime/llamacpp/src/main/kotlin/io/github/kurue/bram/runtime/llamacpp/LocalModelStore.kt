@@ -149,6 +149,13 @@ class LocalModelStore(
         record
     }
 
+    suspend fun updatePreferredBackend(modelId: ModelId, backendId: String) = withContext(Dispatchers.IO) {
+        val models = decode(preferences.getString(KEY_MODELS, null)).map { model ->
+            if (model.id == modelId) model.copy(preferredBackendId = backendId) else model
+        }
+        persist(models)
+    }
+
     suspend fun updatePreferredContext(modelId: ModelId, tokens: Int) = withContext(Dispatchers.IO) {
         val models = decode(preferences.getString(KEY_MODELS, null)).map { model ->
             if (model.id != modelId) return@map model
@@ -243,6 +250,7 @@ class LocalModelStore(
         .put("hasChatTemplate", hasChatTemplate)
         .put("importedAtEpochMillis", importedAtEpochMillis)
         .put("preferredContextTokens", preferredContextTokens)
+        .put("preferredBackendId", preferredBackendId)
 
     private fun JSONObject.toRecord(): LocalModelRecord = LocalModelRecord(
         id = ModelId(getString("id")),
@@ -260,6 +268,7 @@ class LocalModelStore(
         hasChatTemplate = getBoolean("hasChatTemplate"),
         importedAtEpochMillis = getLong("importedAtEpochMillis"),
         preferredContextTokens = getInt("preferredContextTokens"),
+        preferredBackendId = optString("preferredBackendId"),
     )
 
     private fun recommendInitialContext(trainedMaximum: Int): Int {

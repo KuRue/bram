@@ -2,6 +2,7 @@ package io.github.kurue.bram.app
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -174,9 +175,11 @@ private fun ChatScreen(
             Card(Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("${model.displayName} is selected", fontWeight = FontWeight.SemiBold)
+                        Text("${model.displayName} is not loaded", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Load it in the isolated inference process before chatting.",
+                            "It will run on ${state.backendFor(model).label} with a " +
+                                "${formatTokens(model.preferredContextTokens)} context. " +
+                                "Change that under Models.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -200,8 +203,11 @@ private fun ChatScreen(
             if (state.messages.isEmpty() && hasAnyRuntime) {
                 item {
                     Text(
-                        if (state.selectedLocalModelIsLoaded) "Local model ready. Ask Bram anything."
-                        else "Select and load a local model, or choose an optional remote provider.",
+                        if (state.selectedLocalModelIsLoaded) {
+                            "Running on ${state.loadedBackend?.label ?: "this device"}. Ask Bram anything."
+                        } else {
+                            "Load a local model, or choose an optional remote provider."
+                        },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(8.dp),
                     )
@@ -217,7 +223,8 @@ private fun ChatScreen(
         state.lastMetrics?.let { metrics ->
             Text(
                 buildString {
-                    append("CPU: ${formatRate(metrics.promptTokensPerSecond)} prompt")
+                    append(state.loadedBackend?.label ?: "Runtime")
+                    append(": ${formatRate(metrics.promptTokensPerSecond)} prompt")
                     append(" · ${formatRate(metrics.decodeTokensPerSecond)} generation")
                     metrics.processPssBytes?.let { append(" · ${formatBytes(it)} PSS") }
                 },
@@ -321,8 +328,9 @@ private fun ModelsScreen(
     onValidateAccelerator: (String, AcceleratorTarget) -> Unit,
     onBisectAccelerator: (String, AcceleratorTarget) -> Unit,
     onReclaimStorage: () -> Unit,
-    onSelectBackend: (RuntimeBackend) -> Unit,
+    onSelectBackend: (String, RuntimeBackend) -> Unit,
 ) {
+    var expandedModelId by rememberSaveable { mutableStateOf<String?>(null) }
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -367,13 +375,17 @@ private fun ModelsScreen(
         items(state.localModels, key = { it.id.value }) { model ->
             LocalModelCard(
                 model = model,
+                expanded = expandedModelId == model.id.value,
                 selected = state.selectedRuntimeId == model.id.value,
                 loaded = state.loadedModelId == model.id.value && state.cpuValidated,
                 loading = state.isLoadingModel && state.selectedRuntimeId == model.id.value,
                 generationActive = state.isGenerating,
                 availableBackends = state.availableBackends,
-                selectedBackend = state.selectedBackend,
-                onSelectBackend = onSelectBackend,
+                backend = state.backendFor(model),
+                onToggleExpanded = {
+                    expandedModelId = if (expandedModelId == model.id.value) null else model.id.value
+                },
+                onSelectBackend = { chosen -> onSelectBackend(model.id.value, chosen) },
                 onSelect = { onSelect(model.id.value) },
                 onLoad = { onLoad(model.id.value) },
                 onUnload = onUnload,
@@ -381,7 +393,7 @@ private fun ModelsScreen(
                 onContext = { onContext(model.id.value, it) },
             )
         }
-        state.modelLoadDetail?.let { detail -> item { InfoCard("Validated CPU plan", detail) } }
+        state.modelLoadDetail?.let { detail -> item { InfoCard("Active runtime", detail) } }
         if (state.modelStorageBytes > 0) {
             item {
                 Card(Modifier.fillMaxWidth()) {
@@ -411,7 +423,7 @@ private fun ModelsScreen(
         state.error?.let { error -> item { ErrorCard(error) } }
         item {
             Text(
-                "Hexagon NPU, LiteRT, downloads, and storage-assisted oversized models remain intentionally disabled in this baseline.",
+                "LiteRT, model downloads, and storage-assisted oversized models are not implemented yet.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -513,12 +525,14 @@ private fun AcceleratorValidationCard(
 @Composable
 private fun LocalModelCard(
     model: LocalModelRecord,
+    expanded: Boolean,
     selected: Boolean,
     loaded: Boolean,
     loading: Boolean,
     generationActive: Boolean,
     availableBackends: List<RuntimeBackend>,
-    selectedBackend: RuntimeBackend,
+    backend: RuntimeBackend,
+    onToggleExpanded: () -> Unit,
     onSelectBackend: (RuntimeBackend) -> Unit,
     onSelect: () -> Unit,
     onLoad: () -> Unit,
@@ -526,70 +540,133 @@ private fun LocalModelCard(
     onRemove: () -> Unit,
     onContext: (Int) -> Unit,
 ) {
+    val locked = loaded || loading || generationActive
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.Top) {
+        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // Collapsed header: identity and status only. Everything else is opt-in, so a phone
+            // with several models does not present a wall of chips.
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = onToggleExpanded),
+                verticalAlignment = Alignment.Top,
+            ) {
                 Column(Modifier.weight(1f)) {
-                    Text(model.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        model.displayName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                     Text(
                         "${model.architecture} · ${model.quantization} · ${formatBytes(model.fileSizeBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (loaded) Text("✓ CPU ready", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-            }
-            Text(
-                "${model.layerCount.takeIf { it > 0 } ?: "?"} layers · trained context ${formatTokens(model.trainedContextTokens)} · SHA ${model.sha256.take(12)}…",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            if (!model.hasChatTemplate) {
-                Text("No chat template found; this model cannot chat until a template override is supported.", color = MaterialTheme.colorScheme.error)
-            }
-            Text("CPU context", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                contextOptions(model).forEach { tokens ->
-                    FilterChip(
-                        selected = tokens == model.preferredContextTokens,
-                        onClick = { onContext(tokens) },
-                        enabled = !loaded && !loading && !generationActive,
-                        label = { Text(formatTokens(tokens)) },
+                Column(horizontalAlignment = Alignment.End) {
+                    if (loaded) {
+                        Text(
+                            "● Loaded",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                        Text(
+                            backend.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    } else {
+                        Text(
+                            "${backend.label} · ${formatTokens(model.preferredContextTokens)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        if (expanded) "▲" else "▼",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
-            if (availableBackends.size > 1) {
+
+            if (!model.hasChatTemplate) {
                 Text(
-                    "Run on",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    "No chat template found, so this model cannot chat yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    availableBackends.forEach { backend ->
+            }
+
+            // Primary action stays visible while collapsed: loading is the common task.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (loaded) {
+                    Button(onClick = onUnload, enabled = !generationActive) { Text("Unload") }
+                } else {
+                    Button(
+                        onClick = {
+                            onSelect()
+                            onLoad()
+                        },
+                        enabled = !loading && !generationActive && model.hasChatTemplate,
+                    ) {
+                        if (loading) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text("Load on ${backend.label}")
+                        }
+                    }
+                }
+                if (!selected && !loaded) {
+                    OutlinedButton(onClick = onSelect) { Text("Use in chat") }
+                }
+            }
+
+            if (expanded) {
+                HorizontalDivider()
+                if (availableBackends.size > 1) {
+                    Text("Run on", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        availableBackends.forEach { option ->
+                            FilterChip(
+                                selected = backend == option,
+                                onClick = { onSelectBackend(option) },
+                                enabled = !generationActive,
+                                label = { Text(option.label) },
+                            )
+                        }
+                    }
+                    Text(
+                        "Remembered for this model. Changing it unloads the model first.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                Text("Context", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    contextOptions(model).forEach { tokens ->
                         FilterChip(
-                            selected = selectedBackend == backend,
-                            onClick = { onSelectBackend(backend) },
-                            enabled = !loaded && !loading && !generationActive,
-                            label = { Text(backend.label) },
+                            selected = tokens == model.preferredContextTokens,
+                            onClick = { onContext(tokens) },
+                            enabled = !locked,
+                            label = { Text(formatTokens(tokens)) },
                         )
                     }
                 }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (!selected) OutlinedButton(onClick = onSelect) { Text("Select") }
-                if (loaded) {
-                    OutlinedButton(onClick = onUnload, enabled = !generationActive) { Text("Unload") }
-                } else {
-                    Button(
-                        onClick = onLoad,
-                        enabled = !loading && !generationActive && model.hasChatTemplate,
-                    ) {
-                        if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        else Text("Load on ${selectedBackend.label}")
-                    }
-                }
-                TextButton(onClick = onRemove, enabled = !loaded && !loading && !generationActive) { Text("Remove") }
+
+                Text(
+                    "${model.layerCount.takeIf { it > 0 } ?: "?"} layers · trained context " +
+                        "${formatTokens(model.trainedContextTokens)} · SHA ${model.sha256.take(12)}…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = onRemove, enabled = !locked) { Text("Remove model") }
             }
         }
     }
