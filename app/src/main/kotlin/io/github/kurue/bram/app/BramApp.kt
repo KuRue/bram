@@ -124,6 +124,7 @@ fun BramApp(viewModel: MainViewModel) {
                     onRemove = viewModel::removeLocalModel,
                     onContext = viewModel::setPreferredContext,
                     onValidateAccelerator = viewModel::validateAccelerator,
+                    onBisectAccelerator = viewModel::bisectAccelerator,
                 )
                 AppSection.SETTINGS -> SettingsScreen(
                     state = state,
@@ -311,6 +312,7 @@ private fun ModelsScreen(
     onRemove: (String) -> Unit,
     onContext: (String, Int) -> Unit,
     onValidateAccelerator: (String) -> Unit,
+    onBisectAccelerator: (String) -> Unit,
 ) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -373,6 +375,7 @@ private fun ModelsScreen(
                 AcceleratorValidationCard(
                     state = state,
                     onValidate = { onValidateAccelerator(model.id.value) },
+                    onBisect = { onBisectAccelerator(model.id.value) },
                 )
             }
         }
@@ -391,6 +394,7 @@ private fun ModelsScreen(
 private fun AcceleratorValidationCard(
     state: AppUiState,
     onValidate: () -> Unit,
+    onBisect: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -401,15 +405,36 @@ private fun AcceleratorValidationCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Button(
-                onClick = onValidate,
-                enabled = !state.isValidatingAccelerator && !state.isLoadingModel && !state.isGenerating,
-            ) {
-                if (state.isValidatingAccelerator) {
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
+            val busy = state.isValidatingAccelerator || state.isLoadingModel || state.isGenerating
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onValidate, enabled = !busy) {
+                    if (state.isValidatingAccelerator) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(if (state.isValidatingAccelerator) "Working…" else "Compare GPU against CPU")
                 }
-                Text(if (state.isValidatingAccelerator) "Comparing…" else "Compare GPU against CPU")
+                OutlinedButton(onClick = onBisect, enabled = !busy) { Text("Bisect layers") }
+            }
+            state.status?.takeIf { state.isValidatingAccelerator }?.let { status ->
+                Text(status, style = MaterialTheme.typography.bodySmall)
+            }
+            state.acceleratorBisection?.let { bisection ->
+                HorizontalDivider()
+                Text("Layer bisection", fontWeight = FontWeight.SemiBold)
+                Text(bisection.detail, style = MaterialTheme.typography.bodySmall)
+                bisection.probes.forEach { probe ->
+                    Text(
+                        "${if (probe.usable) "AGREES" else "DIFFERS"} · ${probe.gpuLayers} layers · " +
+                            "%.0f%% · ".format(probe.agreement * 100) + "${probe.millis} ms",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (probe.usable) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                    )
+                }
             }
             state.acceleratorReport?.let { report ->
                 HorizontalDivider()

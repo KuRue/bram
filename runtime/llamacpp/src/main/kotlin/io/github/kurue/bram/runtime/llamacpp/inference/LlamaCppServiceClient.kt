@@ -52,6 +52,10 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         JSONObject(requireService().referenceDecode(tokenCount))
     }
 
+    suspend fun teacherForced(forcedTokens: IntArray): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requireService().teacherForced(forcedTokens))
+    }
+
     suspend fun load(model: LocalModelRecord, threads: Int, gpuLayers: Int = 0): JSONObject = withContext(Dispatchers.IO) {
         val request = JSONObject()
             .put("modelId", model.id.value)

@@ -47,6 +47,40 @@ data class AcceleratorReport(
         get() = if (acceleratorMillis > 0) cpuMillis.toDouble() / acceleratorMillis.toDouble() else 0.0
 }
 
+/**
+ * Result of narrowing down how many layers can be offloaded before output stops matching CPU.
+ * [lastGoodLayers] is the largest offload that still reproduced the reference exactly.
+ */
+data class AcceleratorBisection(
+    val deviceName: String,
+    val totalLayers: Int,
+    val lastGoodLayers: Int,
+    val firstBadLayers: Int?,
+    val probes: List<AcceleratorProbe>,
+) {
+    val detail: String
+        get() = when {
+            firstBadLayers == null -> "All $totalLayers layers agreed with the CPU reference."
+            lastGoodLayers == 0 -> "Even one offloaded layer disagrees, so the failure is in an " +
+                "operation every layer uses."
+            else -> "Predictions agree up to $lastGoodLayers offloaded layers and break at " +
+                "$firstBadLayers."
+        }
+}
+
+data class AcceleratorProbe(
+    val gpuLayers: Int,
+    val agreement: Double,
+    val millis: Long,
+    val text: String,
+) {
+    /**
+     * fp16 accelerators legitimately disagree with an fp32 CPU on a few near-tie predictions, so
+     * exact equality is too strict. Near-total agreement means the backend computes correctly.
+     */
+    val usable: Boolean get() = agreement >= 0.9
+}
+
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
@@ -66,6 +100,7 @@ data class AppUiState(
     val lastMetrics: GenerationMetrics? = null,
     val isValidatingAccelerator: Boolean = false,
     val acceleratorReport: AcceleratorReport? = null,
+    val acceleratorBisection: AcceleratorBisection? = null,
 ) {
     val selectedLocalModel: LocalModelRecord?
         get() = localModels.firstOrNull { it.id.value == selectedRuntimeId }
@@ -287,6 +322,90 @@ class MainViewModel(
             }
             // The comparison leaves the runtime in whatever state the last load produced; drop it
             // so the user always returns to a clean, explicitly chosen load.
+            runCatching { unloadModelInternal() }
+            mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
+            refreshDeviceProfile()
+        }
+    }
+
+    /**
+     * Narrows a failing accelerator down to a layer boundary. Records the CPU reference once, then
+     * binary-searches the offload count for the largest value that still reproduces it. Whether the
+     * boundary lands at zero or partway through separates "a shared operation is broken" from
+     * "one layer's operation is broken".
+     */
+    fun bisectAccelerator(modelId: String) {
+        val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
+        val state = mutableState.value
+        if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(
+                    isValidatingAccelerator = true,
+                    acceleratorBisection = null,
+                    acceleratorReport = null,
+                    error = null,
+                    status = "Recording the CPU reference…",
+                )
+            }
+            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            val threads = (visibleCores - 2).coerceIn(1, 4)
+            val probes = mutableListOf<AcceleratorProbe>()
+            runCatching {
+                val devices = container.llamaCppClient.devices()
+                val deviceName = (0 until devices.optJSONArray("devices")?.length().orZero())
+                    .map { index -> devices.getJSONArray("devices").getJSONObject(index) }
+                    .firstOrNull { device -> device.optString("name").startsWith("Vulkan") }
+                    ?.let { device -> device.optString("description").ifBlank { device.optString("name") } }
+                    ?: throw IllegalStateException("This build found no Vulkan device to bisect.")
+
+                container.llamaCppClient.load(model, threads, gpuLayers = 0)
+                val reference = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                    .optJSONArray("tokens").toIntList()
+                check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
+
+                // llama.cpp counts the output layer too, so probe one past the repeating layers.
+                val totalLayers = model.layerCount.takeIf { it > 0 }?.plus(1) ?: 32
+
+                val forced = reference.toIntArray()
+                suspend fun probeAt(layers: Int): AcceleratorProbe {
+                    mutableState.update { it.copy(status = "Testing $layers of $totalLayers layers on GPU…") }
+                    container.llamaCppClient.load(model, threads, gpuLayers = layers)
+                    val started = System.currentTimeMillis()
+                    val predicted = container.llamaCppClient.teacherForced(forced)
+                        .optJSONArray("predictions").toIntList()
+                    // Position i predicts reference[i]; both backends see identical inputs, so a
+                    // disagreement is a real numerical difference rather than compounded drift.
+                    val comparable = minOf(predicted.size, reference.size)
+                    val agreed = (0 until comparable).count { predicted[it] == reference[it] }
+                    val probe = AcceleratorProbe(
+                        gpuLayers = layers,
+                        agreement = if (comparable == 0) 0.0 else agreed.toDouble() / comparable,
+                        millis = System.currentTimeMillis() - started,
+                        text = "$agreed/$comparable predictions agree",
+                    )
+                    probes += probe
+                    return probe
+                }
+
+                if (probeAt(totalLayers).usable) {
+                    AcceleratorBisection(deviceName, totalLayers, totalLayers, null, probes.toList())
+                } else {
+                    var good = 0
+                    var bad = totalLayers
+                    while (bad - good > 1) {
+                        val middle = good + (bad - good) / 2
+                        if (probeAt(middle).usable) good = middle else bad = middle
+                    }
+                    AcceleratorBisection(deviceName, totalLayers, good, bad, probes.toList())
+                }
+            }.onSuccess { bisection ->
+                mutableState.update { it.copy(acceleratorBisection = bisection) }
+            }.onFailure { error ->
+                mutableState.update {
+                    it.copy(error = error.message ?: "Could not bisect the accelerator")
+                }
+            }
             runCatching { unloadModelInternal() }
             mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
             refreshDeviceProfile()

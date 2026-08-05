@@ -39,6 +39,10 @@ class InferenceProcessService : Service() {
             bridge.referenceDecode(tokenCount)
         }
 
+        override fun teacherForced(forcedTokens: IntArray?): String = runSerialized {
+            bridge.teacherForced(forcedTokens ?: IntArray(0))
+        }
+
         override fun load(requestJson: String): String = runSerialized {
             loadModel(JSONObject(requestJson))
         }

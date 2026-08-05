@@ -590,6 +590,63 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_reference
     });
 }
 
+// Teacher-forced agreement check. Both backends are fed the identical token sequence and asked
+// only for the next-token prediction at each position, so a numerical difference cannot compound
+// into unrelated text the way free-running generation does. This isolates "does the accelerator
+// compute the same thing" from "did one early token send generation somewhere else".
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherForced(
+    JNIEnv * env, jobject, jintArray forced_tokens) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_state.model == nullptr) throw std::runtime_error("Load a model before the agreement check");
+        g_cancelled.store(false, std::memory_order_relaxed);
+
+        std::vector<llama_token> forced;
+        if (forced_tokens != nullptr) {
+            const jsize length = env->GetArrayLength(forced_tokens);
+            forced.resize(static_cast<size_t>(length));
+            if (length > 0) {
+                env->GetIntArrayRegion(forced_tokens, 0, length, reinterpret_cast<jint *>(forced.data()));
+            }
+        }
+
+        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true);
+        auto tokens = tokenize(prompt);
+        if (tokens.empty()) throw std::runtime_error("Agreement check tokenizer returned no tokens");
+
+        llama_context * context = create_context();
+        const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);
+        decode_prompt(context, tokens);
+        llama_sampler * sampler = llama_sampler_init_greedy();
+        const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
+
+        // With no forced sequence this behaves as a plain greedy run and produces the reference.
+        const size_t steps = forced.empty() ? 24 : forced.size();
+        std::ostringstream predictions;
+        predictions << "[";
+        for (size_t index = 0; index < steps; ++index) {
+            const llama_token predicted = llama_sampler_sample(sampler, context, -1);
+            if (index > 0) predictions << ",";
+            predictions << predicted;
+            // Advance with the reference token when teacher forcing, otherwise with our own.
+            const llama_token advance = forced.empty() ? predicted : forced[index];
+            llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(&advance), 1);
+            if (llama_decode(context, batch) != 0) {
+                throw std::runtime_error("Agreement check failed while advancing the context");
+            }
+        }
+        predictions << "]";
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_teacher_forced: gpu_layers=%d predictions=%s",
+            g_state.gpu_layers, predictions.str().c_str());
+        std::ostringstream result;
+        result << "{\"predictions\":" << predictions.str()
+               << ",\"gpuLayers\":" << g_state.gpu_layers << "}";
+        return result.str();
+    });
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_selfTest(
     JNIEnv * env, jobject) {
