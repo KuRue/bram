@@ -1,6 +1,7 @@
 package io.github.kurue.bram.app
 
 import android.app.Application
+import android.content.Context
 import io.github.kurue.bram.core.agent.ContextWindowManager
 import io.github.kurue.bram.core.agent.DefaultAgentOrchestrator
 import io.github.kurue.bram.core.agent.InMemoryMemoryStore
@@ -11,6 +12,9 @@ import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import io.github.kurue.bram.platform.android.AndroidDeviceProfiler
 import io.github.kurue.bram.platform.android.ConversationStore
 import io.github.kurue.bram.platform.android.SecureEndpointStore
@@ -32,6 +36,14 @@ class BramApplication : Application() {
 }
 
 class AppContainer(application: Application) {
+    val appContext: Context = application.applicationContext
+
+    /**
+     * Outlives any ViewModel so an agent run is not cancelled by the screen going away. Paired with
+     * [AgentTaskService], which keeps the process alive for as long as a run holds it.
+     */
+    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     val endpointStore = SecureEndpointStore(application)
     val localModelStore = LocalModelStore(application)
     val llamaCppClient = LlamaCppServiceClient(application)
