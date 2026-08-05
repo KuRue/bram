@@ -44,7 +44,15 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         JSONObject(requireService().state())
     }
 
-    suspend fun load(model: LocalModelRecord, threads: Int): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun devices(): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requireService().devices())
+    }
+
+    suspend fun referenceDecode(tokenCount: Int): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requireService().referenceDecode(tokenCount))
+    }
+
+    suspend fun load(model: LocalModelRecord, threads: Int, gpuLayers: Int = 0): JSONObject = withContext(Dispatchers.IO) {
         val request = JSONObject()
             .put("modelId", model.id.value)
             .put("contentUri", model.contentUri)
@@ -53,6 +61,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("contextTokens", model.preferredContextTokens)
             .put("batchTokens", minOf(512, model.preferredContextTokens))
             .put("threads", threads)
+            .put("gpuLayers", gpuLayers)
         JSONObject(requireService().load(request.toString()))
     }
 

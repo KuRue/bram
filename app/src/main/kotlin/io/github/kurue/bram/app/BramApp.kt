@@ -123,6 +123,7 @@ fun BramApp(viewModel: MainViewModel) {
                     onUnload = viewModel::unloadModel,
                     onRemove = viewModel::removeLocalModel,
                     onContext = viewModel::setPreferredContext,
+                    onValidateAccelerator = viewModel::validateAccelerator,
                 )
                 AppSection.SETTINGS -> SettingsScreen(
                     state = state,
@@ -309,6 +310,7 @@ private fun ModelsScreen(
     onUnload: () -> Unit,
     onRemove: (String) -> Unit,
     onContext: (String, Int) -> Unit,
+    onValidateAccelerator: (String) -> Unit,
 ) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -366,13 +368,75 @@ private fun ModelsScreen(
             )
         }
         state.modelLoadDetail?.let { detail -> item { InfoCard("Validated CPU plan", detail) } }
+        state.selectedLocalModel?.let { model ->
+            item {
+                AcceleratorValidationCard(
+                    state = state,
+                    onValidate = { onValidateAccelerator(model.id.value) },
+                )
+            }
+        }
         state.error?.let { error -> item { ErrorCard(error) } }
         item {
             Text(
-                "GPU, Hexagon NPU, LiteRT, downloads, and storage-assisted oversized models remain intentionally disabled in this CPU baseline.",
+                "Hexagon NPU, LiteRT, downloads, and storage-assisted oversized models remain intentionally disabled in this baseline.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+@Composable
+private fun AcceleratorValidationCard(
+    state: AppUiState,
+    onValidate: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Adreno (Vulkan) validation", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Loads the selected model on CPU to record a deterministic reference, then replays it " +
+                    "on the GPU. The GPU counts as validated only if every token matches.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = onValidate,
+                enabled = !state.isValidatingAccelerator && !state.isLoadingModel && !state.isGenerating,
+            ) {
+                if (state.isValidatingAccelerator) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(if (state.isValidatingAccelerator) "Comparing…" else "Compare GPU against CPU")
+            }
+            state.acceleratorReport?.let { report ->
+                HorizontalDivider()
+                Text(
+                    if (report.matchesCpu) "Validated: output matches CPU" else "Not validated: output diverged",
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (report.matchesCpu) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                )
+                Text(report.detail, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "CPU ${report.cpuMillis} ms · ${report.deviceName} ${report.acceleratorMillis} ms" +
+                        if (report.speedup > 0) " · %.2f× ".format(report.speedup) + "vs CPU" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!report.matchesCpu) {
+                    Text(
+                        "CPU: ${report.cpuText.take(120)}\nGPU: ${report.acceleratorText.take(120)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
 }

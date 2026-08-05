@@ -27,6 +27,26 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/**
+ * Outcome of comparing an accelerator against the CPU reference decode. [matchesCpu] is the
+ * milestone's acceptance signal: the accelerator must reproduce the CPU token sequence exactly
+ * before it may be reported as validated.
+ */
+data class AcceleratorReport(
+    val deviceName: String,
+    val matchesCpu: Boolean,
+    val cpuTokens: List<Int>,
+    val acceleratorTokens: List<Int>,
+    val cpuMillis: Long,
+    val acceleratorMillis: Long,
+    val cpuText: String,
+    val acceleratorText: String,
+    val detail: String,
+) {
+    val speedup: Double
+        get() = if (acceleratorMillis > 0) cpuMillis.toDouble() / acceleratorMillis.toDouble() else 0.0
+}
+
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
@@ -44,6 +64,8 @@ data class AppUiState(
     val error: String? = null,
     val lastUsage: TokenUsage? = null,
     val lastMetrics: GenerationMetrics? = null,
+    val isValidatingAccelerator: Boolean = false,
+    val acceleratorReport: AcceleratorReport? = null,
 ) {
     val selectedLocalModel: LocalModelRecord?
         get() = localModels.firstOrNull { it.id.value == selectedRuntimeId }
@@ -193,6 +215,81 @@ class MainViewModel(
                 refreshDeviceProfile()
             }
             mutableState.update { it.copy(isLoadingModel = false, status = null) }
+        }
+    }
+
+    /**
+     * Validates the Vulkan/Adreno backend against CPU output. The model is loaded on CPU to record
+     * a deterministic greedy-decode reference, then reloaded with full GPU offload and asked for
+     * the same sequence. Loading twice in sequence (rather than side by side) keeps peak memory to
+     * one model, which matters on a phone.
+     */
+    fun validateAccelerator(modelId: String) {
+        val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
+        val state = mutableState.value
+        if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(
+                    isValidatingAccelerator = true,
+                    acceleratorReport = null,
+                    error = null,
+                    status = "Recording the CPU reference…",
+                )
+            }
+            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            val threads = (visibleCores - 2).coerceIn(1, 4)
+            runCatching {
+                val devices = container.llamaCppClient.devices()
+                val deviceName = (0 until devices.optJSONArray("devices")?.length().orZero())
+                    .map { index -> devices.getJSONArray("devices").getJSONObject(index) }
+                    .firstOrNull { device -> device.optString("name").startsWith("Vulkan") }
+                    ?.let { device -> device.optString("description").ifBlank { device.optString("name") } }
+                    ?: throw IllegalStateException(
+                        "This build found no Vulkan device, so the Adreno backend cannot be validated.",
+                    )
+
+                container.llamaCppClient.load(model, threads, gpuLayers = 0)
+                val cpuStarted = System.currentTimeMillis()
+                val cpuResult = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                val cpuMillis = System.currentTimeMillis() - cpuStarted
+                val cpuTokens = cpuResult.optJSONArray("tokens").toIntList()
+
+                mutableState.update { it.copy(status = "Replaying the reference on $deviceName…") }
+                container.llamaCppClient.load(model, threads, gpuLayers = FULL_GPU_OFFLOAD)
+                val gpuStarted = System.currentTimeMillis()
+                val gpuResult = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                val gpuMillis = System.currentTimeMillis() - gpuStarted
+                val gpuTokens = gpuResult.optJSONArray("tokens").toIntList()
+
+                val matches = cpuTokens.isNotEmpty() && cpuTokens == gpuTokens
+                AcceleratorReport(
+                    deviceName = deviceName,
+                    matchesCpu = matches,
+                    cpuTokens = cpuTokens,
+                    acceleratorTokens = gpuTokens,
+                    cpuMillis = cpuMillis,
+                    acceleratorMillis = gpuMillis,
+                    cpuText = cpuResult.optString("text"),
+                    acceleratorText = gpuResult.optString("text"),
+                    detail = if (matches) {
+                        "$deviceName reproduced all ${cpuTokens.size} reference tokens exactly."
+                    } else {
+                        "$deviceName diverged from the CPU reference and is not validated."
+                    },
+                )
+            }.onSuccess { report ->
+                mutableState.update { it.copy(acceleratorReport = report) }
+            }.onFailure { error ->
+                mutableState.update {
+                    it.copy(error = error.message ?: "Could not validate the accelerator")
+                }
+            }
+            // The comparison leaves the runtime in whatever state the last load produced; drop it
+            // so the user always returns to a clean, explicitly chosen load.
+            runCatching { unloadModelInternal() }
+            mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
+            refreshDeviceProfile()
         }
     }
 
@@ -454,3 +551,16 @@ class MainViewModel(
 
 internal const val REMOTE_PREFIX = "remote:"
 internal fun remoteRuntimeId(endpointId: String): String = "$REMOTE_PREFIX$endpointId"
+
+/** Tokens compared between backends. Long enough to catch drift, short enough to stay quick. */
+private const val REFERENCE_TOKENS = 24
+
+/** llama.cpp clamps this to the model's layer count, so it means "offload everything". */
+private const val FULL_GPU_OFFLOAD = 999
+
+private fun Int?.orZero(): Int = this ?: 0
+
+private fun org.json.JSONArray?.toIntList(): List<Int> {
+    val array = this ?: return emptyList()
+    return (0 until array.length()).map(array::getInt)
+}

@@ -21,6 +21,7 @@ class InferenceProcessService : Service() {
     private val bridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { NativeLlamaBridge() }
     private var loadedModelId: String? = null
     private var loadedContextTokens: Int = 0
+    private var loadedGpuLayers: Int = 0
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
@@ -30,6 +31,12 @@ class InferenceProcessService : Service() {
                 .put("process", ":inference")
                 .put("llamaCppCommit", BuildConfig.LLAMA_CPP_COMMIT)
                 .toString()
+        }
+
+        override fun devices(): String = runSerialized { bridge.devices() }
+
+        override fun referenceDecode(tokenCount: Int): String = runSerialized {
+            bridge.referenceDecode(tokenCount)
         }
 
         override fun load(requestJson: String): String = runSerialized {
@@ -138,7 +145,14 @@ class InferenceProcessService : Service() {
     private fun loadModel(request: JSONObject): String {
         val modelId = request.getString("modelId")
         val contextTokens = request.getInt("contextTokens").coerceAtLeast(256)
-        if (modelId == loadedModelId && contextTokens == loadedContextTokens && cpuValidated) {
+        val gpuLayers = request.optInt("gpuLayers", 0).coerceAtLeast(0)
+        // The offload plan is part of the load identity: reusing a CPU-resident model for a GPU
+        // request would silently validate the accelerator against itself.
+        if (modelId == loadedModelId &&
+            contextTokens == loadedContextTokens &&
+            gpuLayers == loadedGpuLayers &&
+            cpuValidated
+        ) {
             return JSONObject(bridge.state())
                 .put("alreadyLoaded", true)
                 .put("modelId", modelId)
@@ -169,6 +183,7 @@ class InferenceProcessService : Service() {
                     batchTokens = request.optInt("batchTokens", 512).coerceIn(32, contextTokens),
                     threads = request.optInt("threads", Runtime.getRuntime().availableProcessors())
                         .coerceIn(1, Runtime.getRuntime().availableProcessors()),
+                    gpuLayers = gpuLayers,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())
@@ -177,6 +192,7 @@ class InferenceProcessService : Service() {
             }
             loadedModelId = modelId
             loadedContextTokens = contextTokens
+            loadedGpuLayers = gpuLayers
             cpuValidated = true
             return loadResult
                 .put("alreadyLoaded", false)
@@ -189,6 +205,7 @@ class InferenceProcessService : Service() {
             runCatching { bridge.unload() }
             loadedModelId = null
             loadedContextTokens = 0
+            loadedGpuLayers = 0
             cpuValidated = false
             throw error
         }
@@ -199,6 +216,7 @@ class InferenceProcessService : Service() {
         val result = bridge.unload()
         loadedModelId = null
         loadedContextTokens = 0
+        loadedGpuLayers = 0
         cpuValidated = false
         return result
     }
