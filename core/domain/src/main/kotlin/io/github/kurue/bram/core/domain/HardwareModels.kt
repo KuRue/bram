@@ -54,6 +54,42 @@ data class LocalModelArtifact(
     val backendCompatibility: Set<AcceleratorKind>,
 )
 
+/**
+ * A GGUF selected through Android's Storage Access Framework.
+ *
+ * [contentUri] records the import source for display; the runtime copies the bytes into
+ * app-private storage at [localPath] because scoped storage forbids native code from re-opening
+ * a provider-granted descriptor by path. Both are strings so the domain model remains
+ * Android-free.
+ */
+data class LocalModelRecord(
+    val id: ModelId,
+    val displayName: String,
+    val fileName: String,
+    val contentUri: String,
+    val localPath: String,
+    val fileSizeBytes: Long,
+    val sha256: String,
+    val ggufVersion: Int,
+    val architecture: String,
+    val quantization: String,
+    val trainedContextTokens: Int,
+    val layerCount: Int,
+    val hasChatTemplate: Boolean,
+    val importedAtEpochMillis: Long = System.currentTimeMillis(),
+    val preferredContextTokens: Int = trainedContextTokens.takeIf { it > 0 }?.coerceAtMost(8_192) ?: 4_096,
+) {
+    fun asModelDescriptor(): ModelDescriptor = ModelDescriptor(
+        id = id,
+        displayName = displayName,
+        providerName = "On this device",
+        modelName = fileName,
+        location = ModelLocation.LOCAL,
+        contextWindowTokens = preferredContextTokens,
+        capabilities = setOf(ModelCapability.TEXT),
+    )
+}
+
 enum class ExecutionMode {
     RESIDENT,
     STORAGE_ASSISTED,

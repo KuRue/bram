@@ -7,12 +7,16 @@ import io.github.kurue.bram.core.agent.InMemoryMemoryStore
 import io.github.kurue.bram.core.agent.ReadOnlyApprovalGate
 import io.github.kurue.bram.core.agent.StaticToolRegistry
 import io.github.kurue.bram.core.domain.EndpointCredentialResolver
+import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import io.github.kurue.bram.platform.android.AndroidDeviceProfiler
 import io.github.kurue.bram.platform.android.SecureEndpointStore
 import io.github.kurue.bram.runtime.openai.OpenAiCompatibleRuntime
+import io.github.kurue.bram.runtime.llamacpp.LlamaCppRuntime
+import io.github.kurue.bram.runtime.llamacpp.LocalModelStore
+import io.github.kurue.bram.runtime.llamacpp.inference.LlamaCppServiceClient
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -28,6 +32,8 @@ class BramApplication : Application() {
 
 class AppContainer(application: Application) {
     val endpointStore = SecureEndpointStore(application)
+    val localModelStore = LocalModelStore(application)
+    val llamaCppClient = LlamaCppServiceClient(application)
     val deviceProfiler = AndroidDeviceProfiler(application)
     val memoryStore = InMemoryMemoryStore()
     private val toolRegistry = StaticToolRegistry(listOf(DeviceStatusTool(deviceProfiler)))
@@ -35,6 +41,11 @@ class AppContainer(application: Application) {
     fun runtime(endpoint: RemoteEndpoint) = OpenAiCompatibleRuntime(
         endpoint = endpoint,
         credentialResolver = EndpointCredentialResolver(endpointStore::resolveCredential),
+    )
+
+    fun runtime(model: LocalModelRecord) = LlamaCppRuntime(
+        record = model,
+        client = llamaCppClient,
     )
 
     fun agent() = DefaultAgentOrchestrator(

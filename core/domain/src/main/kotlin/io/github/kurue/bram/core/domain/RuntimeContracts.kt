@@ -26,11 +26,26 @@ data class TokenUsage(
         get() = if (inputTokens != null && outputTokens != null) inputTokens + outputTokens else null
 }
 
+data class GenerationMetrics(
+    val promptTokens: Int,
+    val outputTokens: Int,
+    val promptMillis: Long,
+    val decodeMillis: Long,
+    val processPssBytes: Long? = null,
+) {
+    val promptTokensPerSecond: Double?
+        get() = promptMillis.takeIf { it > 0 }?.let { promptTokens * 1_000.0 / it }
+
+    val decodeTokensPerSecond: Double?
+        get() = decodeMillis.takeIf { it > 0 }?.let { outputTokens * 1_000.0 / it }
+}
+
 sealed interface GenerationEvent {
     data class Started(val runtimeDescription: String) : GenerationEvent
     data class TextDelta(val text: String) : GenerationEvent
     data class ToolCallReady(val call: ToolCall) : GenerationEvent
     data class Usage(val usage: TokenUsage) : GenerationEvent
+    data class Metrics(val metrics: GenerationMetrics) : GenerationEvent
     data class Finished(val finishReason: String? = null) : GenerationEvent
     data class Failed(
         val message: String,

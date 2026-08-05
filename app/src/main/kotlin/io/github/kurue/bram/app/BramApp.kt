@@ -1,5 +1,8 @@
 package io.github.kurue.bram.app
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -27,6 +29,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -36,7 +39,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -49,21 +51,25 @@ import io.github.kurue.bram.core.domain.AcceleratorCapability
 import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
+import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import java.util.Locale
 
 private enum class AppSection(val label: String, val glyph: String) {
-    HOME("Home", "●"),
     CHAT("Chat", "✦"),
-    PROVIDERS("Models", "+"),
+    MODELS("Models", "▣"),
+    SETTINGS("Settings", "⚙"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BramApp(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    var section by rememberSaveable { mutableStateOf(AppSection.HOME) }
+    var section by rememberSaveable { mutableStateOf(AppSection.CHAT) }
+    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::importModel)
+    }
 
     Scaffold(
         topBar = {
@@ -73,9 +79,9 @@ fun BramApp(viewModel: MainViewModel) {
                         Text(BramDefaults.IDENTITY.displayName, fontWeight = FontWeight.SemiBold)
                         Text(
                             when (section) {
-                                AppSection.HOME -> "Hardware-aware inference"
-                                AppSection.CHAT -> "Local or compatible remote model"
-                                AppSection.PROVIDERS -> "Model endpoints"
+                                AppSection.CHAT -> "Private, local-first chat"
+                                AppSection.MODELS -> "GGUF models on this device"
+                                AppSection.SETTINGS -> "Providers and diagnostics"
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -97,114 +103,33 @@ fun BramApp(viewModel: MainViewModel) {
             }
         },
     ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
+        Box(Modifier.fillMaxSize().padding(padding)) {
             when (section) {
-                AppSection.HOME -> DashboardScreen(state, viewModel::refreshDeviceProfile)
                 AppSection.CHAT -> ChatScreen(
                     state = state,
+                    onSelectLocal = viewModel::selectLocalModel,
                     onSelectEndpoint = viewModel::selectEndpoint,
                     onSend = viewModel::send,
+                    onStop = viewModel::stopGeneration,
                     onClear = viewModel::clearChat,
-                    onOpenProviders = { section = AppSection.PROVIDERS },
+                    onLoad = viewModel::loadModel,
+                    onOpenModels = { section = AppSection.MODELS },
                 )
-                AppSection.PROVIDERS -> ProviderScreen(
+                AppSection.MODELS -> ModelsScreen(
                     state = state,
-                    onSave = viewModel::saveEndpoint,
-                    onRemove = viewModel::removeEndpoint,
+                    onImport = { modelPicker.launch(arrayOf("*/*")) },
+                    onSelect = viewModel::selectLocalModel,
+                    onLoad = viewModel::loadModel,
+                    onUnload = viewModel::unloadModel,
+                    onRemove = viewModel::removeLocalModel,
+                    onContext = viewModel::setPreferredContext,
                 )
-            }
-        }
-    }
-}
-
-@Composable
-private fun DashboardScreen(state: AppUiState, onRefresh: () -> Unit) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item {
-            SectionHeader("This device", "Measured now; backend kernels still require native self-tests")
-        }
-        val profile = state.deviceProfile
-        if (profile == null) {
-            item { CircularProgressIndicator() }
-        } else {
-            item { DeviceSummaryCard(profile, onRefresh) }
-            items(profile.accelerators) { AcceleratorRow(it) }
-        }
-        item {
-            Spacer(Modifier.height(4.dp))
-            SectionHeader("Agent foundation", "The contracts are wired; durable implementations arrive in stages")
-        }
-        item {
-            Card(Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    ReadinessRow("Context budgeting", "Working")
-                    ReadinessRow("OpenAI-compatible runtime", "Working")
-                    ReadinessRow("Tool-call loop + approvals", "Working")
-                    ReadinessRow("Out-of-process inference", "Protocol ready")
-                    ReadinessRow("Durable memory + skills", "Next phase")
-                    ReadinessRow("Automation execution", "Next phase")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DeviceSummaryCard(profile: DeviceProfile, onRefresh: () -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("${profile.manufacturer} ${profile.model}", style = MaterialTheme.typography.titleMedium)
-                    Text(profile.soc, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                TextButton(onClick = onRefresh) { Text("Refresh") }
-            }
-            HorizontalDivider()
-            MetricRow("RAM available", "${formatBytes(profile.availableRamBytes)} / ${formatBytes(profile.totalRamBytes)}")
-            MetricRow("App storage free", "${formatBytes(profile.freeStorageBytes)} / ${formatBytes(profile.totalStorageBytes)}")
-            MetricRow("CPU", "${profile.cpuCoreCount} cores · ${profile.appAbi}")
-            MetricRow("Thermals", profile.thermalStatus)
-            MetricRow("Profile", profile.profileFingerprint)
-        }
-    }
-}
-
-@Composable
-private fun AcceleratorRow(capability: AcceleratorCapability) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = MaterialTheme.shapes.medium,
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            val marker = when (capability.state) {
-                CapabilityState.AVAILABLE -> "✓"
-                CapabilityState.DETECTED_NOT_VALIDATED -> "?"
-                CapabilityState.UNPROBED -> "·"
-                CapabilityState.UNAVAILABLE, CapabilityState.FAILED_VALIDATION -> "×"
-            }
-            Text(marker, modifier = Modifier.width(28.dp), fontWeight = FontWeight.Bold)
-            Column {
-                Text(capability.kind.name.replace('_', ' '), fontWeight = FontWeight.Medium)
-                Text(capability.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                AppSection.SETTINGS -> SettingsScreen(
+                    state = state,
+                    onSaveEndpoint = viewModel::saveEndpoint,
+                    onRemoveEndpoint = viewModel::removeEndpoint,
+                    onRefreshDiagnostics = viewModel::refreshDeviceProfile,
+                )
             }
         }
     }
@@ -213,67 +138,90 @@ private fun AcceleratorRow(capability: AcceleratorCapability) {
 @Composable
 private fun ChatScreen(
     state: AppUiState,
+    onSelectLocal: (String) -> Unit,
     onSelectEndpoint: (String) -> Unit,
     onSend: (String) -> Unit,
+    onStop: () -> Unit,
     onClear: () -> Unit,
-    onOpenProviders: () -> Unit,
+    onLoad: (String) -> Unit,
+    onOpenModels: () -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf("") }
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 12.dp),
-    ) {
-        if (state.endpoints.isEmpty()) {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("No runtime configured", fontWeight = FontWeight.SemiBold)
-                    Text("Add an OpenAI-compatible endpoint now. Local GGUF appears here once the native runtime is integrated.")
-                    Spacer(Modifier.height(8.dp))
-                    Button(onClick = onOpenProviders) { Text("Add model endpoint") }
+    val hasAnyRuntime = state.localModels.isNotEmpty() || state.endpoints.isNotEmpty()
+    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+        if (!hasAnyRuntime) {
+            Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Run Bram locally", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Import a GGUF model from your phone. No endpoint or account is required.")
+                    Button(onClick = onOpenModels) { Text("Import a GGUF") }
+                    Text(
+                        "Remote OpenAI-compatible providers remain optional under Settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         } else {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                state.endpoints.forEach { endpoint ->
-                    FilterChip(
-                        selected = endpoint.id == state.selectedEndpointId,
-                        onClick = { onSelectEndpoint(endpoint.id) },
-                        label = { Text(endpoint.displayName, maxLines = 1) },
-                    )
-                }
-                TextButton(onClick = onClear, enabled = !state.isGenerating) { Text("Clear") }
-            }
+            RuntimeSelector(state, onSelectLocal, onSelectEndpoint, onClear)
         }
 
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(state.messages, key = { it.id.value }) { message -> ChatBubble(message) }
-            state.status?.let { status ->
-                item {
-                    Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                }
-            }
-            state.error?.let { error ->
-                item {
-                    Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
-                        Text(error, modifier = Modifier.padding(12.dp), color = MaterialTheme.colorScheme.onErrorContainer)
+        state.selectedLocalModel?.takeIf { !state.selectedLocalModelIsLoaded }?.let { model ->
+            Card(Modifier.fillMaxWidth()) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("${model.displayName} is selected", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Load it in the isolated CPU process before chatting.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Button(
+                        onClick = { onLoad(model.id.value) },
+                        enabled = !state.isLoadingModel,
+                    ) {
+                        if (state.isLoadingModel) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        else Text("Load")
                     }
                 }
             }
         }
 
-        state.lastUsage?.let { usage ->
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (state.messages.isEmpty() && hasAnyRuntime) {
+                item {
+                    Text(
+                        if (state.selectedLocalModelIsLoaded) "Local model ready. Ask Bram anything."
+                        else "Select and load a local model, or choose an optional remote provider.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(8.dp),
+                    )
+                }
+            }
+            items(state.messages, key = { it.id.value }) { ChatBubble(it) }
+            state.status?.let { status ->
+                item { Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
+            }
+            state.error?.let { error -> item { ErrorCard(error) } }
+        }
+
+        state.lastMetrics?.let { metrics ->
+            Text(
+                buildString {
+                    append("CPU: ${formatRate(metrics.promptTokensPerSecond)} prompt")
+                    append(" · ${formatRate(metrics.decodeTokensPerSecond)} generation")
+                    metrics.processPssBytes?.let { append(" · ${formatBytes(it)} PSS") }
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+        } ?: state.lastUsage?.let { usage ->
             Text(
                 "Last run: ${usage.inputTokens ?: "?"} in · ${usage.outputTokens ?: "?"} out",
                 style = MaterialTheme.typography.labelSmall,
@@ -281,37 +229,301 @@ private fun ChatScreen(
                 modifier = Modifier.padding(bottom = 4.dp),
             )
         }
+
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 10.dp),
+            Modifier.fillMaxWidth().padding(bottom = 10.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
                 modifier = Modifier.weight(1f),
-                label = { Text("Message") },
+                label = { Text("Message Bram") },
                 minLines = 1,
                 maxLines = 5,
                 enabled = !state.isGenerating,
             )
             Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = {
-                    onSend(input)
-                    input = ""
+            if (state.isGenerating) {
+                OutlinedButton(onClick = onStop, modifier = Modifier.height(56.dp)) { Text("Stop") }
+            } else {
+                Button(
+                    onClick = {
+                        onSend(input)
+                        input = ""
+                    },
+                    enabled = input.isNotBlank() && (
+                        state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
+                    ),
+                    modifier = Modifier.height(56.dp),
+                ) { Text("Send") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RuntimeSelector(
+    state: AppUiState,
+    onSelectLocal: (String) -> Unit,
+    onSelectEndpoint: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        state.localModels.forEach { model ->
+            FilterChip(
+                selected = model.id.value == state.selectedRuntimeId,
+                onClick = { onSelectLocal(model.id.value) },
+                label = {
+                    Text(
+                        buildString {
+                            if (model.id.value == state.loadedModelId) append("● ")
+                            append(model.displayName)
+                        },
+                        maxLines = 1,
+                    )
                 },
-                enabled = input.isNotBlank() && !state.isGenerating && state.endpoints.isNotEmpty(),
-                modifier = Modifier.height(56.dp),
-            ) {
-                if (state.isGenerating) {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                } else {
-                    Text("Send")
+            )
+        }
+        state.endpoints.forEach { endpoint ->
+            FilterChip(
+                selected = remoteRuntimeId(endpoint.id) == state.selectedRuntimeId,
+                onClick = { onSelectEndpoint(endpoint.id) },
+                label = { Text("Cloud · ${endpoint.displayName}", maxLines = 1) },
+            )
+        }
+        TextButton(onClick = onClear, enabled = !state.isGenerating) { Text("Clear") }
+    }
+}
+
+@Composable
+private fun ModelsScreen(
+    state: AppUiState,
+    onImport: () -> Unit,
+    onSelect: (String) -> Unit,
+    onLoad: (String) -> Unit,
+    onUnload: () -> Unit,
+    onRemove: (String) -> Unit,
+    onContext: (String, Int) -> Unit,
+) {
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionHeader("Local models", "Verified GGUF files selected from this phone", Modifier.weight(1f))
+                Button(onClick = onImport, enabled = !state.isImporting && !state.isGenerating) { Text("Import GGUF") }
+            }
+        }
+        if (state.isImporting) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(state.importProgress?.stage ?: "Importing model", fontWeight = FontWeight.SemiBold)
+                            state.importProgress?.takeIf { it.totalBytes > 0 }?.let {
+                                Text(
+                                    "${formatBytes(it.bytesRead)} / ${formatBytes(it.totalBytes)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
+        if (state.localModels.isEmpty() && !state.isImporting) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("No local models yet", fontWeight = FontWeight.SemiBold)
+                        Text("Start with LFM2.5-2.6B-Q4_0.gguf. Bram keeps the file where it is and retains read access.")
+                        Button(onClick = onImport) { Text("Choose a GGUF") }
+                    }
+                }
+            }
+        }
+        items(state.localModels, key = { it.id.value }) { model ->
+            LocalModelCard(
+                model = model,
+                selected = state.selectedRuntimeId == model.id.value,
+                loaded = state.loadedModelId == model.id.value && state.cpuValidated,
+                loading = state.isLoadingModel && state.selectedRuntimeId == model.id.value,
+                generationActive = state.isGenerating,
+                onSelect = { onSelect(model.id.value) },
+                onLoad = { onLoad(model.id.value) },
+                onUnload = onUnload,
+                onRemove = { onRemove(model.id.value) },
+                onContext = { onContext(model.id.value, it) },
+            )
+        }
+        state.modelLoadDetail?.let { detail -> item { InfoCard("Validated CPU plan", detail) } }
+        state.error?.let { error -> item { ErrorCard(error) } }
+        item {
+            Text(
+                "GPU, Hexagon NPU, LiteRT, downloads, and storage-assisted oversized models remain intentionally disabled in this CPU baseline.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LocalModelCard(
+    model: LocalModelRecord,
+    selected: Boolean,
+    loaded: Boolean,
+    loading: Boolean,
+    generationActive: Boolean,
+    onSelect: () -> Unit,
+    onLoad: () -> Unit,
+    onUnload: () -> Unit,
+    onRemove: () -> Unit,
+    onContext: (Int) -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f)) {
+                    Text(model.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "${model.architecture} · ${model.quantization} · ${formatBytes(model.fileSizeBytes)}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (loaded) Text("✓ CPU ready", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+            }
+            Text(
+                "${model.layerCount.takeIf { it > 0 } ?: "?"} layers · trained context ${formatTokens(model.trainedContextTokens)} · SHA ${model.sha256.take(12)}…",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (!model.hasChatTemplate) {
+                Text("No chat template found; this model cannot chat until a template override is supported.", color = MaterialTheme.colorScheme.error)
+            }
+            Text("CPU context", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                contextOptions(model).forEach { tokens ->
+                    FilterChip(
+                        selected = tokens == model.preferredContextTokens,
+                        onClick = { onContext(tokens) },
+                        enabled = !loaded && !loading && !generationActive,
+                        label = { Text(formatTokens(tokens)) },
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!selected) OutlinedButton(onClick = onSelect) { Text("Select") }
+                if (loaded) {
+                    OutlinedButton(onClick = onUnload, enabled = !generationActive) { Text("Unload") }
+                } else {
+                    Button(
+                        onClick = onLoad,
+                        enabled = !loading && !generationActive && model.hasChatTemplate,
+                    ) {
+                        if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        else Text("Load on CPU")
+                    }
+                }
+                TextButton(onClick = onRemove, enabled = !loaded && !loading && !generationActive) { Text("Remove") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    state: AppUiState,
+    onSaveEndpoint: (EndpointDraft) -> Unit,
+    onRemoveEndpoint: (String) -> Unit,
+    onRefreshDiagnostics: () -> Unit,
+) {
+    var name by rememberSaveable { mutableStateOf("") }
+    var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
+    var modelName by rememberSaveable { mutableStateOf("") }
+    var context by rememberSaveable { mutableStateOf("32768") }
+    var apiKey by rememberSaveable { mutableStateOf("") }
+    var allowHttp by rememberSaveable { mutableStateOf(false) }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionHeader("Optional remote providers", "OpenAI-compatible Chat Completions endpoints")
+        if (state.endpoints.isEmpty()) Text("None configured. Local GGUF chat does not require one.")
+        state.endpoints.forEach { EndpointCard(it, onRemoveEndpoint) }
+
+        Text("Add provider", fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(name, { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("Base URL") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(modelName, { modelName = it }, label = { Text("Model ID") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(
+            context,
+            { context = it.filter(Char::isDigit) },
+            label = { Text("Context tokens") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            apiKey,
+            { apiKey = it },
+            label = { Text("API key (optional)") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(allowHttp, { allowHttp = it })
+            Column {
+                Text("Allow insecure HTTP")
+                Text(
+                    "Only for a trusted local network; prompts and credentials are unencrypted in transit.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Button(
+            onClick = {
+                onSaveEndpoint(
+                    EndpointDraft(name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp),
+                )
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Save provider") }
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionHeader("Device diagnostics", "Detection is not validation", Modifier.weight(1f))
+            TextButton(onClick = onRefreshDiagnostics) { Text("Refresh") }
+        }
+        state.deviceProfile?.let { profile ->
+            DeviceSummaryCard(profile)
+            profile.accelerators.forEach { AcceleratorRow(it) }
+        } ?: CircularProgressIndicator()
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        SectionHeader("Agent foundation", "Kept behind the local model experience")
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ReadinessRow("Context budgeting", "Working")
+                ReadinessRow("Remote tool loop", "Working")
+                ReadinessRow("Local isolated inference", if (state.cpuValidated) "CPU validated" else "Awaiting model test")
+                ReadinessRow("Durable conversation memory", "Deferred")
+                ReadinessRow("Skills and automation", "Deferred")
+            }
+        }
+        state.error?.let { ErrorCard(it) }
+        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -319,10 +531,7 @@ private fun ChatScreen(
 private fun ChatBubble(message: ConversationMessage) {
     if (message.role == MessageRole.SYSTEM) return
     val isUser = message.role == MessageRole.USER
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
-    ) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Surface(
             color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = MaterialTheme.shapes.large,
@@ -346,88 +555,43 @@ private fun ChatBubble(message: ConversationMessage) {
 }
 
 @Composable
-private fun ProviderScreen(
-    state: AppUiState,
-    onSave: (EndpointDraft) -> Unit,
-    onRemove: (String) -> Unit,
-) {
-    var name by rememberSaveable { mutableStateOf("") }
-    var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
-    var modelName by rememberSaveable { mutableStateOf("") }
-    var context by rememberSaveable { mutableStateOf("32768") }
-    var apiKey by rememberSaveable { mutableStateOf("") }
-    var allowHttp by rememberSaveable { mutableStateOf(false) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        SectionHeader("Configured endpoints", "Chat Completions-compatible servers")
-        if (state.endpoints.isEmpty()) {
-            Text("None yet. Add Ollama, LM Studio, vLLM, llama.cpp server, or a hosted provider below.")
+private fun DeviceSummaryCard(profile: DeviceProfile) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Text("${profile.manufacturer} ${profile.model}", style = MaterialTheme.typography.titleMedium)
+            Text(profile.soc, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            HorizontalDivider()
+            MetricRow("RAM available", "${formatBytes(profile.availableRamBytes)} / ${formatBytes(profile.totalRamBytes)}")
+            MetricRow("Storage free", "${formatBytes(profile.freeStorageBytes)} / ${formatBytes(profile.totalStorageBytes)}")
+            MetricRow("CPU", "${profile.cpuCoreCount} cores · ${profile.appAbi}")
+            MetricRow("Thermals", profile.thermalStatus)
         }
-        state.endpoints.forEach { endpoint -> EndpointCard(endpoint, onRemove) }
+    }
+}
 
-        HorizontalDivider(Modifier.padding(vertical = 8.dp))
-        SectionHeader("Add endpoint", "Base URL should normally end in /v1")
-        OutlinedTextField(name, { name = it }, label = { Text("Name (for example, Home Ollama)") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("Base URL") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(modelName, { modelName = it }, label = { Text("Model ID") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(context, { context = it.filter(Char::isDigit) }, label = { Text("Context window tokens") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(
-            apiKey,
-            { apiKey = it },
-            label = { Text("API key (optional)") },
-            visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = allowHttp, onCheckedChange = { allowHttp = it })
+@Composable
+private fun AcceleratorRow(capability: AcceleratorCapability) {
+    Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
+            val marker = when (capability.state) {
+                CapabilityState.AVAILABLE -> "✓"
+                CapabilityState.DETECTED_NOT_VALIDATED -> "?"
+                CapabilityState.UNPROBED -> "·"
+                CapabilityState.UNAVAILABLE, CapabilityState.FAILED_VALIDATION -> "×"
+            }
+            Text(marker, modifier = Modifier.width(28.dp), fontWeight = FontWeight.Bold)
             Column {
-                Text("Allow insecure HTTP")
-                Text(
-                    "Only for a trusted local network. Credentials and prompts are not encrypted in transit.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Text(capability.kind.name.replace('_', ' '), fontWeight = FontWeight.Medium)
+                Text(capability.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        Button(
-            onClick = {
-                onSave(
-                    EndpointDraft(
-                        displayName = name,
-                        baseUrl = baseUrl,
-                        modelName = modelName,
-                        contextWindowTokens = context.toIntOrNull() ?: 0,
-                        apiKey = apiKey,
-                        allowInsecureHttp = allowHttp,
-                    ),
-                )
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Save endpoint")
-        }
-        state.error?.let { error ->
-            Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
-                Text(error, modifier = Modifier.padding(12.dp), color = MaterialTheme.colorScheme.onErrorContainer)
-            }
-        }
-        Spacer(Modifier.height(20.dp))
     }
 }
 
 @Composable
 private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
     Card(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(endpoint.displayName, fontWeight = FontWeight.SemiBold)
                 Text(endpoint.modelName)
@@ -443,8 +607,25 @@ private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
 }
 
 @Composable
-private fun SectionHeader(title: String, subtitle: String) {
-    Column {
+private fun InfoCard(title: String, detail: String) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(detail, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun ErrorCard(error: String) {
+    Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
+        Text(error, modifier = Modifier.padding(12.dp), color = MaterialTheme.colorScheme.onErrorContainer)
+    }
+}
+
+@Composable
+private fun SectionHeader(title: String, subtitle: String, modifier: Modifier = Modifier) {
+    Column(modifier) {
         Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -466,13 +647,26 @@ private fun ReadinessRow(label: String, status: String) {
     }
 }
 
+private fun contextOptions(model: LocalModelRecord): List<Int> {
+    val maximum = model.trainedContextTokens.takeIf { it > 0 } ?: model.preferredContextTokens
+    val standard = listOf(1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072)
+    return (standard.filter { it <= maximum } + maximum + model.preferredContextTokens)
+        .filter { it >= 256 }
+        .distinct()
+        .sorted()
+}
+
 private fun formatBytes(bytes: Long): String {
     val gib = bytes / 1_073_741_824.0
-    return if (gib >= 1) String.format(Locale.US, "%.1f GB", gib) else String.format(Locale.US, "%.0f MB", bytes / 1_048_576.0)
+    return if (gib >= 1) String.format(Locale.US, "%.1f GB", gib)
+    else String.format(Locale.US, "%.0f MB", bytes / 1_048_576.0)
 }
 
 private fun formatTokens(tokens: Int): String = when {
+    tokens <= 0 -> "unknown"
     tokens >= 1_000_000 -> String.format(Locale.US, "%.1fM", tokens / 1_000_000.0)
     tokens >= 1_000 -> String.format(Locale.US, "%.0fK", tokens / 1_000.0)
     else -> tokens.toString()
 }
+
+private fun formatRate(rate: Double?): String = rate?.let { String.format(Locale.US, "%.1f tok/s", it) } ?: "measuring"

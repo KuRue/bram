@@ -77,6 +77,7 @@ class DefaultAgentOrchestrator(
                     }
                     is GenerationEvent.ToolCallReady -> toolCalls += event.call
                     is GenerationEvent.Usage -> emit(AgentEvent.Usage(event.usage))
+                    is GenerationEvent.Metrics -> emit(AgentEvent.Metrics(event.metrics))
                     is GenerationEvent.Failed -> failure = event
                     is GenerationEvent.Finished -> Unit
                 }

@@ -1,34 +1,58 @@
 package io.github.kurue.bram.runtime.llamacpp
 
+import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.GenerationEvent
 import io.github.kurue.bram.core.domain.GenerationRequest
-import io.github.kurue.bram.core.domain.ModelDescriptor
+import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.RuntimeAvailability
+import io.github.kurue.bram.runtime.llamacpp.inference.LlamaCppServiceClient
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 
-/**
- * Stable Kotlin boundary for the future AIDL/JNI implementation.
- *
- * Do not load a native library in this class's initializer. Backend/driver crashes must remain in
- * the :inference process, and simply browsing the model catalog must never initialize a driver.
- */
 class LlamaCppRuntime(
-    override val model: ModelDescriptor,
+    private val record: LocalModelRecord,
+    private val client: LlamaCppServiceClient,
 ) : ModelRuntime {
-    override suspend fun availability(): RuntimeAvailability = RuntimeAvailability(
-        available = false,
-        summary = "Native runtime not linked",
-        detail = "Vendor a pinned llama.cpp build and connect this adapter to IInferenceService.",
-    )
+    override val model = record.asModelDescriptor()
 
-    override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
-        emit(
-            GenerationEvent.Failed(
-                message = "llama.cpp integration is scaffolded but not implemented",
-                recoverable = true,
-            ),
+    override suspend fun availability(): RuntimeAvailability = runCatching {
+        val probe = client.probe()
+        val state = client.state()
+        when {
+            !probe.optBoolean("nativeRuntimeLinked") -> RuntimeAvailability(
+                available = false,
+                summary = "Native CPU runtime unavailable",
+                detail = "This APK does not contain a usable llama.cpp library.",
+            )
+            state.optString("loadedModelId") != record.id.value -> RuntimeAvailability(
+                available = false,
+                summary = "Model is not loaded",
+                detail = "Load ${record.displayName} from Models before sending a message.",
+            )
+            !state.optBoolean("cpuValidated") -> RuntimeAvailability(
+                available = false,
+                summary = "CPU plan is not validated",
+                detail = "Run the model load/self-test before chatting.",
+            )
+            else -> RuntimeAvailability(
+                available = true,
+                summary = "Local CPU ready",
+                detail = "llama.cpp ${probe.optString("llamaCppCommit").take(12)}",
+            )
+        }
+    }.getOrElse { error ->
+        RuntimeAvailability(
+            available = false,
+            summary = "Inference process unavailable",
+            detail = error.message ?: error::class.java.simpleName,
         )
+    }
+
+    override suspend fun countTokens(messages: List<ConversationMessage>): Int? = client.countTokens(messages)
+
+    override fun generate(request: GenerationRequest): Flow<GenerationEvent> = client.generate(request)
+
+    override suspend fun cancel(requestId: String) {
+        client.cancel(requestId)
     }
 }
