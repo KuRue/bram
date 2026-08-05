@@ -1,7 +1,10 @@
 #include <jni.h>
 
+#include <android/log.h>
+
 #include "llama.h"
 #include "chat.h"
+#include <deque>
 
 #include <algorithm>
 #include <atomic>
@@ -30,8 +33,46 @@ std::mutex g_mutex;
 std::once_flag g_backend_once;
 std::atomic_bool g_cancelled{false};
 
+// Recent native log lines, kept so load failures can surface llama.cpp's actual reason.
+std::mutex g_log_mutex;
+std::deque<std::string> g_recent_log;
+
+void forward_llama_log(ggml_log_level level, const char * text, void * /*user_data*/) {
+    if (text == nullptr) return;
+    int priority = ANDROID_LOG_INFO;
+    switch (level) {
+        case GGML_LOG_LEVEL_ERROR: priority = ANDROID_LOG_ERROR; break;
+        case GGML_LOG_LEVEL_WARN: priority = ANDROID_LOG_WARN; break;
+        case GGML_LOG_LEVEL_DEBUG: priority = ANDROID_LOG_DEBUG; break;
+        default: break;
+    }
+    __android_log_write(priority, "BramLlama", text);
+    if (level == GGML_LOG_LEVEL_ERROR || level == GGML_LOG_LEVEL_WARN) {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_recent_log.emplace_back(text);
+        while (g_recent_log.size() > 8) g_recent_log.pop_front();
+    }
+}
+
+std::string drain_recent_log() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    std::string joined;
+    for (const std::string & line : g_recent_log) {
+        std::string trimmed = line;
+        while (!trimmed.empty() && (trimmed.back() == '\n' || trimmed.back() == '\r')) trimmed.pop_back();
+        if (trimmed.empty()) continue;
+        if (!joined.empty()) joined += " | ";
+        joined += trimmed;
+    }
+    g_recent_log.clear();
+    return joined;
+}
+
 void ensure_backend() {
-    std::call_once(g_backend_once, [] { llama_backend_init(); });
+    std::call_once(g_backend_once, [] {
+        llama_log_set(forward_llama_log, nullptr);
+        llama_backend_init();
+    });
 }
 
 void throw_java(JNIEnv * env, const std::string & message) {
@@ -290,8 +331,14 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         params.load_mode = LLAMA_LOAD_MODE_MMAP;
         params.vocab_only = false;
         params.check_tensors = false;
+        drain_recent_log();
         g_state.model = llama_model_load_from_file(model_path.c_str(), params);
-        if (g_state.model == nullptr) throw std::runtime_error("llama.cpp could not load the selected GGUF");
+        if (g_state.model == nullptr) {
+            std::string detail = drain_recent_log();
+            std::string message = "llama.cpp could not load the selected GGUF";
+            if (!detail.empty()) message += ": " + detail;
+            throw std::runtime_error(message);
+        }
         g_state.chat_templates = common_chat_templates_init(g_state.model, "");
         if (!g_state.chat_templates) throw std::runtime_error("Could not initialize the GGUF chat template");
         g_state.context_tokens = context_tokens;
