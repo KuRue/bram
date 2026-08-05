@@ -28,6 +28,7 @@ class LocalModelStore(
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
     private val preferences = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+    private val modelsDirectory = java.io.File(appContext.filesDir, "models")
 
     suspend fun list(): List<LocalModelRecord> = withContext(Dispatchers.IO) {
         decode(preferences.getString(KEY_MODELS, null))
@@ -52,43 +53,50 @@ class LocalModelStore(
             throw error
         }
 
-        progress(ModelImportProgress("Verifying SHA-256", totalBytes = document.size))
+        // Native llama.cpp re-opens the model by path, which scoped storage denies for
+        // provider-granted descriptors. Copy the bytes into app-private storage, hashing in the
+        // same pass, and load from the copy from then on.
+        modelsDirectory.mkdirs()
+        val stagingFile = java.io.File.createTempFile("import-", ".gguf.part", modelsDirectory)
         val digest = MessageDigest.getInstance("SHA-256")
         var readTotal = 0L
-        resolver.openInputStream(uri)?.use { input ->
-            val buffer = ByteArray(HASH_BUFFER_BYTES)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                if (count == 0) continue
-                digest.update(buffer, 0, count)
-                readTotal += count
-                progress(ModelImportProgress("Verifying SHA-256", readTotal, document.size))
-            }
-        } ?: throw IllegalArgumentException("The selected document could not be read")
-        require(readTotal == document.size) {
-            "The model changed while it was being verified (${readTotal} of ${document.size} bytes read)"
-        }
-
         try {
-            resolver.takePersistableUriPermission(
-                uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-        } catch (error: SecurityException) {
-            throw IllegalArgumentException(
-                "This document provider did not grant persistent read access. Choose the GGUF with Android's Files picker.",
-                error,
-            )
+            resolver.openInputStream(uri)?.use { input ->
+                java.io.FileOutputStream(stagingFile).use { output ->
+                    val buffer = ByteArray(HASH_BUFFER_BYTES)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (count == 0) continue
+                        digest.update(buffer, 0, count)
+                        output.write(buffer, 0, count)
+                        readTotal += count
+                        progress(ModelImportProgress("Copying and verifying SHA-256", readTotal, document.size))
+                    }
+                    output.fd.sync()
+                }
+            } ?: throw IllegalArgumentException("The selected document could not be read")
+            require(readTotal == document.size) {
+                "The model changed while it was being copied (${readTotal} of ${document.size} bytes read)"
+            }
+        } catch (error: Throwable) {
+            runCatching { stagingFile.delete() }
+            throw error
         }
 
         val hash = digest.digest().joinToString("") { "%02x".format(it) }
+        val modelFile = java.io.File(modelsDirectory, "${hash.take(24)}.gguf")
+        if (!stagingFile.renameTo(modelFile)) {
+            runCatching { stagingFile.delete() }
+            throw IllegalStateException("Could not move the copied GGUF into app storage")
+        }
         val record = LocalModelRecord(
             id = ModelId("local:${hash.take(24)}"),
             displayName = metadata.name?.takeIf(String::isNotBlank)
                 ?: document.fileName.removeSuffix(".gguf").removeSuffix(".GGUF"),
             fileName = document.fileName,
             contentUri = uri.toString(),
+            localPath = modelFile.absolutePath,
             fileSizeBytes = document.size,
             sha256 = hash,
             ggufVersion = metadata.version,
@@ -106,12 +114,12 @@ class LocalModelStore(
         models += record
         persist(models)
         replaced.asSequence()
-            .map(LocalModelRecord::contentUri)
-            .filter { uriString ->
-                uriString != record.contentUri && models.none { it.contentUri == uriString }
+            .map(LocalModelRecord::localPath)
+            .filter { path ->
+                path.isNotBlank() && path != record.localPath && models.none { it.localPath == path }
             }
             .distinct()
-            .forEach { uriString -> releasePermission(uriString) }
+            .forEach { path -> runCatching { java.io.File(path).delete() } }
         progress(ModelImportProgress("Verified", document.size, document.size))
         record
     }
@@ -130,6 +138,9 @@ class LocalModelStore(
         val removed = models.firstOrNull { it.id == modelId } ?: return@withContext
         models.remove(removed)
         persist(models)
+        if (removed.localPath.isNotBlank() && models.none { it.localPath == removed.localPath }) {
+            runCatching { java.io.File(removed.localPath).delete() }
+        }
         if (models.none { it.contentUri == removed.contentUri }) {
             releasePermission(removed.contentUri)
         }
@@ -167,7 +178,7 @@ class LocalModelStore(
             .getOrElse {
                 throw NonSeekableModelException(
                     "${resolver.getType(uri) ?: "This document provider"} does not expose a seekable model file. " +
-                        "Choose the file from local device storage; app-managed copying will be added before downloads.",
+                        "Choose the file from local device storage.",
                 )
             }
         Os.lseek(fileDescriptor, position, OsConstants.SEEK_SET)
@@ -196,6 +207,7 @@ class LocalModelStore(
         .put("displayName", displayName)
         .put("fileName", fileName)
         .put("contentUri", contentUri)
+        .put("localPath", localPath)
         .put("fileSizeBytes", fileSizeBytes)
         .put("sha256", sha256)
         .put("ggufVersion", ggufVersion)
@@ -212,6 +224,7 @@ class LocalModelStore(
         displayName = getString("displayName"),
         fileName = getString("fileName"),
         contentUri = getString("contentUri"),
+        localPath = optString("localPath"),
         fileSizeBytes = getLong("fileSizeBytes"),
         sha256 = getString("sha256"),
         ggufVersion = getInt("ggufVersion"),

@@ -48,6 +48,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         val request = JSONObject()
             .put("modelId", model.id.value)
             .put("contentUri", model.contentUri)
+            .put("localPath", model.localPath)
             .put("fileSizeBytes", model.fileSizeBytes)
             .put("contextTokens", model.preferredContextTokens)
             .put("batchTokens", minOf(512, model.preferredContextTokens))

@@ -57,15 +57,17 @@ data class LocalModelArtifact(
 /**
  * A GGUF selected through Android's Storage Access Framework.
  *
- * [contentUri] is deliberately stored as a string so the domain model remains Android-free. The
- * Android runtime owns persisted URI permission and validates that the provider is seekable before
- * a record is admitted to the catalog.
+ * [contentUri] records the import source for display; the runtime copies the bytes into
+ * app-private storage at [localPath] because scoped storage forbids native code from re-opening
+ * a provider-granted descriptor by path. Both are strings so the domain model remains
+ * Android-free.
  */
 data class LocalModelRecord(
     val id: ModelId,
     val displayName: String,
     val fileName: String,
     val contentUri: String,
+    val localPath: String,
     val fileSizeBytes: Long,
     val sha256: String,
     val ggufVersion: Int,

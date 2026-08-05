@@ -2,12 +2,8 @@ package io.github.kurue.bram.runtime.llamacpp.inference
 
 import android.app.Service
 import android.content.Intent
-import android.net.Uri
 import android.os.Debug
 import android.os.IBinder
-import android.os.ParcelFileDescriptor
-import android.system.Os
-import android.system.OsConstants
 import io.github.kurue.bram.runtime.llamacpp.BuildConfig
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
@@ -23,7 +19,6 @@ class InferenceProcessService : Service() {
     }
     private val requests = ConcurrentHashMap<String, Future<*>>()
     private val bridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { NativeLlamaBridge() }
-    private var loadedDescriptor: ParcelFileDescriptor? = null
     private var loadedModelId: String? = null
     private var loadedContextTokens: Int = 0
     private var cpuValidated = false
@@ -151,18 +146,25 @@ class InferenceProcessService : Service() {
                 .toString()
         }
 
-        val descriptor = contentResolver.openFileDescriptor(Uri.parse(request.getString("contentUri")), "r")
-            ?: throw IllegalArgumentException("The selected GGUF can no longer be opened")
+        val localPath = request.optString("localPath")
+        if (localPath.isBlank()) {
+            throw IllegalArgumentException(
+                "This model was imported by an older Bram build. Remove it and import the GGUF again.",
+            )
+        }
+        val modelFile = java.io.File(localPath)
+        if (!modelFile.isFile) {
+            throw IllegalArgumentException("The imported GGUF copy is missing. Import the model again.")
+        }
         try {
-            Os.lseek(descriptor.fileDescriptor, 0, OsConstants.SEEK_CUR)
             val expectedSize = request.optLong("fileSizeBytes", -1L)
-            val actualSize = descriptor.statSize
-            require(expectedSize < 0 || actualSize < 0 || expectedSize == actualSize) {
+            val actualSize = modelFile.length()
+            require(expectedSize < 0 || expectedSize == actualSize) {
                 "The GGUF size changed after import. Remove it from Bram and import it again before loading."
             }
             val loadResult = JSONObject(
                 bridge.load(
-                    modelPath = "/proc/self/fd/${descriptor.fd}",
+                    modelPath = modelFile.absolutePath,
                     contextTokens = contextTokens,
                     batchTokens = request.optInt("batchTokens", 512).coerceIn(32, contextTokens),
                     threads = request.optInt("threads", Runtime.getRuntime().availableProcessors())
@@ -173,8 +175,6 @@ class InferenceProcessService : Service() {
             check(validation.optBoolean("passed")) {
                 validation.optString("detail", "Native CPU correctness self-test failed")
             }
-            loadedDescriptor?.close()
-            loadedDescriptor = descriptor
             loadedModelId = modelId
             loadedContextTokens = contextTokens
             cpuValidated = true
@@ -186,10 +186,7 @@ class InferenceProcessService : Service() {
                 .put("selfTest", validation)
                 .toString()
         } catch (error: Throwable) {
-            descriptor.close()
             runCatching { bridge.unload() }
-            loadedDescriptor?.close()
-            loadedDescriptor = null
             loadedModelId = null
             loadedContextTokens = 0
             cpuValidated = false
@@ -200,8 +197,6 @@ class InferenceProcessService : Service() {
     private fun unloadModel(): String {
         bridge.cancel()
         val result = bridge.unload()
-        loadedDescriptor?.close()
-        loadedDescriptor = null
         loadedModelId = null
         loadedContextTokens = 0
         cpuValidated = false
