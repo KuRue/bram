@@ -22,6 +22,21 @@ set(GGML_RPC OFF CACHE BOOL "" FORCE)
 # reference before its capability is reported as available; CPU remains the correctness oracle.
 set(GGML_VULKAN ON CACHE BOOL "" FORCE)
 
+# The NDK sysroot ships the C Vulkan headers but not the C++ bindings (vulkan/vulkan.hpp) that
+# ggml-vulkan.cpp includes. Vendor a pinned Vulkan-Headers (which provides vulkan.hpp) and point
+# find_package(Vulkan)'s include dir at it; libvulkan.so is still linked from the sysroot.
+FetchContent_Declare(
+    Vulkan-Headers
+    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+    # vulkan-sdk-1.4.321.0
+    GIT_TAG 2cd90f9d20df57eac214c148f3aed885372ddcfe
+    GIT_SHALLOW FALSE
+    GIT_PROGRESS TRUE
+)
+FetchContent_MakeAvailable(Vulkan-Headers)
+FetchContent_GetProperties(Vulkan-Headers SOURCE_DIR _bram_vulkan_headers_src)
+set(Vulkan_INCLUDE_DIR "${_bram_vulkan_headers_src}/include" CACHE PATH "Bram vendored Vulkan headers" FORCE)
+
 # ggml-vulkan compiles its SPIR-V shaders with glslc at build time. glslc is a host tool that
 # ships inside the NDK (shader-tools/<host>/), which is outside the cross-compile sysroot, so
 # CMake's FindVulkan cannot discover it on its own. Point it at the NDK copy for the current host.
