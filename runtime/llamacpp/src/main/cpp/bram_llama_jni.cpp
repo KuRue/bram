@@ -325,7 +325,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_probe(
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     JNIEnv * env, jobject, jstring path, jint context_tokens, jint batch_tokens, jint threads,
-    jint gpu_layers) {
+    jint gpu_layers, jstring device_filter) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         ensure_backend();
@@ -334,12 +334,37 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         const std::string model_path = from_jstring(env, path);
         llama_model_params params = llama_model_default_params();
         params.n_gpu_layers = gpu_layers;
+
+        // Without an explicit list llama.cpp offloads to whichever accelerator it considers best,
+        // which makes "validate the NPU" ambiguous on a device that also exposes a GPU. When a
+        // filter is supplied, restrict offload to devices whose name matches it. The vector must
+        // outlive the load call because llama_model_params only borrows the pointer.
+        const std::string filter = device_filter == nullptr ? std::string() : from_jstring(env, device_filter);
+        std::vector<ggml_backend_dev_t> selected;
+        if (!filter.empty()) {
+            const size_t count = ggml_backend_dev_count();
+            for (size_t index = 0; index < count; ++index) {
+                ggml_backend_dev_t device = ggml_backend_dev_get(index);
+                if (device == nullptr) continue;
+                const char * name = ggml_backend_dev_name(device);
+                if (name != nullptr && std::string(name).rfind(filter, 0) == 0) {
+                    selected.push_back(device);
+                }
+            }
+            if (selected.empty()) {
+                throw std::runtime_error("No backend device matches '" + filter + "' on this build");
+            }
+            selected.push_back(nullptr);  // llama.cpp expects a null-terminated list
+            params.devices = selected.data();
+        }
         params.load_mode = LLAMA_LOAD_MODE_MMAP;
         params.vocab_only = false;
         params.check_tensors = false;
         drain_recent_log();
         __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-            "bram_load: requesting n_gpu_layers=%d", static_cast<int>(gpu_layers));
+            "bram_load: requesting n_gpu_layers=%d device_filter='%s' matched=%d",
+            static_cast<int>(gpu_layers), filter.c_str(),
+            selected.empty() ? 0 : static_cast<int>(selected.size() - 1));
         g_state.model = llama_model_load_from_file(model_path.c_str(), params);
         if (g_state.model == nullptr) {
             std::string detail = drain_recent_log();

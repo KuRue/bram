@@ -81,6 +81,12 @@ data class AcceleratorProbe(
     val usable: Boolean get() = agreement >= 0.9
 }
 
+/** Accelerator families Bram can validate against the CPU reference. */
+enum class AcceleratorTarget(val label: String, val devicePrefix: String) {
+    VULKAN("Adreno (Vulkan)", "Vulkan"),
+    HEXAGON("Hexagon NPU", "HTP"),
+}
+
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
@@ -259,7 +265,7 @@ class MainViewModel(
      * the same sequence. Loading twice in sequence (rather than side by side) keeps peak memory to
      * one model, which matters on a phone.
      */
-    fun validateAccelerator(modelId: String) {
+    fun validateAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
@@ -278,10 +284,10 @@ class MainViewModel(
                 val devices = container.llamaCppClient.devices()
                 val deviceName = (0 until devices.optJSONArray("devices")?.length().orZero())
                     .map { index -> devices.getJSONArray("devices").getJSONObject(index) }
-                    .firstOrNull { device -> device.optString("name").startsWith("Vulkan") }
+                    .firstOrNull { device -> device.optString("name").startsWith(target.devicePrefix) }
                     ?.let { device -> device.optString("description").ifBlank { device.optString("name") } }
                     ?: throw IllegalStateException(
-                        "This build found no Vulkan device, so the Adreno backend cannot be validated.",
+                        "This build found no ${target.label} device, so it cannot be validated.",
                     )
 
                 container.llamaCppClient.load(model, threads, gpuLayers = 0)
@@ -291,7 +297,12 @@ class MainViewModel(
                 val cpuTokens = cpuResult.optJSONArray("tokens").toIntList()
 
                 mutableState.update { it.copy(status = "Replaying the reference on $deviceName…") }
-                container.llamaCppClient.load(model, threads, gpuLayers = FULL_GPU_OFFLOAD)
+                container.llamaCppClient.load(
+                    model,
+                    threads,
+                    gpuLayers = FULL_GPU_OFFLOAD,
+                    deviceFilter = target.devicePrefix,
+                )
                 val gpuStarted = System.currentTimeMillis()
                 val gpuResult = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
                 val gpuMillis = System.currentTimeMillis() - gpuStarted
@@ -334,7 +345,7 @@ class MainViewModel(
      * boundary lands at zero or partway through separates "a shared operation is broken" from
      * "one layer's operation is broken".
      */
-    fun bisectAccelerator(modelId: String) {
+    fun bisectAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
@@ -355,9 +366,11 @@ class MainViewModel(
                 val devices = container.llamaCppClient.devices()
                 val deviceName = (0 until devices.optJSONArray("devices")?.length().orZero())
                     .map { index -> devices.getJSONArray("devices").getJSONObject(index) }
-                    .firstOrNull { device -> device.optString("name").startsWith("Vulkan") }
+                    .firstOrNull { device -> device.optString("name").startsWith(target.devicePrefix) }
                     ?.let { device -> device.optString("description").ifBlank { device.optString("name") } }
-                    ?: throw IllegalStateException("This build found no Vulkan device to bisect.")
+                    ?: throw IllegalStateException(
+                        "This build found no ${target.label} device to bisect.",
+                    )
 
                 container.llamaCppClient.load(model, threads, gpuLayers = 0)
                 val reference = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
@@ -369,8 +382,15 @@ class MainViewModel(
 
                 val forced = reference.toIntArray()
                 suspend fun probeAt(layers: Int): AcceleratorProbe {
-                    mutableState.update { it.copy(status = "Testing $layers of $totalLayers layers on GPU…") }
-                    container.llamaCppClient.load(model, threads, gpuLayers = layers)
+                    mutableState.update {
+                        it.copy(status = "Testing $layers of $totalLayers layers on ${target.label}…")
+                    }
+                    container.llamaCppClient.load(
+                        model,
+                        threads,
+                        gpuLayers = layers,
+                        deviceFilter = target.devicePrefix,
+                    )
                     val started = System.currentTimeMillis()
                     val predicted = container.llamaCppClient.teacherForced(forced)
                         .optJSONArray("predictions").toIntList()

@@ -26,6 +26,13 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        jniLibs {
+            // The Hexagon HTP skels are QUALCOMM DSP6 binaries, not ARM64, so the ARM strip tool
+            // cannot process them. They also have to exist as real files on disk because the NPU
+            // loader resolves them through ADSP_LIBRARY_PATH rather than the APK.
+            keepDebugSymbols += "**/libggml-htp-*.so"
+            useLegacyPackaging = true
+        }
     }
 }
 

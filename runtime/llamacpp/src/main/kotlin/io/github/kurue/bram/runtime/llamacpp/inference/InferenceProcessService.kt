@@ -18,10 +18,19 @@ class InferenceProcessService : Service() {
         Thread(task, "bram-local-inference").apply { priority = Thread.NORM_PRIORITY }
     }
     private val requests = ConcurrentHashMap<String, Future<*>>()
-    private val bridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { NativeLlamaBridge() }
+    private val bridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        // The Hexagon NPU loader resolves its DSP-side skels through ADSP_LIBRARY_PATH, and reads
+        // it when the backend initialises, so it has to be set before the native library loads.
+        runCatching {
+            val nativeDir = applicationInfo.nativeLibraryDir
+            android.system.Os.setenv("ADSP_LIBRARY_PATH", nativeDir, true)
+        }
+        NativeLlamaBridge()
+    }
     private var loadedModelId: String? = null
     private var loadedContextTokens: Int = 0
     private var loadedGpuLayers: Int = 0
+    private var loadedDeviceFilter: String = ""
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
@@ -150,11 +159,13 @@ class InferenceProcessService : Service() {
         val modelId = request.getString("modelId")
         val contextTokens = request.getInt("contextTokens").coerceAtLeast(256)
         val gpuLayers = request.optInt("gpuLayers", 0).coerceAtLeast(0)
+        val deviceFilter = request.optString("deviceFilter")
         // The offload plan is part of the load identity: reusing a CPU-resident model for a GPU
         // request would silently validate the accelerator against itself.
         if (modelId == loadedModelId &&
             contextTokens == loadedContextTokens &&
             gpuLayers == loadedGpuLayers &&
+            deviceFilter == loadedDeviceFilter &&
             cpuValidated
         ) {
             return JSONObject(bridge.state())
@@ -188,6 +199,7 @@ class InferenceProcessService : Service() {
                     threads = request.optInt("threads", Runtime.getRuntime().availableProcessors())
                         .coerceIn(1, Runtime.getRuntime().availableProcessors()),
                     gpuLayers = gpuLayers,
+                    deviceFilter = deviceFilter,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())
@@ -197,6 +209,7 @@ class InferenceProcessService : Service() {
             loadedModelId = modelId
             loadedContextTokens = contextTokens
             loadedGpuLayers = gpuLayers
+            loadedDeviceFilter = deviceFilter
             cpuValidated = true
             return loadResult
                 .put("alreadyLoaded", false)
@@ -210,6 +223,7 @@ class InferenceProcessService : Service() {
             loadedModelId = null
             loadedContextTokens = 0
             loadedGpuLayers = 0
+            loadedDeviceFilter = ""
             cpuValidated = false
             throw error
         }
@@ -221,6 +235,7 @@ class InferenceProcessService : Service() {
         loadedModelId = null
         loadedContextTokens = 0
         loadedGpuLayers = 0
+        loadedDeviceFilter = ""
         cpuValidated = false
         return result
     }

@@ -99,6 +99,14 @@ file(WRITE "${_bram_host_toolchain}"
     "set(CMAKE_CXX_COMPILER \"\${_bram_host_cxx}\")\n")
 set(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "${_bram_host_toolchain}" CACHE FILEPATH "Bram host toolchain" FORCE)
 
+# The Hexagon SDK's hexagon_fun.cmake calls string(FIND ${PREBUILT_LIB_DIR} ...) at include time,
+# but PREBUILT_LIB_DIR is only supplied by the per-skel sub-builds. Left empty the call loses an
+# argument and configuration fails. Define an inert default: it matches none of the toolv8x probes,
+# which is the correct answer for the top-level include, and each skel still passes its own value.
+if(GGML_HEXAGON AND NOT PREBUILT_LIB_DIR)
+    set(PREBUILT_LIB_DIR "bram-unused" CACHE STRING "Inert default for the Hexagon SDK probes")
+endif()
+
 # Exact source identity for Bram's first CPU baseline. Do not track upstream branches here.
 FetchContent_Declare(
     llama_cpp
@@ -121,3 +129,22 @@ add_library(bram_llama SHARED bram_llama_jni.cpp)
 target_compile_features(bram_llama PRIVATE cxx_std_17)
 target_compile_options(bram_llama PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(bram_llama PRIVATE llama-common llama android log)
+
+# The Hexagon backend also produces DSP-side skel libraries (libggml-htp-vNN.so), built by
+# ExternalProject. Gradle asks the native build only for bram_llama, so without an explicit
+# dependency those sub-projects are configured but never built. They are Hexagon binaries, not
+# ARM64, and the NPU loader resolves them by path at runtime, so stage them next to the JNI library
+# for packaging; ADSP_LIBRARY_PATH points at the extracted directory on device.
+if(GGML_HEXAGON)
+    set(_bram_htp_targets htp-v73 htp-v75 htp-v79 htp-v81)
+    add_dependencies(bram_llama ${_bram_htp_targets})
+    set(_bram_htp_src "${CMAKE_BINARY_DIR}/_deps/llama_cpp-build/ggml/src/ggml-hexagon")
+    foreach(_htp_version v73 v75 v79 v81)
+        add_custom_command(TARGET bram_llama POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_bram_htp_src}/libggml-htp-${_htp_version}.so"
+                "$<TARGET_FILE_DIR:bram_llama>/"
+            COMMENT "Staging libggml-htp-${_htp_version}.so beside the JNI library"
+            VERBATIM)
+    endforeach()
+endif()

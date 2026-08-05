@@ -21,6 +21,17 @@ android {
                     "-DANDROID_STL=c++_shared",
                     "-DCMAKE_BUILD_TYPE=Release",
                 )
+                // The Hexagon NPU backend needs Qualcomm's proprietary Hexagon SDK, which cannot be
+                // fetched automatically and is absent on CI. Enable it only when a developer points
+                // HEXAGON_SDK_ROOT at a local install, so every other build is unaffected.
+                val hexagonSdkRoot = providers.environmentVariable("HEXAGON_SDK_ROOT").orNull
+                    ?: providers.gradleProperty("bram.hexagonSdkRoot").orNull
+                if (!hexagonSdkRoot.isNullOrBlank()) {
+                    arguments += listOf(
+                        "-DGGML_HEXAGON=ON",
+                        "-DHEXAGON_SDK_ROOT=$hexagonSdkRoot",
+                    )
+                }
             }
         }
 

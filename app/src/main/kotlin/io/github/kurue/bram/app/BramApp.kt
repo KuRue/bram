@@ -311,8 +311,8 @@ private fun ModelsScreen(
     onUnload: () -> Unit,
     onRemove: (String) -> Unit,
     onContext: (String, Int) -> Unit,
-    onValidateAccelerator: (String) -> Unit,
-    onBisectAccelerator: (String) -> Unit,
+    onValidateAccelerator: (String, AcceleratorTarget) -> Unit,
+    onBisectAccelerator: (String, AcceleratorTarget) -> Unit,
 ) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -374,8 +374,8 @@ private fun ModelsScreen(
             item {
                 AcceleratorValidationCard(
                     state = state,
-                    onValidate = { onValidateAccelerator(model.id.value) },
-                    onBisect = { onBisectAccelerator(model.id.value) },
+                    onValidate = { chosen -> onValidateAccelerator(model.id.value, chosen) },
+                    onBisect = { chosen -> onBisectAccelerator(model.id.value, chosen) },
                 )
             }
         }
@@ -393,28 +393,39 @@ private fun ModelsScreen(
 @Composable
 private fun AcceleratorValidationCard(
     state: AppUiState,
-    onValidate: () -> Unit,
-    onBisect: () -> Unit,
+    onValidate: (AcceleratorTarget) -> Unit,
+    onBisect: (AcceleratorTarget) -> Unit,
 ) {
+    var target by rememberSaveable { mutableStateOf(AcceleratorTarget.VULKAN) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Adreno (Vulkan) validation", fontWeight = FontWeight.SemiBold)
+            Text("Accelerator validation", fontWeight = FontWeight.SemiBold)
             Text(
-                "Loads the selected model on CPU to record a deterministic reference, then replays it " +
-                    "on the GPU. The GPU counts as validated only if every token matches.",
+                "Records a deterministic CPU reference, then feeds the same tokens to the accelerator " +
+                    "and compares each next-token prediction. Teacher forcing keeps one difference " +
+                    "from cascading, so the score reflects compute accuracy rather than drift.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AcceleratorTarget.entries.forEach { option ->
+                    FilterChip(
+                        selected = target == option,
+                        onClick = { target = option },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
             val busy = state.isValidatingAccelerator || state.isLoadingModel || state.isGenerating
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onValidate, enabled = !busy) {
+                Button(onClick = { onValidate(target) }, enabled = !busy) {
                     if (state.isValidatingAccelerator) {
                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
                     }
                     Text(if (state.isValidatingAccelerator) "Working…" else "Compare GPU against CPU")
                 }
-                OutlinedButton(onClick = onBisect, enabled = !busy) { Text("Bisect layers") }
+                OutlinedButton(onClick = { onBisect(target) }, enabled = !busy) { Text("Bisect layers") }
             }
             state.status?.takeIf { state.isValidatingAccelerator }?.let { status ->
                 Text(status, style = MaterialTheme.typography.bodySmall)

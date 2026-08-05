@@ -9,6 +9,15 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Bram"
         android:usesCleartextTraffic="true">
+        <!--
+            Reaching the Hexagon NPU means dlopen'ing Qualcomm's CDSP RPC libraries. They are listed
+            in /vendor/etc/public.libraries.txt, but since Android 12 an app must also name them
+            here or the load fails with "library not found". Optional, so the app still installs and
+            runs on devices without a Hexagon DSP.
+        -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+        <uses-native-library android:name="libadsprpc.so" android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">

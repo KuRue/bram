@@ -14,6 +14,7 @@ internal class NativeLlamaBridge {
         batchTokens: Int,
         threads: Int,
         gpuLayers: Int,
+        deviceFilter: String,
     ): String
     external fun referenceDecode(tokenCount: Int): String
     external fun teacherForced(forcedTokens: IntArray): String

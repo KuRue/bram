@@ -56,7 +56,12 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         JSONObject(requireService().teacherForced(forcedTokens))
     }
 
-    suspend fun load(model: LocalModelRecord, threads: Int, gpuLayers: Int = 0): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun load(
+        model: LocalModelRecord,
+        threads: Int,
+        gpuLayers: Int = 0,
+        deviceFilter: String = "",
+    ): JSONObject = withContext(Dispatchers.IO) {
         val request = JSONObject()
             .put("modelId", model.id.value)
             .put("contentUri", model.contentUri)
@@ -66,6 +71,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("batchTokens", minOf(512, model.preferredContextTokens))
             .put("threads", threads)
             .put("gpuLayers", gpuLayers)
+            .put("deviceFilter", deviceFilter)
         JSONObject(requireService().load(request.toString()))
     }
 
