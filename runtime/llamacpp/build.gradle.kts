@@ -2,6 +2,11 @@ plugins {
     alias(libs.plugins.android.library)
 }
 
+val bramIncludeEmulatorAbi: Boolean =
+    (providers.environmentVariable("BRAM_EMULATOR_ABI").orNull
+        ?: providers.gradleProperty("bram.emulatorAbi").orNull)
+        ?.toBooleanStrictOrNull() ?: false
+
 android {
     namespace = "io.github.kurue.bram.runtime.llamacpp"
     compileSdk = 36
@@ -12,6 +17,10 @@ android {
 
         ndk {
             abiFilters += "arm64-v8a"
+            // The stock Android emulator images are x86_64, so a phone-only ABI cannot load the
+            // native runtime there at all. Opt in when testing on an emulator; leaving it off keeps
+            // CI and phone builds from paying for a second full llama.cpp compile.
+            if (bramIncludeEmulatorAbi) abiFilters += "x86_64"
         }
 
         externalNativeBuild {
@@ -26,7 +35,7 @@ android {
                 // HEXAGON_SDK_ROOT at a local install, so every other build is unaffected.
                 val hexagonSdkRoot = providers.environmentVariable("HEXAGON_SDK_ROOT").orNull
                     ?: providers.gradleProperty("bram.hexagonSdkRoot").orNull
-                if (!hexagonSdkRoot.isNullOrBlank()) {
+                if (!hexagonSdkRoot.isNullOrBlank() && !bramIncludeEmulatorAbi) {
                     arguments += listOf(
                         "-DGGML_HEXAGON=ON",
                         "-DHEXAGON_SDK_ROOT=$hexagonSdkRoot",
