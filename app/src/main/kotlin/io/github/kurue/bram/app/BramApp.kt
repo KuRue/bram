@@ -1,5 +1,7 @@
 package io.github.kurue.bram.app
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -37,12 +40,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -118,6 +123,8 @@ fun BramApp(viewModel: MainViewModel) {
                     onDeleteConversation = viewModel::deleteConversation,
                     onLoad = viewModel::loadModel,
                     onOpenModels = { section = AppSection.MODELS },
+                    onRegenerate = viewModel::regenerateLastReply,
+                    onEdit = viewModel::editAndResend,
                 )
                 AppSection.MODELS -> ModelsScreen(
                     state = state,
@@ -156,9 +163,21 @@ private fun ChatScreen(
     onDeleteConversation: (String) -> Unit,
     onLoad: (String) -> Unit,
     onOpenModels: () -> Unit,
+    onRegenerate: () -> Unit,
+    onEdit: (String, String) -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf("") }
     val hasAnyRuntime = state.localModels.isNotEmpty() || state.endpoints.isNotEmpty()
+    val listState = rememberLazyListState()
+    val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
+
+    // Follow the reply as it streams. Keyed on the last message's length so each delta scrolls,
+    // not just each new message.
+    LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content?.length) {
+        if (state.messages.isNotEmpty()) {
+            runCatching { listState.animateScrollToItem(state.messages.lastIndex) }
+        }
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
         if (!hasAnyRuntime) {
             Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
@@ -209,6 +228,7 @@ private fun ChatScreen(
         }
 
         LazyColumn(
+            state = listState,
             modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -226,7 +246,17 @@ private fun ChatScreen(
                     )
                 }
             }
-            items(state.messages, key = { it.id.value }) { ChatBubble(it) }
+            items(state.messages, key = { it.id.value }) { message ->
+                ChatBubble(
+                    message = message,
+                    canAct = !state.isGenerating,
+                    onCopy = { text ->
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Bram", text))
+                    },
+                    onRegenerate = onRegenerate,
+                    onEdit = { text -> onEdit(message.id.value, text) },
+                )
+            }
             state.status?.let { status ->
                 item { Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
             }
@@ -948,9 +978,17 @@ private fun SettingsScreen(
 }
 
 @Composable
-private fun ChatBubble(message: ConversationMessage) {
+private fun ChatBubble(
+    message: ConversationMessage,
+    canAct: Boolean,
+    onCopy: (String) -> Unit,
+    onRegenerate: () -> Unit,
+    onEdit: (String) -> Unit,
+) {
     if (message.role == MessageRole.SYSTEM) return
     val isUser = message.role == MessageRole.USER
+    var editing by rememberSaveable(message.id.value) { mutableStateOf(false) }
+    var draft by rememberSaveable(message.id.value) { mutableStateOf(message.content) }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Surface(
             color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -969,8 +1007,42 @@ private fun ChatBubble(message: ConversationMessage) {
                     fontWeight = FontWeight.Bold,
                 )
                 message.activity.forEach { entry -> ActivityRow(entry) }
-                if (message.content.isNotBlank() || message.activity.isEmpty()) {
-                    Text(message.content.ifBlank { "…" })
+                if (editing) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 1,
+                        maxLines = 6,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            editing = false
+                            onEdit(draft)
+                        }) { Text("Send") }
+                        TextButton(onClick = {
+                            editing = false
+                            draft = message.content
+                        }) { Text("Cancel") }
+                    }
+                } else if (message.content.isNotBlank() || message.activity.isEmpty()) {
+                    // Models answer in Markdown whether or not anyone asked them to, so rendering
+                    // it is closer to showing the reply than showing the raw characters is.
+                    Text(renderMarkdown(message.content.ifBlank { "…" }))
+                }
+
+                if (canAct && !editing && message.content.isNotBlank()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = { onCopy(message.content) }) { Text("Copy") }
+                        if (isUser) {
+                            TextButton(onClick = {
+                                draft = message.content
+                                editing = true
+                            }) { Text("Edit") }
+                        } else {
+                            TextButton(onClick = onRegenerate) { Text("Retry") }
+                        }
+                    }
                 }
             }
         }
