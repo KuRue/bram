@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.kurue.bram.core.domain.AcceleratorAgreement
+import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.AgentEvent
 import io.github.kurue.bram.core.domain.AgentRunRequest
 import io.github.kurue.bram.core.domain.ConversationId
@@ -394,6 +395,17 @@ class MainViewModel(
         }
     }
 
+    fun setThinkingEnabled(modelId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
+            container.localModelStore.updateThinkingEnabled(
+                io.github.kurue.bram.core.domain.ModelId(modelId),
+                enabled,
+            )
+            reloadLocalModels(selectId = modelId)
+        }
+    }
+
     fun selectBackend(modelId: String, backend: RuntimeBackend) {
         viewModelScope.launch {
             if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
@@ -427,6 +439,7 @@ class MainViewModel(
                     threads = threads,
                     gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0,
                     deviceFilter = backend.devicePrefix,
+                    enableThinking = model.thinkingEnabled,
                 )
             }.onSuccess { result ->
                 mutableState.update {
@@ -691,6 +704,13 @@ class MainViewModel(
         }
     }
 
+    /** The assistant bubble as it stands mid-turn, so tool steps appear as they happen. */
+    private fun inFlightMessage(text: String, activity: List<AgentActivity>) = ConversationMessage(
+        role = MessageRole.ASSISTANT,
+        content = text,
+        activity = activity.toList(),
+    )
+
     /** Starts a new thread rather than erasing the current one, which is now kept on disk. */
     fun clearChat() = startNewConversation()
 
@@ -733,6 +753,7 @@ class MainViewModel(
             val agent = container.agent()
             var assistantText = ""
             var completedMessage: ConversationMessage? = null
+            val activity = mutableListOf<AgentActivity>()
             try {
                 agent.run(
                     request = AgentRunRequest(
@@ -758,16 +779,37 @@ class MainViewModel(
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
                             mutableState.update {
+                                it.copy(messages = requestMessages + inFlightMessage(assistantText, activity))
+                            }
+                        }
+                        is AgentEvent.ToolStarted -> {
+                            activity += AgentActivity.ToolInvocation(
+                                id = event.call.id,
+                                name = event.call.name,
+                                argumentsJson = event.call.argumentsJson,
+                            )
+                            mutableState.update {
                                 it.copy(
-                                    messages = requestMessages + ConversationMessage(
-                                        role = MessageRole.ASSISTANT,
-                                        content = assistantText,
-                                    ),
+                                    status = "Running ${event.call.name}…",
+                                    messages = requestMessages + inFlightMessage(assistantText, activity),
                                 )
                             }
                         }
-                        is AgentEvent.ToolStarted -> mutableState.update { it.copy(status = "Running ${event.call.name}…") }
-                        is AgentEvent.ToolFinished -> mutableState.update { it.copy(status = "Tool complete; returning result…") }
+                        is AgentEvent.ToolFinished -> {
+                            val index = activity.indexOfLast { entry ->
+                                entry is AgentActivity.ToolInvocation && entry.id == event.call.id
+                            }
+                            if (index >= 0) {
+                                val started = activity[index] as AgentActivity.ToolInvocation
+                                activity[index] = started.copy(result = event.result)
+                            }
+                            mutableState.update {
+                                it.copy(
+                                    status = null,
+                                    messages = requestMessages + inFlightMessage(assistantText, activity),
+                                )
+                            }
+                        }
                         is AgentEvent.Usage -> mutableState.update { it.copy(lastUsage = event.usage) }
                         is AgentEvent.Metrics -> mutableState.update { it.copy(lastMetrics = event.metrics) }
                         is AgentEvent.Completed -> completedMessage = event.message
@@ -787,13 +829,27 @@ class MainViewModel(
             } catch (error: Throwable) {
                 mutableState.update { it.copy(error = error.message ?: error::class.java.simpleName) }
             } finally {
-                val final = completedMessage
+                // Separate reasoning from the answer once the reply is complete: the transcript
+                // shows thinking collapsed, and mid-stream the split is not yet determinable.
+                val rawReply = completedMessage?.content ?: assistantText
+                val reply = if (rawReply.isBlank() || selection.localModel == null) {
+                    rawReply to ""
+                } else {
+                    runCatching {
+                        val parsed = container.llamaCppClient.parseReply(rawReply)
+                        parsed.optString("content").ifBlank { rawReply } to parsed.optString("reasoning")
+                    }.getOrDefault(rawReply to "")
+                }
+                val finalActivity = buildList {
+                    reply.second.takeIf(String::isNotBlank)?.let { add(AgentActivity.Thinking(it)) }
+                    addAll(activity)
+                }
                 val settled = when {
-                    final != null -> requestMessages + final
-                    assistantText.isNotBlank() -> requestMessages + ConversationMessage(
-                        role = MessageRole.ASSISTANT,
-                        content = assistantText,
-                    )
+                    reply.first.isNotBlank() || finalActivity.isNotEmpty() ->
+                        requestMessages + (completedMessage ?: ConversationMessage(
+                            role = MessageRole.ASSISTANT,
+                            content = reply.first,
+                        )).copy(content = reply.first, activity = finalActivity)
                     else -> requestMessages
                 }
                 mutableState.update {

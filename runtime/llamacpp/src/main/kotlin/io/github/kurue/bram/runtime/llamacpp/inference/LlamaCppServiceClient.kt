@@ -56,11 +56,17 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         JSONObject(requireService().teacherForced(forcedTokens))
     }
 
+    /** Splits a finished reply into its answer and any reasoning the format exposes. */
+    suspend fun parseReply(reply: String): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requireService().parseReply(reply))
+    }
+
     suspend fun load(
         model: LocalModelRecord,
         threads: Int,
         gpuLayers: Int = 0,
         deviceFilter: String = "",
+        enableThinking: Boolean = false,
     ): JSONObject = withContext(Dispatchers.IO) {
         val request = JSONObject()
             .put("modelId", model.id.value)
@@ -72,6 +78,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("threads", threads)
             .put("gpuLayers", gpuLayers)
             .put("deviceFilter", deviceFilter)
+            .put("enableThinking", enableThinking)
         JSONObject(requireService().load(request.toString()))
     }
 

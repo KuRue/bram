@@ -22,10 +22,14 @@ namespace {
 struct runtime_state {
     llama_model * model = nullptr;
     common_chat_templates_ptr chat_templates;
+    // Captured when the prompt is built so the reply can be parsed with the same format, which is
+    // what lets reasoning be separated from the answer instead of guessed at with tag matching.
+    common_chat_params last_chat_params;
     int context_tokens = 0;
     int batch_tokens = 0;
     int threads = 0;
     int gpu_layers = 0;
+    bool enable_thinking = false;
     std::string model_path;
 };
 
@@ -288,7 +292,7 @@ std::string apply_chat_template(
         inputs.messages.push_back(std::move(message));
     }
     inputs.add_generation_prompt = add_assistant;
-    inputs.enable_thinking = true;
+    inputs.enable_thinking = g_state.enable_thinking;
 
     // Prefer the model's own Jinja template, but do not let a template the engine cannot render
     // take chat down with it. Some published templates use constructs minja does not implement
@@ -297,14 +301,15 @@ std::string apply_chat_template(
     // those rather than refusing to talk to the model at all.
     inputs.use_jinja = true;
     try {
-        return common_chat_templates_apply(g_state.chat_templates.get(), inputs).prompt;
+        g_state.last_chat_params = common_chat_templates_apply(g_state.chat_templates.get(), inputs);
     } catch (const std::exception & jinja_error) {
         __android_log_print(ANDROID_LOG_WARN, "BramLlama",
             "chat template: jinja render failed (%s); falling back to the built-in template",
             jinja_error.what());
         inputs.use_jinja = false;
-        return common_chat_templates_apply(g_state.chat_templates.get(), inputs).prompt;
+        g_state.last_chat_params = common_chat_templates_apply(g_state.chat_templates.get(), inputs);
     }
+    return g_state.last_chat_params.prompt;
 }
 
 void unload_locked() {
@@ -339,7 +344,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_probe(
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     JNIEnv * env, jobject, jstring path, jint context_tokens, jint batch_tokens, jint threads,
-    jint gpu_layers, jstring device_filter) {
+    jint gpu_layers, jstring device_filter, jboolean enable_thinking) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         ensure_backend();
@@ -399,6 +404,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.batch_tokens = batch_tokens;
         g_state.threads = threads;
         g_state.gpu_layers = gpu_layers;
+        g_state.enable_thinking = enable_thinking == JNI_TRUE;
         g_state.model_path = model_path;
 
         char description[512] = {};
@@ -689,6 +695,76 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
         std::ostringstream result;
         result << "{\"predictions\":" << predictions.str()
                << ",\"gpuLayers\":" << g_state.gpu_layers << "}";
+        return result.str();
+    });
+}
+
+// Splits a finished reply into reasoning and answer using the same chat format that produced the
+// prompt. Bram shows reasoning as a collapsed transcript entry rather than inline prose, so it has
+// to be identified rather than left mixed into the answer.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_parseReply(
+    JNIEnv * env, jobject, jstring reply) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const std::string text = from_jstring(env, reply);
+
+        std::string content = text;
+        std::string reasoning;
+
+        // Try the structured parser first: when the chat format is known it is the only thing that
+        // understands where reasoning ends and the answer begins.
+        try {
+            common_chat_parser_params params(g_state.last_chat_params);
+            params.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+            params.parse_tool_calls = false;
+            const common_chat_msg parsed = common_chat_parse(text, false, params);
+            if (!parsed.content.empty()) content = parsed.content;
+            if (!parsed.reasoning_content.empty()) reasoning = parsed.reasoning_content;
+        } catch (const std::exception & error) {
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "reply parse failed (%s); cleaning the raw reply instead", error.what());
+        }
+
+        // Then clean up whatever survived. A degraded template path leaves the model emitting its
+        // own turn header and empty reasoning markers, and a content-only format passes those
+        // straight through, so the reply would otherwise read as protocol rather than as an answer.
+        auto trim = [](std::string & value) {
+            const char * spaces = " TABNLCR";
+            (void) spaces;
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\n' ||
+                                      value.front() == '\r' || value.front() == '\t')) {
+                value.erase(0, 1);
+            }
+            while (!value.empty() && (value.back() == ' ' || value.back() == '\n' ||
+                                     value.back() == '\r' || value.back() == '\t')) {
+                value.pop_back();
+            }
+        };
+        auto strip_leading_marker = [&](const std::string & marker) {
+            const size_t position = content.find(marker);
+            if (position != std::string::npos && position < 32) {
+                content.erase(0, position + marker.size());
+                trim(content);
+            }
+        };
+        strip_leading_marker("<|im_start|>assistant");
+        strip_leading_marker("<|start_header_id|>assistant<|end_header_id|>");
+
+        const size_t think_open = content.find("<think>");
+        const size_t think_close = content.find("</think>");
+        if (think_open != std::string::npos && think_close != std::string::npos && think_close > think_open) {
+            std::string inner = content.substr(think_open + 7, think_close - think_open - 7);
+            trim(inner);
+            if (!inner.empty() && reasoning.empty()) reasoning = inner;
+            content.erase(think_open, think_close - think_open + 8);
+        }
+        trim(content);
+        trim(reasoning);
+
+        std::ostringstream result;
+        result << "{" << '"' << "content" << '"' << ":" << '"' << json_escape(content) << '"'
+               << "," << '"' << "reasoning" << '"' << ":" << '"' << json_escape(reasoning) << '"' << "}";
         return result.str();
     });
 }

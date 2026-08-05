@@ -28,6 +28,39 @@ data class ToolCall(
     val argumentsJson: String,
 )
 
+/**
+ * Work an agent did on the way to an answer.
+ *
+ * Kept beside the reply rather than folded into its text: reasoning and tool traffic are useful
+ * when inspected but drown the answer when shown inline, so the transcript can collapse them to a
+ * single line and let the reader open what matters.
+ */
+sealed interface AgentActivity {
+    val summary: String
+
+    /** Model reasoning, when the runtime can separate it from the reply. */
+    data class Thinking(val text: String, val durationMillis: Long = 0) : AgentActivity {
+        override val summary: String
+            get() = "Thinking" + if (durationMillis > 0) " for ${durationMillis / 1000}s" else ""
+    }
+
+    /** A tool invocation and, once it returns, its result. [result] is null while in flight. */
+    data class ToolInvocation(
+        val id: String,
+        val name: String,
+        val argumentsJson: String,
+        val result: String? = null,
+        val failed: Boolean = false,
+    ) : AgentActivity {
+        override val summary: String
+            get() = when {
+                result == null -> "Calling $name…"
+                failed -> "$name failed"
+                else -> "Called $name"
+            }
+    }
+}
+
 data class ConversationMessage(
     val id: MessageId = MessageId.new(),
     val role: MessageRole,
@@ -35,6 +68,8 @@ data class ConversationMessage(
     val createdAtEpochMillis: Long = System.currentTimeMillis(),
     val toolCalls: List<ToolCall> = emptyList(),
     val toolCallId: String? = null,
+    /** Reasoning and tool steps that produced [content], in the order they happened. */
+    val activity: List<AgentActivity> = emptyList(),
 )
 
 /**

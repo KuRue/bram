@@ -1,6 +1,7 @@
 package io.github.kurue.bram.platform.android
 
 import android.content.Context
+import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.ConversationId
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.ConversationSummary
@@ -158,12 +159,53 @@ class ConversationStore(context: Context) {
         .put("role", role.name)
         .put("content", content)
         .put("createdAtEpochMillis", createdAtEpochMillis)
+        .put(
+            "activity",
+            JSONArray().apply {
+                activity.forEach { entry ->
+                    put(
+                        when (entry) {
+                            is AgentActivity.Thinking -> JSONObject()
+                                .put("kind", "thinking")
+                                .put("text", entry.text)
+                                .put("durationMillis", entry.durationMillis)
+                            is AgentActivity.ToolInvocation -> JSONObject()
+                                .put("kind", "tool")
+                                .put("id", entry.id)
+                                .put("name", entry.name)
+                                .put("argumentsJson", entry.argumentsJson)
+                                .put("result", entry.result)
+                                .put("failed", entry.failed)
+                        },
+                    )
+                }
+            },
+        )
 
     private fun JSONObject.toMessage(): ConversationMessage = ConversationMessage(
         id = MessageId(getString("id")),
         role = runCatching { MessageRole.valueOf(getString("role")) }.getOrDefault(MessageRole.USER),
         content = optString("content"),
         createdAtEpochMillis = optLong("createdAtEpochMillis", System.currentTimeMillis()),
+        activity = optJSONArray("activity")?.let { array ->
+            (0 until array.length()).mapNotNull { index ->
+                val entry = array.optJSONObject(index) ?: return@mapNotNull null
+                when (entry.optString("kind")) {
+                    "thinking" -> AgentActivity.Thinking(
+                        text = entry.optString("text"),
+                        durationMillis = entry.optLong("durationMillis"),
+                    )
+                    "tool" -> AgentActivity.ToolInvocation(
+                        id = entry.optString("id"),
+                        name = entry.optString("name"),
+                        argumentsJson = entry.optString("argumentsJson"),
+                        result = if (entry.isNull("result")) null else entry.optString("result"),
+                        failed = entry.optBoolean("failed"),
+                    )
+                    else -> null
+                }
+            }
+        }.orEmpty(),
     )
 
     private companion object {

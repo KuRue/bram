@@ -49,6 +49,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurue.bram.core.domain.AcceleratorCapability
+import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
@@ -130,6 +131,7 @@ fun BramApp(viewModel: MainViewModel) {
                     onBisectAccelerator = viewModel::bisectAccelerator,
                     onReclaimStorage = viewModel::reclaimModelStorage,
                     onSelectBackend = viewModel::selectBackend,
+                    onThinkingEnabled = viewModel::setThinkingEnabled,
                 )
                 AppSection.SETTINGS -> SettingsScreen(
                     state = state,
@@ -459,6 +461,7 @@ private fun ModelsScreen(
     onBisectAccelerator: (String, AcceleratorTarget) -> Unit,
     onReclaimStorage: () -> Unit,
     onSelectBackend: (String, RuntimeBackend) -> Unit,
+    onThinkingEnabled: (String, Boolean) -> Unit,
 ) {
     var expandedModelId by rememberSaveable { mutableStateOf<String?>(null) }
     LazyColumn(
@@ -524,6 +527,7 @@ private fun ModelsScreen(
                 onUnload = onUnload,
                 onRemove = { onRemove(model.id.value) },
                 onContext = { onContext(model.id.value, it) },
+                onThinking = { onThinkingEnabled(model.id.value, it) },
             )
         }
         state.modelLoadDetail?.let { detail -> item { InfoCard("Active runtime", detail) } }
@@ -696,6 +700,7 @@ private fun LocalModelCard(
     onUnload: () -> Unit,
     onRemove: () -> Unit,
     onContext: (Int) -> Unit,
+    onThinking: (Boolean) -> Unit,
 ) {
     val locked = loaded || loading || generationActive
     Card(Modifier.fillMaxWidth()) {
@@ -799,6 +804,23 @@ private fun LocalModelCard(
                         "Remembered for this model. Changing it unloads the model first.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Reasoning", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Let the model think before answering. Thorough but much slower, and " +
+                                "short questions rarely need it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Checkbox(
+                        checked = model.thinkingEnabled,
+                        onCheckedChange = { onThinking(it) },
+                        enabled = !generationActive,
                     )
                 }
 
@@ -946,7 +968,71 @@ private fun ChatBubble(message: ConversationMessage) {
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                 )
-                Text(message.content.ifBlank { "…" })
+                message.activity.forEach { entry -> ActivityRow(entry) }
+                if (message.content.isNotBlank() || message.activity.isEmpty()) {
+                    Text(message.content.ifBlank { "…" })
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One line of agent work, collapsed by default.
+ *
+ * Reasoning and tool traffic are worth keeping and occasionally worth reading, but shown inline
+ * they bury the answer — a small model can spend several paragraphs deciding how to say hello.
+ */
+@Composable
+private fun ActivityRow(entry: AgentActivity) {
+    var expanded by rememberSaveable(entry.summary) { mutableStateOf(false) }
+    val detail = when (entry) {
+        is AgentActivity.Thinking -> entry.text
+        is AgentActivity.ToolInvocation -> buildString {
+            append(entry.argumentsJson)
+            entry.result?.let { result ->
+                appendLine()
+                appendLine()
+                append(result)
+            }
+        }
+    }
+    val glyph = when (entry) {
+        is AgentActivity.Thinking -> "✳"
+        is AgentActivity.ToolInvocation -> if (entry.result == null) "◌" else "⚙"
+    }
+
+    Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+        Row(
+            Modifier.fillMaxWidth().clickable(enabled = detail.isNotBlank()) { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "$glyph ${entry.summary}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            if (detail.isNotBlank()) {
+                Text(
+                    if (expanded) "▲" else "▼",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (expanded && detail.isNotBlank()) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            ) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(8.dp),
+                )
             }
         }
     }
