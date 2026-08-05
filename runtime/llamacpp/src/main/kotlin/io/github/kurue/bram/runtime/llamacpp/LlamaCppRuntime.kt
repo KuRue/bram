@@ -52,5 +52,7 @@ class LlamaCppRuntime(
 
     override fun generate(request: GenerationRequest): Flow<GenerationEvent> = client.generate(request)
 
-    override suspend fun cancel(requestId: String) = client.cancel(requestId)
+    override suspend fun cancel(requestId: String) {
+        client.cancel(requestId)
+    }
 }
