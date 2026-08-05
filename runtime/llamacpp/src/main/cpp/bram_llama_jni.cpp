@@ -288,9 +288,23 @@ std::string apply_chat_template(
         inputs.messages.push_back(std::move(message));
     }
     inputs.add_generation_prompt = add_assistant;
-    inputs.use_jinja = true;
     inputs.enable_thinking = true;
-    return common_chat_templates_apply(g_state.chat_templates.get(), inputs).prompt;
+
+    // Prefer the model's own Jinja template, but do not let a template the engine cannot render
+    // take chat down with it. Some published templates use constructs minja does not implement
+    // (Qwen3.5 iterates messages[::-1], which yields nothing and then raises "No user query found
+    // in messages"). llama.cpp's built-in templates handle the common formats, so fall back to
+    // those rather than refusing to talk to the model at all.
+    inputs.use_jinja = true;
+    try {
+        return common_chat_templates_apply(g_state.chat_templates.get(), inputs).prompt;
+    } catch (const std::exception & jinja_error) {
+        __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+            "chat template: jinja render failed (%s); falling back to the built-in template",
+            jinja_error.what());
+        inputs.use_jinja = false;
+        return common_chat_templates_apply(g_state.chat_templates.get(), inputs).prompt;
+    }
 }
 
 void unload_locked() {
@@ -341,7 +355,14 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         // outlive the load call because llama_model_params only borrows the pointer.
         const std::string filter = device_filter == nullptr ? std::string() : from_jstring(env, device_filter);
         std::vector<ggml_backend_dev_t> selected;
-        if (!filter.empty()) {
+        if (filter.empty()) {
+            // An empty filter means CPU. Leaving params.devices null lets llama.cpp enumerate every
+            // registered backend, so a GPU whose driver cannot create a device fails the load even
+            // though no offload was requested. An explicitly empty list keeps CPU loads independent
+            // of accelerator health.
+            selected.push_back(nullptr);
+            params.devices = selected.data();
+        } else {
             const size_t count = ggml_backend_dev_count();
             for (size_t index = 0; index < count; ++index) {
                 ggml_backend_dev_t device = ggml_backend_dev_get(index);

@@ -408,7 +408,7 @@ private fun ModelsScreen(
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionHeader("Local models", "Verified GGUF files selected from this phone", Modifier.weight(1f))
+                SectionHeader("Local models", "Imported and SHA-256 verified", Modifier.weight(1f))
                 Button(onClick = onImport, enabled = !state.isImporting && !state.isGenerating) { Text("Import GGUF") }
             }
         }
@@ -436,7 +436,10 @@ private fun ModelsScreen(
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("No local models yet", fontWeight = FontWeight.SemiBold)
-                        Text("Start with LFM2.5-2.6B-Q4_0.gguf. Bram keeps the file where it is and retains read access.")
+                        Text(
+                            "Pick a GGUF from this device. Bram copies it into its own storage so the " +
+                                "native runtime can load it, then verifies the copy with SHA-256.",
+                        )
                         Button(onClick = onImport) { Text("Choose a GGUF") }
                     }
                 }
@@ -507,7 +510,14 @@ private fun AcceleratorValidationCard(
     onValidate: (AcceleratorTarget) -> Unit,
     onBisect: (AcceleratorTarget) -> Unit,
 ) {
-    var target by rememberSaveable { mutableStateOf(AcceleratorTarget.VULKAN) }
+    // Only offer accelerators this build actually found. Otherwise selecting one fails with
+    // "no device", which reads as a bug rather than as an absent backend.
+    val targets = AcceleratorTarget.entries.filter { candidate ->
+        state.availableBackends.any { backend ->
+            backend.offloadsToAccelerator && backend.devicePrefix == candidate.devicePrefix
+        }
+    }
+    var target by rememberSaveable { mutableStateOf(targets.firstOrNull() ?: AcceleratorTarget.VULKAN) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Accelerator validation", fontWeight = FontWeight.SemiBold)
@@ -518,8 +528,15 @@ private fun AcceleratorValidationCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (targets.isEmpty()) {
+                Text(
+                    "This build found no accelerator to compare against CPU.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AcceleratorTarget.entries.forEach { option ->
+                targets.forEach { option ->
                     FilterChip(
                         selected = target == option,
                         onClick = { target = option },
@@ -528,15 +545,25 @@ private fun AcceleratorValidationCard(
                 }
             }
             val busy = state.isValidatingAccelerator || state.isLoadingModel || state.isGenerating
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onValidate(target) }, enabled = !busy) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { onValidate(target) },
+                    enabled = !busy && targets.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                     if (state.isValidatingAccelerator) {
                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
                     }
-                    Text(if (state.isValidatingAccelerator) "Working…" else "Compare GPU against CPU")
+                    Text(
+                        if (state.isValidatingAccelerator) "Working…" else "Compare ${target.label} to CPU",
+                    )
                 }
-                OutlinedButton(onClick = { onBisect(target) }, enabled = !busy) { Text("Bisect layers") }
+                OutlinedButton(
+                    onClick = { onBisect(target) },
+                    enabled = !busy && targets.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Bisect layers to find where it breaks") }
             }
             state.status?.takeIf { state.isValidatingAccelerator }?.let { status ->
                 Text(status, style = MaterialTheme.typography.bodySmall)
