@@ -19,6 +19,7 @@
 | `platform:android` | Device profiling and Keystore persistence |
 | `runtime:openai` | OpenAI-compatible Chat Completions adapter |
 | `runtime:llamacpp` | GGUF catalog, AIDL inference process, pinned llama.cpp/JNI runtime |
+| `platform:android` | Device profiling, conversation storage, Keystore persistence |
 
 ```mermaid
 flowchart TD
@@ -112,6 +113,43 @@ native backend crashes, the UI marks the loaded plan unavailable while keeping t
 The AIDL control plane uses JSON payloads so the contract can evolve before the native protocol
 stabilizes. Token deltas currently use one-way Binder callbacks. Once physical profiling identifies
 Binder overhead, deltas can move to a pipe/shared-memory transport while control remains in AIDL.
+
+A load is identified by model, context, offload plan, backend filter, and reasoning setting
+together. Treating any of these as incidental is not safe: an early version keyed only on model and
+context, so switching from CPU to GPU silently reused the CPU-resident model and reported the
+accelerator as agreeing perfectly with itself.
+
+Model bytes are copied into app-private storage at import and loaded from that path. Handing native
+code a `/proc/self/fd` path for a document-provider descriptor does not work under scoped storage,
+which refuses the re-open that llama.cpp performs internally.
+
+## Accelerator validation
+
+Compiling a backend says nothing about whether it computes correctly. Bram records a deterministic
+greedy decode on CPU and requires an accelerator to reproduce it before reporting it as validated.
+
+The comparison is teacher-forced: both backends receive the identical reference token sequence and
+are asked only for the next-token prediction at each position. Free-running generation cannot be
+scored, because one differing token sends the remainder somewhere unrelated and a small numerical
+difference becomes indistinguishable from a broken kernel. Exact equality is also the wrong bar,
+since a quantized accelerator legitimately disagrees on near-ties; the threshold is near-total
+agreement.
+
+This is not defensive over-engineering. A GPU backend on the target device reports success, raises
+no driver error, and returns all-zero logits past a handful of offloaded layers. A speed comparison
+called it working.
+
+## Conversations and background work
+
+Conversations are stored as one JSON file each with a rebuildable index, rather than a single blob:
+a thread grows without bound, and rewriting every conversation to append a message would slow down
+as Bram is used. Messages carry ordered activity entries for reasoning and tool calls, so the
+transcript can collapse agent work to a line without discarding it.
+
+Agent runs belong to an application-scoped coroutine scope and hold a foreground service for their
+duration. The model already executes in `:inference`; what needs protecting is the work driving it,
+which would otherwise be cancelled when the screen goes away. Stopping is a user action, not a
+consequence of navigation.
 
 ## Remote providers and routing
 

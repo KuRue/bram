@@ -4,14 +4,21 @@ Bram is an Android-first local AI runtime and agent harness. Its goal is to make
 
 The model is only one component. Bram is designed from the start for tool use, durable memory, versioned skills, scheduled work, and optional OpenAI-compatible remote models.
 
-> **Status: local CPU alpha awaiting device validation.** The model-first UI, verified GGUF
-> catalog, and isolated llama.cpp CPU path are implemented. The full Android/Compose/NDK build,
-> tests, lint, and APK assembly pass in CI. Local generation still needs to be validated on the
-> target S25 Ultra before this path is called working. Accelerator and autonomous agent
-> capabilities remain staged work.
+> **Status: local CPU chat works on device.** Import a GGUF, load it, and chat, with durable
+> conversations, background runs, and a transcript that collapses reasoning and tool calls to a
+> line. Validated on a Snapdragon 8 Elite phone and an x86_64 emulator.
+>
+> The **Hexagon NPU is validated** on that phone at 95.8% agreement with CPU output and roughly
+> 1.5x the speed. **Vulkan is not**: on the same device it disagrees with CPU on a quarter of
+> predictions with one offloaded layer and collapses entirely past about seven, while reporting no
+> error. It compiles and can be selected, but Bram does not call it validated.
+>
+> Autonomous agent capabilities — a task queue, tools beyond one read-only probe, memory, and
+> skills — remain staged work.
 
 ## What makes Bram different
 
+- **Accelerators are validated, not assumed:** a backend must reproduce the CPU reference before Bram calls it usable. This is not theoretical — it is how a GPU backend that reported success while returning garbage was caught.
 - **Hardware-aware planning:** candidate plans account for model weights, KV cache, compute buffers, backend repacking, current memory pressure, and a safety reserve.
 - **Stable fallback:** native inference lives in a separate Android process so a driver or backend crash does not have to kill the conversation UI.
 - **Runtime-neutral agent:** the same tool loop can use llama.cpp, LiteRT-LM, or an OpenAI-compatible endpoint.
@@ -29,8 +36,11 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 
 | Area | State |
 |---|---|
-| Model-first Compose chat, Models, Settings, and diagnostics | Implemented; device validation pending |
-| Persisted GGUF import, metadata validation, and SHA-256 | Implemented; device validation pending |
+| Compose chat, Models, Settings, and diagnostics | Working |
+| Persisted GGUF import, metadata validation, and SHA-256 | Working |
+| Durable conversations with multiple threads and history | Working |
+| Agent runs that continue while the app is backgrounded | Working |
+| Retry, edit-and-resend, copy, and Markdown rendering | Working |
 | Android RAM, storage, CPU, Vulkan-feature, and thermal profiling | Working |
 | Encrypted-at-rest endpoint API keys using Android Keystore | Working |
 | OpenAI-compatible `/chat/completions` with function tools | Working, non-streaming |
@@ -39,10 +49,16 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 | Read-only `device_status` phone tool | Working |
 | Hardware execution-plan generation | Working |
 | Separate `:inference` process and AIDL protocol | Implemented |
-| Pinned ARM64 llama.cpp CPU generation | Builds and packages in CI; device validation pending |
-| Chat-template application, exact token counts, streaming, cancel, unload | Implemented; validation pending |
-| Hexagon, Adreno, Vulkan, and LiteRT native self-tests | Not implemented yet |
-| Durable conversations, memory, skills, and automations | Interfaces only |
+| Pinned ARM64 llama.cpp CPU generation | Working, validated on device |
+| Chat-template application, exact token counts, streaming, cancel, unload | Working |
+| Hexagon NPU backend | Working, validated against CPU output |
+| Vulkan backend | Compiles and runs; fails correctness validation on Adreno 830 |
+| Accelerator validation and layer bisection in-app | Working |
+| Collapsed reasoning and tool activity in the transcript | Working |
+| Task queue, scheduling, and tools beyond `device_status` | Not implemented |
+| Model download | Not implemented |
+| Memory, skills, and automations | Interfaces only |
+| OpenCL and LiteRT | Not implemented |
 
 ## Repository layout
 
@@ -51,7 +67,7 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 | `app` | Compose UI, Bram’s default identity, app state, dependency assembly |
 | `core:domain` | Runtime-neutral agent, model, memory, tool, and scheduling contracts |
 | `core:agent` | Context planning, routing, execution planning, and the tool loop |
-| `platform:android` | Device profiling and Keystore persistence |
+| `platform:android` | Device profiling, conversation storage, and Keystore persistence |
 | `runtime:openai` | OpenAI-compatible Chat Completions adapter |
 | `runtime:llamacpp` | GGUF catalog, AIDL process, llama.cpp/JNI CPU runtime |
 
@@ -63,9 +79,12 @@ validation state, and next action.
 
 Requirements:
 
-- Android Studio with JDK 17
-- Android SDK Platform 36 and SDK Build Tools 36.0.0
-- An API 29+ ARM64 device for the intended runtime path
+- JDK 17, Android SDK Platform 36, SDK Build Tools 36.0.0, NDK 28.2.13676358, CMake 3.30.5
+- An API 29+ ARM64 device, or an emulator with `BRAM_EMULATOR_ABI=true` to add `x86_64`
+
+The Hexagon backend additionally needs Qualcomm's Hexagon SDK and is off unless `HEXAGON_SDK_ROOT`
+points at one. A local WSL or Linux checkout rebuilds native changes in seconds rather than the
+minutes CI takes, and avoids an MSVC requirement on Windows hosts.
 
 Open the repository in Android Studio and let it sync, or use the checked-in wrapper:
 
