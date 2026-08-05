@@ -9,6 +9,7 @@ import io.github.kurue.bram.core.domain.AgentRunRequest
 import io.github.kurue.bram.core.domain.ConversationId
 import io.github.kurue.bram.core.domain.findOffloadBoundary
 import io.github.kurue.bram.core.domain.ConversationMessage
+import io.github.kurue.bram.core.domain.ConversationSummary
 import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.LocalModelRecord
@@ -127,6 +128,8 @@ data class AppUiState(
     val lastUsage: TokenUsage? = null,
     val lastMetrics: GenerationMetrics? = null,
     val modelStorageBytes: Long = 0,
+    val conversations: List<ConversationSummary> = emptyList(),
+    val activeConversationId: String? = null,
     /** Backends this build found on the device, CPU always included. */
     val availableBackends: List<RuntimeBackend> = listOf(RuntimeBackend.CPU),
     /** What the currently loaded model is actually running on. */
@@ -164,7 +167,7 @@ class MainViewModel(
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
-    private val conversationId = ConversationId(UUID.randomUUID().toString())
+    private var conversationId = ConversationId(UUID.randomUUID().toString())
     private var generationJob: Job? = null
 
     init {
@@ -182,6 +185,92 @@ class MainViewModel(
         refreshDeviceProfile()
         reloadCatalogs()
         detectBackends()
+        restoreConversations()
+    }
+
+    /** Reopens the most recent conversation so closing Bram does not discard the thread. */
+    private fun restoreConversations() {
+        viewModelScope.launch {
+            val summaries = runCatching { container.conversationStore.list() }.getOrDefault(emptyList())
+            val mostRecent = summaries.firstOrNull()
+            val messages = mostRecent
+                ?.let { summary -> runCatching { container.conversationStore.load(summary.id) }.getOrDefault(emptyList()) }
+                .orEmpty()
+            mostRecent?.let { conversationId = it.id }
+            mutableState.update {
+                it.copy(
+                    conversations = summaries,
+                    activeConversationId = mostRecent?.id?.value,
+                    messages = messages,
+                )
+            }
+        }
+    }
+
+    /** Persists after each completed turn; a crash mid-generation loses only the partial reply. */
+    private fun persistActiveConversation(messages: List<ConversationMessage>) {
+        if (messages.isEmpty()) return
+        viewModelScope.launch {
+            runCatching { container.conversationStore.save(conversationId, messages) }
+                .onSuccess { summary ->
+                    val summaries = runCatching { container.conversationStore.list() }
+                        .getOrDefault(listOf(summary))
+                    mutableState.update {
+                        it.copy(conversations = summaries, activeConversationId = summary.id.value)
+                    }
+                }
+        }
+    }
+
+    fun startNewConversation() {
+        if (mutableState.value.isGenerating) return
+        conversationId = container.conversationStore.newId()
+        mutableState.update {
+            it.copy(
+                messages = emptyList(),
+                activeConversationId = conversationId.value,
+                status = null,
+                error = null,
+                lastUsage = null,
+                lastMetrics = null,
+            )
+        }
+    }
+
+    fun openConversation(id: String) {
+        if (mutableState.value.isGenerating) return
+        viewModelScope.launch {
+            val target = ConversationId(id)
+            val messages = runCatching { container.conversationStore.load(target) }.getOrDefault(emptyList())
+            conversationId = target
+            mutableState.update {
+                it.copy(
+                    messages = messages,
+                    activeConversationId = id,
+                    status = null,
+                    error = null,
+                    lastUsage = null,
+                    lastMetrics = null,
+                )
+            }
+        }
+    }
+
+    fun deleteConversation(id: String) {
+        if (mutableState.value.isGenerating) return
+        viewModelScope.launch {
+            runCatching { container.conversationStore.delete(ConversationId(id)) }
+            val summaries = runCatching { container.conversationStore.list() }.getOrDefault(emptyList())
+            mutableState.update { current ->
+                val stillOpen = current.activeConversationId != id
+                current.copy(
+                    conversations = summaries,
+                    messages = if (stillOpen) current.messages else emptyList(),
+                    activeConversationId = if (stillOpen) current.activeConversationId else null,
+                )
+            }
+            if (mutableState.value.activeConversationId == null) startNewConversation()
+        }
     }
 
     /**
@@ -602,18 +691,8 @@ class MainViewModel(
         }
     }
 
-    fun clearChat() {
-        if (mutableState.value.isGenerating) return
-        mutableState.update {
-            it.copy(
-                messages = emptyList(),
-                status = null,
-                error = null,
-                lastUsage = null,
-                lastMetrics = null,
-            )
-        }
-    }
+    /** Starts a new thread rather than erasing the current one, which is now kept on disk. */
+    fun clearChat() = startNewConversation()
 
     fun stopGeneration() {
         if (!mutableState.value.isGenerating) return
@@ -709,20 +788,20 @@ class MainViewModel(
                 mutableState.update { it.copy(error = error.message ?: error::class.java.simpleName) }
             } finally {
                 val final = completedMessage
-                mutableState.update {
-                    it.copy(
-                        messages = when {
-                            final != null -> requestMessages + final
-                            assistantText.isNotBlank() -> requestMessages + ConversationMessage(
-                                role = MessageRole.ASSISTANT,
-                                content = assistantText,
-                            )
-                            else -> requestMessages
-                        },
-                        isGenerating = false,
-                        status = null,
+                val settled = when {
+                    final != null -> requestMessages + final
+                    assistantText.isNotBlank() -> requestMessages + ConversationMessage(
+                        role = MessageRole.ASSISTANT,
+                        content = assistantText,
                     )
+                    else -> requestMessages
                 }
+                mutableState.update {
+                    it.copy(messages = settled, isGenerating = false, status = null)
+                }
+                // Persist whatever the turn produced, including a reply that was stopped part way,
+                // so the thread on disk matches what is on screen.
+                persistActiveConversation(settled)
                 generationJob = null
                 refreshDeviceProfile()
             }

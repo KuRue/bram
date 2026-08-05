@@ -112,7 +112,9 @@ fun BramApp(viewModel: MainViewModel) {
                     onSelectEndpoint = viewModel::selectEndpoint,
                     onSend = viewModel::send,
                     onStop = viewModel::stopGeneration,
-                    onClear = viewModel::clearChat,
+                    onNewConversation = viewModel::startNewConversation,
+                    onOpenConversation = viewModel::openConversation,
+                    onDeleteConversation = viewModel::deleteConversation,
                     onLoad = viewModel::loadModel,
                     onOpenModels = { section = AppSection.MODELS },
                 )
@@ -147,7 +149,9 @@ private fun ChatScreen(
     onSelectEndpoint: (String) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
-    onClear: () -> Unit,
+    onNewConversation: () -> Unit,
+    onOpenConversation: (String) -> Unit,
+    onDeleteConversation: (String) -> Unit,
     onLoad: (String) -> Unit,
     onOpenModels: () -> Unit,
 ) {
@@ -168,7 +172,14 @@ private fun ChatScreen(
                 }
             }
         } else {
-            RuntimeSelector(state, onSelectLocal, onSelectEndpoint, onClear)
+            RuntimeSelector(
+                state = state,
+                onSelectLocal = onSelectLocal,
+                onSelectEndpoint = onSelectEndpoint,
+                onNewConversation = onNewConversation,
+                onOpenConversation = onOpenConversation,
+                onDeleteConversation = onDeleteConversation,
+            )
         }
 
         state.selectedLocalModel?.takeIf { !state.selectedLocalModelIsLoaded }?.let { model ->
@@ -278,9 +289,12 @@ private fun RuntimeSelector(
     state: AppUiState,
     onSelectLocal: (String) -> Unit,
     onSelectEndpoint: (String) -> Unit,
-    onClear: () -> Unit,
+    onNewConversation: () -> Unit,
+    onOpenConversation: (String) -> Unit,
+    onDeleteConversation: (String) -> Unit,
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
+    var showHistory by rememberSaveable { mutableStateOf(false) }
     val activeLabel = when {
         state.selectedLocalModelIsLoaded -> state.selectedLocalModel?.let { model ->
             "${model.displayName} · ${state.loadedBackend?.label ?: "local"} · " +
@@ -320,7 +334,53 @@ private fun RuntimeSelector(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            TextButton(onClick = onClear, enabled = !state.isGenerating) { Text("Clear") }
+            TextButton(onClick = onNewConversation, enabled = !state.isGenerating) { Text("New") }
+            TextButton(
+                onClick = { showHistory = !showHistory },
+                enabled = !state.isGenerating && state.conversations.isNotEmpty(),
+            ) { Text("History") }
+        }
+
+        if (showHistory) {
+            Column(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                state.conversations.forEach { summary ->
+                    Card(Modifier.fillMaxWidth()) {
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(
+                                Modifier.weight(1f).clickable {
+                                    onOpenConversation(summary.id.value)
+                                    showHistory = false
+                                },
+                            ) {
+                                Text(
+                                    summary.title.ifBlank { "Untitled conversation" },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    fontWeight = if (summary.id.value == state.activeConversationId) {
+                                        FontWeight.SemiBold
+                                    } else {
+                                        FontWeight.Normal
+                                    },
+                                )
+                                Text(
+                                    "${summary.messageCount} messages",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(onClick = { onDeleteConversation(summary.id.value) }) {
+                                Text("Delete")
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if (expanded) {

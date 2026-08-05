@@ -12,6 +12,7 @@ import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import io.github.kurue.bram.platform.android.AndroidDeviceProfiler
+import io.github.kurue.bram.platform.android.ConversationStore
 import io.github.kurue.bram.platform.android.SecureEndpointStore
 import io.github.kurue.bram.runtime.openai.OpenAiCompatibleRuntime
 import io.github.kurue.bram.runtime.llamacpp.LlamaCppRuntime
@@ -35,6 +36,7 @@ class AppContainer(application: Application) {
     val localModelStore = LocalModelStore(application)
     val llamaCppClient = LlamaCppServiceClient(application)
     val deviceProfiler = AndroidDeviceProfiler(application)
+    val conversationStore = ConversationStore(application)
     val memoryStore = InMemoryMemoryStore()
     private val toolRegistry = StaticToolRegistry(listOf(DeviceStatusTool(deviceProfiler)))
 
