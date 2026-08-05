@@ -39,7 +39,9 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+            // 3.24+ is required so FetchContent auto-generates the find_package redirect for the
+            // vendored SPIRV-Headers that ggml-vulkan resolves with find_package(... CONFIG).
+            version = "3.30.5"
         }
     }
 
