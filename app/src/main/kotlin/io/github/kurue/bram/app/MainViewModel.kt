@@ -749,7 +749,11 @@ class MainViewModel(
             )
         }
 
-        generationJob = viewModelScope.launch {
+        // Run on the application scope, not the ViewModel's: agent work is expected to continue
+        // while the user is elsewhere, and a run tied to the screen would be cancelled the moment
+        // the ViewModel is cleared. AgentTaskService keeps the process alive for the duration.
+        AgentTaskService.start(container.appContext, "Answering: ${prompt.take(40)}")
+        generationJob = container.appScope.launch {
             val agent = container.agent()
             var assistantText = ""
             var completedMessage: ConversationMessage? = null
@@ -859,6 +863,7 @@ class MainViewModel(
                 // so the thread on disk matches what is on screen.
                 persistActiveConversation(settled)
                 generationJob = null
+                AgentTaskService.stop(container.appContext)
                 refreshDeviceProfile()
             }
         }
@@ -949,9 +954,10 @@ class MainViewModel(
     }
 
     override fun onCleared() {
-        generationJob?.cancel()
+        // Deliberately does not cancel an in-flight run or close the inference connection: the run
+        // is owned by the application scope so it can finish and write its reply while the user is
+        // elsewhere. Stopping is a user action, not a consequence of the screen going away.
         container.llamaCppClient.processFailureListener = null
-        container.llamaCppClient.close()
         super.onCleared()
     }
 
