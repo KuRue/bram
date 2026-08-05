@@ -201,6 +201,7 @@ class MainViewModel(
             mutableState.update { current ->
                 current.copy(availableBackends = detected)
             }
+            refreshDeviceProfile()
         }
     }
 
@@ -236,8 +237,22 @@ class MainViewModel(
     }
 
     fun refreshDeviceProfile() {
-        val validated = mutableState.value.cpuValidated
-        mutableState.update { it.copy(deviceProfile = container.deviceProfiler.snapshot(validated)) }
+        val current = mutableState.value
+        val runtimeBackends = current.availableBackends.mapNotNull { backend ->
+            when (backend) {
+                RuntimeBackend.VULKAN -> io.github.kurue.bram.core.domain.AcceleratorKind.VULKAN_GPU
+                RuntimeBackend.HEXAGON -> io.github.kurue.bram.core.domain.AcceleratorKind.HEXAGON_NPU
+                RuntimeBackend.CPU -> null
+            }
+        }.toSet()
+        mutableState.update {
+            it.copy(
+                deviceProfile = container.deviceProfiler.snapshot(
+                    cpuValidated = current.cpuValidated,
+                    runtimeBackends = runtimeBackends,
+                ),
+            )
+        }
     }
 
     fun selectLocalModel(modelId: String) {

@@ -15,7 +15,15 @@ import java.security.MessageDigest
 class AndroidDeviceProfiler(
     private val context: Context,
 ) {
-    fun snapshot(cpuValidated: Boolean = false): DeviceProfile {
+    /**
+     * [runtimeBackends] are the accelerators the native runtime actually enumerated. Android's
+     * feature flags only say a GPU exists, not that this build can compute on it, so anything the
+     * runtime reports takes precedence over guesswork.
+     */
+    fun snapshot(
+        cpuValidated: Boolean = false,
+        runtimeBackends: Set<AcceleratorKind> = emptySet(),
+    ): DeviceProfile {
         val activityManager = context.getSystemService(ActivityManager::class.java)
         val memory = ActivityManager.MemoryInfo().also(activityManager::getMemoryInfo)
         val storage = StatFs(context.filesDir.absolutePath)
@@ -58,8 +66,18 @@ class AndroidDeviceProfiler(
                 ),
                 AcceleratorCapability(
                     AcceleratorKind.VULKAN_GPU,
-                    if (hasVulkan) CapabilityState.DETECTED_NOT_VALIDATED else CapabilityState.UNAVAILABLE,
-                    if (hasVulkan) "Android reports Vulkan hardware; native kernel validation is pending" else "No Vulkan hardware feature",
+                    when {
+                        AcceleratorKind.VULKAN_GPU in runtimeBackends -> CapabilityState.DETECTED_NOT_VALIDATED
+                        hasVulkan -> CapabilityState.UNPROBED
+                        else -> CapabilityState.UNAVAILABLE
+                    },
+                    when {
+                        AcceleratorKind.VULKAN_GPU in runtimeBackends ->
+                            "The runtime found a Vulkan device. Compare it against CPU under Models " +
+                                "before relying on it."
+                        hasVulkan -> "Android reports Vulkan hardware, but this build exposes no Vulkan device"
+                        else -> "No Vulkan hardware feature"
+                    },
                 ),
                 AcceleratorCapability(
                     AcceleratorKind.OPENCL_GPU,
@@ -68,8 +86,17 @@ class AndroidDeviceProfiler(
                 ),
                 AcceleratorCapability(
                     AcceleratorKind.HEXAGON_NPU,
-                    CapabilityState.UNPROBED,
-                    "Requires a compatible Snapdragon backend and native correctness self-test",
+                    if (AcceleratorKind.HEXAGON_NPU in runtimeBackends) {
+                        CapabilityState.DETECTED_NOT_VALIDATED
+                    } else {
+                        CapabilityState.UNAVAILABLE
+                    },
+                    if (AcceleratorKind.HEXAGON_NPU in runtimeBackends) {
+                        "The runtime found a Hexagon NPU. Compare it against CPU under Models " +
+                            "before relying on it."
+                    } else {
+                        "This build has no Hexagon backend, which needs the Qualcomm Hexagon SDK at build time"
+                    },
                 ),
                 AcceleratorCapability(
                     AcceleratorKind.LITERT_NPU,

@@ -280,39 +280,109 @@ private fun RuntimeSelector(
     onSelectEndpoint: (String) -> Unit,
     onClear: () -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        state.localModels.forEach { model ->
-            FilterChip(
-                selected = model.id.value == state.selectedRuntimeId,
-                onClick = { onSelectLocal(model.id.value) },
-                label = {
-                    Text(
-                        buildString {
-                            if (model.id.value == state.loadedModelId) append("● ")
-                            append(model.displayName)
-                            // Name the backend on the loaded model so it is never ambiguous which
-                            // processor is answering.
-                            if (model.id.value == state.loadedModelId) {
-                                state.loadedBackend?.let { backend -> append(" · ${backend.label}") }
-                            }
-                        },
-                        maxLines = 1,
-                    )
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val activeLabel = when {
+        state.selectedLocalModelIsLoaded -> state.selectedLocalModel?.let { model ->
+            "${model.displayName} · ${state.loadedBackend?.label ?: "local"} · " +
+                formatTokens(model.preferredContextTokens)
+        }
+        state.selectedLocalModel != null -> "${state.selectedLocalModel?.displayName} · not loaded"
+        state.selectedEndpoint != null -> "Cloud · ${state.selectedEndpoint?.displayName}"
+        else -> "No runtime selected"
+    }
+    val runtimeCount = state.localModels.size + state.endpoints.size
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        // A single line naming what will answer, rather than a scrolling row of chips that pushed
+        // the conversation down the screen.
+        Row(
+            Modifier.fillMaxWidth().clickable(enabled = runtimeCount > 1) { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (state.selectedLocalModelIsLoaded) "● " else "○ ",
+                color = if (state.selectedLocalModelIsLoaded) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
-        }
-        state.endpoints.forEach { endpoint ->
-            FilterChip(
-                selected = remoteRuntimeId(endpoint.id) == state.selectedRuntimeId,
-                onClick = { onSelectEndpoint(endpoint.id) },
-                label = { Text("Cloud · ${endpoint.displayName}", maxLines = 1) },
+            Text(
+                activeLabel.orEmpty(),
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
             )
+            if (runtimeCount > 1) {
+                Text(
+                    if (expanded) "▲" else "▼",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = onClear, enabled = !state.isGenerating) { Text("Clear") }
         }
-        TextButton(onClick = onClear, enabled = !state.isGenerating) { Text("Clear") }
+
+        if (expanded) {
+            Column(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                state.localModels.forEach { model ->
+                    RuntimeOption(
+                        title = model.displayName,
+                        subtitle = if (model.id.value == state.loadedModelId) {
+                            "Loaded on ${state.loadedBackend?.label ?: "this device"}"
+                        } else {
+                            "Runs on ${state.backendFor(model).label}"
+                        },
+                        selected = model.id.value == state.selectedRuntimeId,
+                        onClick = {
+                            onSelectLocal(model.id.value)
+                            expanded = false
+                        },
+                    )
+                }
+                state.endpoints.forEach { endpoint ->
+                    RuntimeOption(
+                        title = endpoint.displayName,
+                        subtitle = "Remote provider",
+                        selected = remoteRuntimeId(endpoint.id) == state.selectedRuntimeId,
+                        onClick = {
+                            onSelectEndpoint(endpoint.id)
+                            expanded = false
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RuntimeOption(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (selected) {
+                Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
@@ -733,7 +803,11 @@ private fun SettingsScreen(
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionHeader("Device diagnostics", "Detection is not validation", Modifier.weight(1f))
+            SectionHeader(
+            "Device diagnostics",
+            "Detected means the runtime found it, not that it computes correctly",
+            Modifier.weight(1f),
+        )
             TextButton(onClick = onRefreshDiagnostics) { Text("Refresh") }
         }
         state.deviceProfile?.let { profile ->
@@ -747,7 +821,14 @@ private fun SettingsScreen(
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ReadinessRow("Context budgeting", "Working")
                 ReadinessRow("Remote tool loop", "Working")
-                ReadinessRow("Local isolated inference", if (state.cpuValidated) "CPU validated" else "Awaiting model test")
+                ReadinessRow(
+                    "Local isolated inference",
+                    if (state.cpuValidated) {
+                        "Running on ${state.loadedBackend?.label ?: "this device"}"
+                    } else {
+                        "Awaiting model load"
+                    },
+                )
                 ReadinessRow("Durable conversation memory", "Deferred")
                 ReadinessRow("Skills and automation", "Deferred")
             }
