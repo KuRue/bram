@@ -83,6 +83,12 @@ data class LocalModelRecord(
      * depends on the model as much as the device. Empty means CPU.
      */
     val preferredBackendId: String = "",
+    /**
+     * Whether to ask the model to reason before answering. Worth having per model: a reasoning
+     * model can spend several paragraphs deciding how to say hello, which is a poor trade on a
+     * phone unless the question actually warrants it.
+     */
+    val thinkingEnabled: Boolean = false,
 ) {
     fun asModelDescriptor(): ModelDescriptor = ModelDescriptor(
         id = id,

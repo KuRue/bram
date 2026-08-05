@@ -15,9 +15,11 @@ internal class NativeLlamaBridge {
         threads: Int,
         gpuLayers: Int,
         deviceFilter: String,
+        enableThinking: Boolean,
     ): String
     external fun referenceDecode(tokenCount: Int): String
     external fun teacherForced(forcedTokens: IntArray): String
+    external fun parseReply(reply: String): String
     external fun formatChat(roles: Array<String>, contents: Array<String>, addAssistant: Boolean): String
     external fun countTokens(prompt: String): Int
     external fun generate(

@@ -156,6 +156,13 @@ class LocalModelStore(
         persist(models)
     }
 
+    suspend fun updateThinkingEnabled(modelId: ModelId, enabled: Boolean) = withContext(Dispatchers.IO) {
+        val models = decode(preferences.getString(KEY_MODELS, null)).map { model ->
+            if (model.id == modelId) model.copy(thinkingEnabled = enabled) else model
+        }
+        persist(models)
+    }
+
     suspend fun updatePreferredContext(modelId: ModelId, tokens: Int) = withContext(Dispatchers.IO) {
         val models = decode(preferences.getString(KEY_MODELS, null)).map { model ->
             if (model.id != modelId) return@map model
@@ -251,6 +258,7 @@ class LocalModelStore(
         .put("importedAtEpochMillis", importedAtEpochMillis)
         .put("preferredContextTokens", preferredContextTokens)
         .put("preferredBackendId", preferredBackendId)
+        .put("thinkingEnabled", thinkingEnabled)
 
     private fun JSONObject.toRecord(): LocalModelRecord = LocalModelRecord(
         id = ModelId(getString("id")),
@@ -269,6 +277,7 @@ class LocalModelStore(
         importedAtEpochMillis = getLong("importedAtEpochMillis"),
         preferredContextTokens = getInt("preferredContextTokens"),
         preferredBackendId = optString("preferredBackendId"),
+        thinkingEnabled = optBoolean("thinkingEnabled", false),
     )
 
     private fun recommendInitialContext(trainedMaximum: Int): Int {

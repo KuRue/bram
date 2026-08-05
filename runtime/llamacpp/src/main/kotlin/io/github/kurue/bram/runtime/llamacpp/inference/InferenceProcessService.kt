@@ -31,6 +31,7 @@ class InferenceProcessService : Service() {
     private var loadedContextTokens: Int = 0
     private var loadedGpuLayers: Int = 0
     private var loadedDeviceFilter: String = ""
+    private var loadedThinking: Boolean = false
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
@@ -50,6 +51,10 @@ class InferenceProcessService : Service() {
 
         override fun teacherForced(forcedTokens: IntArray?): String = runSerialized {
             bridge.teacherForced(forcedTokens ?: IntArray(0))
+        }
+
+        override fun parseReply(reply: String?): String = runSerialized {
+            bridge.parseReply(reply.orEmpty())
         }
 
         override fun load(requestJson: String): String = runSerialized {
@@ -160,12 +165,14 @@ class InferenceProcessService : Service() {
         val contextTokens = request.getInt("contextTokens").coerceAtLeast(256)
         val gpuLayers = request.optInt("gpuLayers", 0).coerceAtLeast(0)
         val deviceFilter = request.optString("deviceFilter")
+        val enableThinking = request.optBoolean("enableThinking", false)
         // The offload plan is part of the load identity: reusing a CPU-resident model for a GPU
         // request would silently validate the accelerator against itself.
         if (modelId == loadedModelId &&
             contextTokens == loadedContextTokens &&
             gpuLayers == loadedGpuLayers &&
             deviceFilter == loadedDeviceFilter &&
+            enableThinking == loadedThinking &&
             cpuValidated
         ) {
             return JSONObject(bridge.state())
@@ -200,6 +207,7 @@ class InferenceProcessService : Service() {
                         .coerceIn(1, Runtime.getRuntime().availableProcessors()),
                     gpuLayers = gpuLayers,
                     deviceFilter = deviceFilter,
+                    enableThinking = enableThinking,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())
@@ -210,6 +218,7 @@ class InferenceProcessService : Service() {
             loadedContextTokens = contextTokens
             loadedGpuLayers = gpuLayers
             loadedDeviceFilter = deviceFilter
+            loadedThinking = enableThinking
             cpuValidated = true
             return loadResult
                 .put("alreadyLoaded", false)
