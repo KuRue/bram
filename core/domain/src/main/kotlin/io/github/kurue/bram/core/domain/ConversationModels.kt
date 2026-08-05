@@ -37,6 +37,17 @@ data class ConversationMessage(
     val toolCallId: String? = null,
 )
 
+/**
+ * Enough of a conversation to list it without reading its messages, which matters once a device
+ * holds a long history.
+ */
+data class ConversationSummary(
+    val id: ConversationId,
+    val title: String,
+    val updatedAtEpochMillis: Long,
+    val messageCount: Int,
+)
+
 enum class ModelCapability {
     TEXT,
     IMAGE_INPUT,
