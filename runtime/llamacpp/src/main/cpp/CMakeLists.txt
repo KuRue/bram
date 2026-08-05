@@ -67,6 +67,7 @@ FetchContent_Declare(
     GIT_PROGRESS TRUE
 )
 FetchContent_MakeAvailable(SPIRV-Headers)
+FetchContent_GetProperties(SPIRV-Headers SOURCE_DIR _bram_spirv_headers_src)
 
 # ggml-vulkan requires find_package(SPIRV-Headers CONFIG REQUIRED). FetchContent's automatic
 # redirect is unreliable under this NDK/CMake combination, so publish an explicit package config
@@ -107,6 +108,14 @@ FetchContent_Declare(
     GIT_PROGRESS TRUE
 )
 FetchContent_MakeAvailable(llama_cpp)
+
+# ggml-vulkan.cpp includes <spirv/unified1/spirv.hpp>. In a Vulkan SDK that header sits under the
+# same include root as vulkan/, but with vendored headers it lives in the separate SPIRV-Headers
+# tree, and ggml-vulkan does not link the SPIRV-Headers target for its own compile. Add the include
+# to the target directly so the backend source compiles.
+if(TARGET ggml-vulkan)
+    target_include_directories(ggml-vulkan PRIVATE "${_bram_spirv_headers_src}/include")
+endif()
 
 add_library(bram_llama SHARED bram_llama_jni.cpp)
 target_compile_features(bram_llama PRIVATE cxx_std_17)
