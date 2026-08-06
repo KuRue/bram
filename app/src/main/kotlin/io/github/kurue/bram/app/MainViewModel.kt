@@ -125,34 +125,50 @@ internal data class StreamingReply(
  * Splits a partial reply into visible text and reasoning.
  *
  * The finished reply is split by the runtime's own structured parser, which needs the whole
- * thing. Until it arrives this does the same job on the marked case, so a closed `<think>`
- * block folds into a collapsed row the moment it closes rather than sitting in the transcript
- * as raw markup until the turn ends. A model that reasons in unmarked prose is
- * indistinguishable from one that is answering, so nothing is claimed about it.
+ * thing. Until it arrives this does the same job on the stream, so reasoning folds into a collapsed
+ * row as it is produced rather than sitting in the transcript as raw markup until the turn ends.
+ *
+ * Most reasoning chat formats inject the opening `<think>` as part of the assistant prompt, so the
+ * model's own output begins inside a reasoning block and contains only its closing `</think>`. When
+ * [reasoningStartsOpen] is set the text is read that way: everything up to the first `</think>` is
+ * reasoning, folding as it streams. A model that emits its own `<think>` markers is handled by the
+ * marker path regardless. A model that reasons in unmarked prose is indistinguishable from one that
+ * is answering, so nothing is claimed about it.
  */
-internal fun streamingReply(text: String): StreamingReply {
-    if (!text.contains(OPEN_THINK)) return StreamingReply(text, emptyList(), null)
+internal fun streamingReply(text: String, reasoningStartsOpen: Boolean = false): StreamingReply {
+    // If the model emits its own <think>, the markers are authoritative and the text is read
+    // content-first; otherwise an injected opener means the text starts inside a reasoning block.
+    val startsInReasoning = reasoningStartsOpen && !text.contains(OPEN_THINK)
+    if (!startsInReasoning && !text.contains(OPEN_THINK)) {
+        return StreamingReply(text, emptyList(), null)
+    }
     val visible = StringBuilder()
     val closed = mutableListOf<String>()
     var open: String? = null
     var cursor = 0
+    var inReasoning = startsInReasoning
     while (cursor < text.length) {
-        val start = text.indexOf(OPEN_THINK, cursor)
-        if (start < 0) {
-            visible.append(text, cursor, text.length)
-            break
+        if (inReasoning) {
+            val end = text.indexOf(CLOSE_THINK, cursor)
+            if (end < 0) {
+                // The block is still being written: everything that follows is reasoning, and
+                // there is no answer yet.
+                open = text.substring(cursor)
+                break
+            }
+            closed += text.substring(cursor, end)
+            cursor = end + CLOSE_THINK.length
+            inReasoning = false
+        } else {
+            val start = text.indexOf(OPEN_THINK, cursor)
+            if (start < 0) {
+                visible.append(text, cursor, text.length)
+                break
+            }
+            visible.append(text, cursor, start)
+            cursor = start + OPEN_THINK.length
+            inReasoning = true
         }
-        visible.append(text, cursor, start)
-        val bodyStart = start + OPEN_THINK.length
-        val end = text.indexOf(CLOSE_THINK, bodyStart)
-        if (end < 0) {
-            // Still being written: everything after the marker is reasoning, and there is no
-            // answer yet.
-            open = text.substring(bodyStart)
-            break
-        }
-        closed += text.substring(bodyStart, end)
-        cursor = end + CLOSE_THINK.length
     }
     return StreamingReply(visible.toString(), closed, open)
 }
@@ -837,6 +853,10 @@ class MainViewModel(
         AgentTaskService.start(container.appContext, "Answering: ${prompt.take(40)}")
         generationJob = container.appScope.launch {
             val agent = container.agent()
+            // A reasoning chat format opens the <think> block in the assistant prompt, so the
+            // model's output stream has no opening marker — only reasoning, then </think>. When the
+            // model is asked to reason, read the stream as starting inside that block.
+            val reasoningStartsOpen = selection.localModel?.thinkingEnabled == true
             var assistantText = ""
             var completedMessage: ConversationMessage? = null
             val activity = mutableListOf<AgentActivity>()
@@ -867,7 +887,7 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
-                            val streaming = streamingReply(assistantText)
+                            val streaming = streamingReply(assistantText, reasoningStartsOpen)
                             val now = System.currentTimeMillis()
                             // A block that has just closed keeps the time it actually took; leaving
                             // it on the running clock would have every finished block claim the
@@ -913,7 +933,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = "Running ${event.call.name}…",
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningStartsOpen).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -928,7 +948,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = null,
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningStartsOpen).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
