@@ -245,9 +245,14 @@ parsed, the approval card appears with the arguments shown, `Allow once` execute
 `files/notes/marker` contains `found`. Milestone 9's gate is verified end to end, including the
 accept branch.
 
-The forced retry and the bare-call fallback should now be removed. An earlier attempt to remove them
-failed because only the parser fix was in place; with the special-token fix as well, the reason they
-existed is gone. That is the next change, and it needs the same clean-run check.
+The forced retry and the bare-call fallback stay. Removing them was tried again with both fixes in
+place and the reply came back as text, so the marker is emitted some turns and not others — the one
+successful marked call was a sample, not proof of reliability. At temperature 0.7 that is what a
+sampled model does, and a lazy grammar only engages once the marker appears. The workarounds are
+what make the path dependable rather than lucky.
+
+Verified on the S25 Ultra as well as the emulator: the card appears at 9.8 tok/s, `Allow once`
+executes, and `files/notes/phone` contains `works`.
 
 The earlier note about the parser fix being insufficient is kept below for the record.
 
