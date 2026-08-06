@@ -93,7 +93,13 @@ re-decoded the whole prompt, so at the measured 16.2 tok/s prompt speed a conver
 2,000 tokens spent about two minutes before its first token, worsening with every turn.
 
 - **KV reuse across turns.** Keep the context alive between turns, keep the longest common token
-  prefix, and decode only what is new.
+  prefix, and decode only what is new. Implemented and correct, but it buys nothing on the current
+  reference model: `LFM2.5-2.6B` is a hybrid convolution/attention architecture, and llama.cpp
+  refuses to partially erase such a sequence because the state is not kept per token — Mamba and
+  RWKV behave the same way. Measured on the phone as `prompt 909 tokens, matched 816, reused 0`:
+  the prefix matching works, the trim is declined, and the cache is correctly discarded rather
+  than trusted. Needs a pure-attention model to demonstrate the gain, and the app should say which
+  of the two a loaded model is rather than leaving it to a log line.
 - **KV cache quantization.** `type_k`/`type_v` at `q8_0` roughly halves KV memory. The payoff is
   context length within a phone's RAM rather than speed.
 - **FlashAttention.** Per-backend rather than global: supported on CPU, and to be confirmed on the
@@ -115,6 +121,14 @@ the GGUF record; this makes them a named record instead, many profiles to one fi
 - Sampler settings become per-profile rather than fixed. Only temperature currently crosses the
   process boundary; `top_k` is pinned at 40 and `top_p` at 0.95 in the JNI layer.
 - The status pill selects a profile rather than a model.
+- Carry the loaded format's reasoning tags across the process boundary while that boundary is open.
+  `common_chat_params` already computes `supports_thinking`, `thinking_start_tag`, and
+  `thinking_end_tags`, and the JNI layer already captures it for the end-of-turn parse. The
+  streaming split in the app hardcodes `<think>`/`</think>` instead, which covers the Qwen and
+  DeepSeek families and no others — llama.cpp also emits `[THINK]`,
+  `<|channel|>analysis<|message|>`, and `<mm:think>`, and some formats close with more than one tag.
+  Whether the block starts open is inferred from the model's reasoning setting for the same reason,
+  when the generation prompt says so outright.
 
 Ordering note: Milestone 7 lands first so profiles have the KV and attention settings to expose,
 rather than needing a second pass to add them.
