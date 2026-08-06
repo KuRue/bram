@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -28,26 +29,30 @@ import androidx.compose.ui.unit.dp
  */
 object Glass {
     /** Chrome floats over content and needs more opacity to stay legible while scrolling. */
-    val chromeAlpha: Float = if (Build.VERSION.SDK_INT >= 31) 0.82f else 0.94f
+    val chromeAlpha: Float = if (Build.VERSION.SDK_INT >= 31) 0.72f else 0.90f
 
     /** Cards sit within content, so they can be lighter. */
-    const val CARD_ALPHA: Float = 0.62f
+    const val CARD_ALPHA: Float = 0.46f
 
     /** Bubbles carry body text; too little opacity and the text behind them competes. */
-    const val BUBBLE_ALPHA: Float = 0.70f
+    const val BUBBLE_ALPHA: Float = 0.55f
 
     /** Recessed detail (an expanded activity trace) sits behind body text and reads as inset. */
-    const val DETAIL_ALPHA: Float = 0.40f
+    const val DETAIL_ALPHA: Float = 0.30f
 
     val cornerLarge: Dp = 22.dp
     val cornerMedium: Dp = 16.dp
 }
 
 /**
- * A translucent panel with a lit rim.
+ * A frosted translucent panel.
  *
- * [tint] is composited over the theme background rather than used directly, so a translucent panel
- * still reads as part of the surface it sits on instead of as a coloured film.
+ * Weighted towards the frost rather than the edge. An earlier version leaned on a bright rim to
+ * imply thickness, which reads as a drawn outline rather than as material — especially on a dark
+ * panel where the rim is the only thing catching the eye. With a gradient field behind it
+ * ([BramBackground]) the translucency itself does the work, so the fill is lighter, a broad sheen
+ * falls across the top where light would land, and the edge is reduced to a hairline that defines
+ * the shape without announcing itself.
  */
 @Composable
 fun GlassSurface(
@@ -58,33 +63,37 @@ fun GlassSurface(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val dark = isSystemInDarkTheme()
-    val base = if (tint.isSpecified()) tint else if (dark) Color(0xFF1B1B20) else Color.White
+    val base = if (tint.isSpecified()) tint else if (dark) Color(0xFF23232A) else Color.White
     val fill = base.copy(alpha = alpha)
 
-    // A single flat rim reads as a plain outline. Two stops — bright where light would land, faint
-    // on the opposite edge — is what makes the panel look like it has thickness.
-    val rim = Brush.linearGradient(
+    // Diagonal rather than vertical, and reaching about two thirds down: a short vertical fade
+    // reads as a header strip, while a longer diagonal one reads as light across a surface.
+    val sheen = Brush.linearGradient(
         colors = if (dark) {
-            listOf(Color.White.copy(alpha = 0.22f), Color.White.copy(alpha = 0.04f))
+            listOf(
+                Color.White.copy(alpha = 0.10f),
+                Color.White.copy(alpha = 0.03f),
+                Color.Transparent,
+            )
         } else {
-            listOf(Color.White.copy(alpha = 0.85f), Color.White.copy(alpha = 0.20f))
+            listOf(
+                Color.White.copy(alpha = 0.55f),
+                Color.White.copy(alpha = 0.18f),
+                Color.Transparent,
+            )
         },
+        start = Offset.Zero,
+        end = Offset(0f, Float.POSITIVE_INFINITY),
     )
+
+    val hairline = if (dark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.45f)
 
     Box(
         modifier
             .clip(shape)
             .background(fill)
-            .background(
-                Brush.verticalGradient(
-                    colors = if (dark) {
-                        listOf(Color.White.copy(alpha = 0.05f), Color.Transparent)
-                    } else {
-                        listOf(Color.White.copy(alpha = 0.35f), Color.Transparent)
-                    },
-                ),
-            )
-            .border(1.dp, rim, shape),
+            .background(sheen)
+            .border(0.5.dp, hairline, shape),
         content = content,
     )
 }

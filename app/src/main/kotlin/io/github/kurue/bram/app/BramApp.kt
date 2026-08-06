@@ -66,6 +66,9 @@ import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import java.util.Locale
 
+/** Larger than any message can be tall, so scrolling clamps to the end of the transcript. */
+private const val LARGE_SCROLL_OFFSET = 1_000_000
+
 private enum class AppSection(val label: String, val glyph: String) {
     CHAT("Chat", "✦"),
     MODELS("Models", "▣"),
@@ -124,7 +127,13 @@ fun BramApp(viewModel: MainViewModel) {
                 }
             }
         },
+        // A transparent container lets the gradient field show through, but Scaffold derives its
+        // content colour from the container, and there is no sensible content colour for
+        // "transparent" — leaving text outside an explicit surface to render nearly unreadable.
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
     ) { padding ->
+        BramBackground(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (section) {
                 AppSection.CHAT -> ChatScreen(
@@ -163,6 +172,7 @@ fun BramApp(viewModel: MainViewModel) {
                 )
             }
         }
+        }
     }
 }
 
@@ -186,11 +196,13 @@ private fun ChatScreen(
     val listState = rememberLazyListState()
     val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
 
-    // Follow the reply as it streams. Keyed on the last message's length so each delta scrolls,
-    // not just each new message.
+    // Follow the reply as it streams, keyed on the last message's length so each delta scrolls and
+    // not merely each new message. The large offset scrolls past the item rather than aligning its
+    // top, which matters because a reply is routinely taller than the viewport: aligning the top
+    // would pin the screen to the opening line while the rest was written out of sight.
     LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content?.length) {
         if (state.messages.isNotEmpty()) {
-            runCatching { listState.animateScrollToItem(state.messages.lastIndex) }
+            runCatching { listState.animateScrollToItem(state.messages.lastIndex, LARGE_SCROLL_OFFSET) }
         }
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
@@ -1024,11 +1036,17 @@ private fun ChatBubble(
     val isUser = message.role == MessageRole.USER
     var editing by rememberSaveable(message.id.value) { mutableStateOf(false) }
     var draft by rememberSaveable(message.id.value) { mutableStateOf(message.content) }
+    var showActions by rememberSaveable(message.id.value) { mutableStateOf(false) }
 
     // Assistant replies run the full width with only a small label above them: they are long, often
     // contain code, and a tinted container around several paragraphs makes them harder to read, not
     // easier. Only the user's own turns are enclosed, which is what marks the alternation.
-    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .clickable(enabled = !editing) { showActions = !showActions },
+    ) {
         Text(
             if (isUser) "You" else BramDefaults.IDENTITY.displayName,
             style = MaterialTheme.typography.labelSmall,
@@ -1061,7 +1079,9 @@ private fun ChatBubble(
             }
         }
 
-        if (canAct && !editing && message.content.isNotBlank()) {
+        // Revealed on tap rather than always present. Two rows of buttons under every message is
+        // a lot of furniture in a long transcript, and these are occasional actions.
+        if (canAct && showActions && !editing && message.content.isNotBlank()) {
             Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 TextButton(onClick = { onCopy(message.content) }) { Text("Copy") }
                 if (isUser) {
