@@ -135,7 +135,7 @@ rather than needing a second pass to add them.
 
 ## The agent milestones
 
-Milestones 9 to 16 turn Bram from a chat app with one tool into an agent harness. They are ordered
+Milestones 9 to 17 turn Bram from a chat app with one tool into an agent harness. They are ordered
 by dependency rather than by appeal. The permission model comes first because its current stub is
 what limits Bram to a single read-only tool: anything with an effect is denied, so every tool added
 before it is a tool that cannot run.
@@ -167,7 +167,25 @@ has exactly one tool worth calling.
 Exit criterion: a tool cannot reach a side effect without a recorded decision, and a denied call
 leaves the run able to continue.
 
-## Milestone 10 — Android tool surface (not started)
+## Milestone 10 — local tool calling (not started)
+
+Found while trying to exercise the approval gate on a device: **the local runtime never sends
+tools**. `GenerationRequest.tools` is populated and reaches `LlamaCppRuntime`, which passes the
+request to `LlamaCppServiceClient`, which builds the JSON without them. The JNI `formatChat` takes
+roles and contents only. So a local model is never told a tool exists and cannot call one, whatever
+its ability — the remote OpenAI-compatible path is the only one that offers tools at all.
+
+Everything agentic depends on this. The permission gate cannot be reached on device, and Milestones
+11 and 12 build on tool calls that a local model currently cannot make.
+
+- Pass tools through `common_chat_templates_apply`, which llama.cpp already accepts them for, and
+  carry the grammar it returns into generation so the reply is constrained to the format.
+- Parse tool calls out of the finished reply. `common_chat_parse` already returns them and Bram
+  already calls it for reasoning; the calls are discarded.
+- Report honestly when a loaded model's template has no tool support, rather than offering tools
+  that will never be called.
+
+## Milestone 11 — Android tool surface (not started)
 
 The tools worth having on a phone are the platform's own, not a filesystem.
 
@@ -176,7 +194,7 @@ The tools worth having on a phone are the platform's own, not a filesystem.
 - Calendar, contacts, and notifications behind runtime permissions.
 - Alarms and scheduling, which is what makes unattended work possible at all.
 
-## Milestone 11 — Termux integration (not started)
+## Milestone 12 — Termux integration (not started)
 
 Gives the agent a real toolchain — compilers, package managers, git — without Bram shipping a
 userland or fighting the execution restriction, because the restriction stays Termux's problem.
@@ -194,7 +212,7 @@ userland or fighting the execution restriction, because the restriction stays Te
 This is the widest capability Bram will have: arbitrary command execution as the user. It lands
 after Milestone 9 and not before.
 
-## Milestone 12 — sessions and the task queue (not started)
+## Milestone 13 — sessions and the task queue (not started)
 
 - Named sessions that outlive a turn, with scrollback the agent can page through rather than
   re-read whole.
@@ -202,7 +220,7 @@ after Milestone 9 and not before.
   and is the foundation for this, not the finished thing.
 - Per-task UI: what is running, what it has done, and how to stop it.
 
-## Milestone 13 — context compaction and memory (not started)
+## Milestone 14 — context compaction and memory (not started)
 
 - Summarise what falls out of the context window instead of dropping it. The budgeter currently
   records what it omitted but does nothing with it.
@@ -212,7 +230,7 @@ after Milestone 9 and not before.
 Depends on Milestone 7: compaction costs a model call, and on a phone that is the same
 prompt-reprocessing cost that KV reuse exists to remove.
 
-## Milestone 14 — remote MCP (not started)
+## Milestone 15 — remote MCP (not started)
 
 - Streamable HTTP transport only, with `Authorization` headers and server identity pinned per
   configured server.
@@ -221,12 +239,12 @@ prompt-reprocessing cost that KV reuse exists to remove.
 - Tool descriptions from a server are untrusted input, and are subject to Milestone 9 like any
   other tool.
 
-## Milestone 15 — skills and automations (not started)
+## Milestone 16 — skills and automations (not started)
 
 - Versioned skill packages with validation, drafts, activation, and rollback.
 - Automations built on the scheduling from Milestone 10 and the queue from Milestone 12.
 
-## Milestone 16 — curated runtimes and routing (not started)
+## Milestone 17 — curated runtimes and routing (not started)
 
 - LiteRT-LM packages and device-specific compiled caches.
 - OpenAI Responses adapter where supported.

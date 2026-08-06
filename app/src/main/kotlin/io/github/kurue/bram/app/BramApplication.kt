@@ -58,7 +58,9 @@ class AppContainer(application: Application) {
     val deviceProfiler = AndroidDeviceProfiler(application)
     val conversationStore = ConversationStore(application)
     val memoryStore = InMemoryMemoryStore()
-    private val toolRegistry = StaticToolRegistry(listOf(DeviceStatusTool(deviceProfiler)))
+    private val toolRegistry = StaticToolRegistry(
+        listOf(DeviceStatusTool(deviceProfiler), ScratchNoteTool(application)),
+    )
 
     fun runtime(endpoint: RemoteEndpoint) = OpenAiCompatibleRuntime(
         endpoint = endpoint,
