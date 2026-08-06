@@ -1,5 +1,6 @@
 package io.github.kurue.bram.app
 
+import io.github.kurue.bram.core.domain.ReasoningFormat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -12,9 +13,16 @@ import org.junit.Test
  */
 class StreamingReplyTest {
 
+    /** What the runtime reports for a Qwen or DeepSeek style format. */
+    private val thinkTags = ReasoningFormat(
+        supportsThinking = true,
+        startTag = "<think>",
+        endTags = listOf("</think>"),
+    )
+
     @Test
     fun `plain text is left alone`() {
-        val split = streamingReply("Hello there.")
+        val split = streamingReply("Hello there.", thinkTags)
         assertEquals("Hello there.", split.visibleText)
         assertEquals(emptyList<String>(), split.closedReasoning)
         assertNull(split.openReasoning)
@@ -22,7 +30,7 @@ class StreamingReplyTest {
 
     @Test
     fun `an open block is reasoning and there is no answer yet`() {
-        val split = streamingReply("<think>weighing the option")
+        val split = streamingReply("<think>weighing the option", thinkTags)
         assertEquals("", split.visibleText)
         assertEquals(emptyList<String>(), split.closedReasoning)
         assertEquals("weighing the option", split.openReasoning)
@@ -30,7 +38,7 @@ class StreamingReplyTest {
 
     @Test
     fun `a closed block leaves the answer visible and the markup gone`() {
-        val split = streamingReply("<think>weighed it</think>The answer is four.")
+        val split = streamingReply("<think>weighed it</think>The answer is four.", thinkTags)
         assertEquals("The answer is four.", split.visibleText)
         assertEquals(listOf("weighed it"), split.closedReasoning)
         assertNull(split.openReasoning)
@@ -39,21 +47,21 @@ class StreamingReplyTest {
     @Test
     fun `a partial closing marker still counts as open`() {
         // Deltas arrive mid-token, so "</thi" must not be mistaken for a finished block.
-        val split = streamingReply("<think>still going</thi")
+        val split = streamingReply("<think>still going</thi", thinkTags)
         assertEquals("", split.visibleText)
         assertEquals("still going</thi", split.openReasoning)
     }
 
     @Test
     fun `text before a block is kept`() {
-        val split = streamingReply("Sure. <think>how to phrase it</think>Here you go.")
+        val split = streamingReply("Sure. <think>how to phrase it</think>Here you go.", thinkTags)
         assertEquals("Sure. Here you go.", split.visibleText)
         assertEquals(listOf("how to phrase it"), split.closedReasoning)
     }
 
     @Test
     fun `several blocks are reported in order`() {
-        val split = streamingReply("<think>one</think>A<think>two</think>B<think>three")
+        val split = streamingReply("<think>one</think>A<think>two</think>B<think>three", thinkTags)
         assertEquals("AB", split.visibleText)
         assertEquals(listOf("one", "two"), split.closedReasoning)
         assertEquals("three", split.openReasoning)
@@ -65,7 +73,7 @@ class StreamingReplyTest {
 
     @Test
     fun `an injected block folds reasoning as it streams, with no opening marker`() {
-        val split = streamingReply("weighing the option", reasoningStartsOpen = true)
+        val split = streamingReply("weighing the option", thinkTags.copy(startsOpen = true))
         assertEquals("", split.visibleText)
         assertEquals(emptyList<String>(), split.closedReasoning)
         assertEquals("weighing the option", split.openReasoning)
@@ -73,7 +81,7 @@ class StreamingReplyTest {
 
     @Test
     fun `an injected block closes when the think marker arrives`() {
-        val split = streamingReply("weighed it</think>The answer is four.", reasoningStartsOpen = true)
+        val split = streamingReply("weighed it</think>The answer is four.", thinkTags.copy(startsOpen = true))
         assertEquals("The answer is four.", split.visibleText)
         assertEquals(listOf("weighed it"), split.closedReasoning)
         assertNull(split.openReasoning)
@@ -82,7 +90,7 @@ class StreamingReplyTest {
     @Test
     fun `an explicit think marker overrides an injected open`() {
         // A model that emits its own <think> is read content-first even when an open was injected.
-        val split = streamingReply("<think>real</think>answer", reasoningStartsOpen = true)
+        val split = streamingReply("<think>real</think>answer", thinkTags.copy(startsOpen = true))
         assertEquals("answer", split.visibleText)
         assertEquals(listOf("real"), split.closedReasoning)
         assertNull(split.openReasoning)
@@ -90,18 +98,56 @@ class StreamingReplyTest {
 
     @Test
     fun `a partial closing marker in an injected block stays open`() {
-        val split = streamingReply("still going</thi", reasoningStartsOpen = true)
+        val split = streamingReply("still going</thi", thinkTags.copy(startsOpen = true))
         assertEquals("", split.visibleText)
         assertEquals(emptyList<String>(), split.closedReasoning)
         assertEquals("still going</thi", split.openReasoning)
     }
 
     @Test
-    fun `an injected open with no marker is plain text when reasoning is off`() {
-        // reasoningStartsOpen is only set when the model is asked to reason; otherwise unmarked
-        // prose is an answer, not reasoning.
-        val split = streamingReply("Just an answer, no reasoning.")
+    fun `text with no marker is an answer when the block was not opened for it`() {
+        // startsOpen is false, so unmarked prose is an answer rather than reasoning.
+        val split = streamingReply("Just an answer, no reasoning.", thinkTags)
         assertEquals("Just an answer, no reasoning.", split.visibleText)
+        assertNull(split.openReasoning)
+    }
+
+    // The tags used to be hardcoded to <think>. llama.cpp reports whatever the loaded format
+    // actually uses, and several formats use neither of those spellings.
+
+    @Test
+    fun `a format with different tags is split on its own markers`() {
+        val magistral = ReasoningFormat(
+            supportsThinking = true,
+            startTag = "[THINK]",
+            endTags = listOf("[/THINK]"),
+        )
+        val split = streamingReply("[THINK]weighed it[/THINK]Four.", magistral)
+        assertEquals("Four.", split.visibleText)
+        assertEquals(listOf("weighed it"), split.closedReasoning)
+    }
+
+    @Test
+    fun `a block ends at whichever closing tag comes first`() {
+        // One format lists </think> and <tool_call> together, so the block ends at the earlier of
+        // the two rather than the one listed first.
+        val multi = ReasoningFormat(
+            supportsThinking = true,
+            startTag = "<think>",
+            endTags = listOf("</think>", "<tool_call>"),
+        )
+        val split = streamingReply("<think>I should call it<tool_call>{}", multi)
+        assertEquals(listOf("I should call it"), split.closedReasoning)
+        assertEquals("{}", split.visibleText)
+    }
+
+    @Test
+    fun `a runtime that reports no tags leaves the text alone`() {
+        // Nothing is claimed about a format Bram cannot describe, rather than splitting it on tags
+        // that may not be this model's.
+        val split = streamingReply("<think>not really a block</think>", ReasoningFormat())
+        assertEquals("<think>not really a block</think>", split.visibleText)
+        assertEquals(emptyList<String>(), split.closedReasoning)
         assertNull(split.openReasoning)
     }
 }

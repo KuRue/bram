@@ -70,7 +70,10 @@ class DefaultAgentOrchestrator(
                 ),
             ).collect { event ->
                 when (event) {
-                    is GenerationEvent.Started -> emit(AgentEvent.Status(event.runtimeDescription))
+                    is GenerationEvent.Started -> {
+                        emit(AgentEvent.Status(event.runtimeDescription))
+                        event.reasoningFormat?.let { emit(AgentEvent.Reasoning(it)) }
+                    }
                     is GenerationEvent.TextDelta -> {
                         responseText.append(event.text)
                         emit(AgentEvent.TextDelta(event.text))

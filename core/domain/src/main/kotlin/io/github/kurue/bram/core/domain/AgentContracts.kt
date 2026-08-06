@@ -73,6 +73,11 @@ sealed interface AgentEvent {
         val estimatedInputTokens: Int,
         val omittedMessageCount: Int,
     ) : AgentEvent
+    /**
+     * The reasoning markers the runtime is using, reported before any text arrives so a partial
+     * reply can be split with the loaded format's own tags rather than an assumed `<think>`.
+     */
+    data class Reasoning(val format: ReasoningFormat) : AgentEvent
     data class TextDelta(val text: String) : AgentEvent
     data class ToolStarted(val call: ToolCall) : AgentEvent
     data class ToolFinished(val call: ToolCall, val result: String) : AgentEvent

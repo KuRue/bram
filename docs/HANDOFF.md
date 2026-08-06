@@ -79,6 +79,11 @@ and empty `<think>` markers, which Bram strips after parsing; and its reasoning 
 prose, so it cannot be folded into a collapsed entry. Turning reasoning off is the practical fix
 and is the default.
 
+**Reasoning tags come from the runtime, but unmarked prose still cannot be folded.** llama.cpp
+reports the loaded format's markers, and Qwen3.5 reports `<think>` with two closing tags,
+`</think>` and `<tool_call>`. Its own template does not render, though, so Bram falls back to a
+built-in one and the model reasons in unmarked prose — nothing marks it, so nothing can collapse it.
+
 **Reasoning is expensive.** A reasoning model asked to say hello can spend paragraphs deliberating.
 Reasoning is off by default, per model.
 

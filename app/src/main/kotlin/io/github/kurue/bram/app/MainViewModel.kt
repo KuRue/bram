@@ -15,6 +15,7 @@ import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.RemoteApiKind
 import io.github.kurue.bram.core.domain.RemoteEndpoint
@@ -124,35 +125,33 @@ internal data class StreamingReply(
 /**
  * Splits a partial reply into visible text and reasoning.
  *
- * The finished reply is split by the runtime's own structured parser, which needs the whole
- * thing. Until it arrives this does the same job on the stream, so reasoning folds into a collapsed
- * row as it is produced rather than sitting in the transcript as raw markup until the turn ends.
+ * The finished reply is split by the runtime's own structured parser, which needs the whole thing.
+ * Until it arrives this does the same job on the stream, so reasoning folds into a collapsed row as
+ * it is produced rather than sitting in the transcript as raw markup until the turn ends.
  *
- * Some chat formats open the reasoning block in the assistant prompt, so the model's own output
- * begins inside it and contains only the closing tag. Others have the model write both tags, and
- * which happens depends on the format and can invert with whether reasoning is enabled. When
- * [reasoningStartsOpen] is set the text is read as already inside a block: everything up to the
- * first `</think>` is reasoning, folding as it streams. A model that writes its own `<think>` is
- * read marker-first either way, so guessing wrong costs a flicker rather than a wrong transcript.
- *
- * Two limits worth knowing. The tags here are `<think>`/`</think>`, which covers the Qwen and
- * DeepSeek families and no others: llama.cpp also emits `[THINK]`, `<|channel|>analysis<|message|>`,
- * and `<mm:think>`, and some formats have more than one closing tag. And whether the block starts
- * open is inferred from the model's reasoning setting rather than known. Both are guesses standing
- * in for something the runtime already computes — `common_chat_params` carries `thinking_start_tag`,
- * `thinking_end_tags`, and the generation prompt — and Milestone 8 carries those across the process
- * boundary so this can stop guessing.
+ * [format] comes from the runtime, which knows what the loaded chat template actually uses. The
+ * tags vary — `<think>`, `[THINK]`, `<|channel|>analysis<|message|>` and `<mm:think>` are all in
+ * use, and some formats close with more than one — and whether the prompt already opened the block
+ * varies with the format too. Both were previously assumed, which was right for the Qwen and
+ * DeepSeek families and wrong for the rest.
  *
  * A model that reasons in unmarked prose is indistinguishable from one that is answering, so
- * nothing is claimed about it.
+ * nothing is claimed about it. So is a format that reports no tags, which is why an unusable
+ * [format] leaves the text alone rather than guessing.
  */
-internal fun streamingReply(text: String, reasoningStartsOpen: Boolean = false): StreamingReply {
-    // A model that writes its own <think> is authoritative: read from the marker. Only when there
-    // is none does an assumed-open block apply.
-    val startsInReasoning = reasoningStartsOpen && !text.contains(OPEN_THINK)
-    if (!reasoningStartsOpen && !text.contains(OPEN_THINK)) {
+internal fun streamingReply(
+    text: String,
+    format: ReasoningFormat = ReasoningFormat(),
+): StreamingReply {
+    if (!format.isUsable) return StreamingReply(text, emptyList(), null)
+    val startTag = format.startTag
+    // A model that writes the opening tag itself is authoritative: read from the marker wherever it
+    // is. Only when there is none does the prompt's own opening apply.
+    val startsInReasoning = format.startsOpen && !text.contains(startTag)
+    if (!startsInReasoning && !text.contains(startTag)) {
         return StreamingReply(text, emptyList(), null)
     }
+
     val visible = StringBuilder()
     val closed = mutableListOf<String>()
     var open: String? = null
@@ -160,32 +159,40 @@ internal fun streamingReply(text: String, reasoningStartsOpen: Boolean = false):
     var inReasoning = startsInReasoning
     while (cursor < text.length) {
         if (inReasoning) {
-            val end = text.indexOf(CLOSE_THINK, cursor)
-            if (end < 0) {
-                // The block is still being written: everything that follows is reasoning, and
-                // there is no answer yet.
+            val end = format.firstEndTagFrom(text, cursor)
+            if (end == null) {
+                // The block is still being written: everything that follows is reasoning, and there
+                // is no answer yet.
                 open = text.substring(cursor)
                 break
             }
-            closed += text.substring(cursor, end)
-            cursor = end + CLOSE_THINK.length
+            closed += text.substring(cursor, end.first)
+            cursor = end.first + end.second.length
             inReasoning = false
         } else {
-            val start = text.indexOf(OPEN_THINK, cursor)
-            if (start < 0) {
+            val next = text.indexOf(startTag, cursor)
+            if (next < 0) {
                 visible.append(text, cursor, text.length)
                 break
             }
-            visible.append(text, cursor, start)
-            cursor = start + OPEN_THINK.length
+            visible.append(text, cursor, next)
+            cursor = next + startTag.length
             inReasoning = true
         }
     }
     return StreamingReply(visible.toString(), closed, open)
 }
 
-private const val OPEN_THINK = "<think>"
-private const val CLOSE_THINK = "</think>"
+/**
+ * The earliest closing tag at or after [from], with the tag that matched.
+ *
+ * A format can close a reasoning block several ways — one lists `</think>` and `<tool_call>`
+ * together — so the block ends at whichever comes first, not at whichever was listed first.
+ */
+private fun ReasoningFormat.firstEndTagFrom(text: String, from: Int): Pair<Int, String>? =
+    endTags.mapNotNull { tag ->
+        text.indexOf(tag, from).takeIf { it >= 0 }?.let { it to tag }
+    }.minByOrNull { it.first }
 
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
@@ -864,13 +871,10 @@ class MainViewModel(
         AgentTaskService.start(container.appContext, "Answering: ${prompt.take(40)}")
         generationJob = container.appScope.launch {
             val agent = container.agent()
-            // Some chat formats open the <think> block in the assistant prompt, leaving the output
-            // stream with no opening marker — only reasoning, then </think>. Whether this one does
-            // is not known here, so it is assumed whenever the model is asked to reason: a model
-            // that writes its own marker is read marker-first anyway, which makes a wrong guess
-            // cost a flicker rather than a mangled transcript. Milestone 8 replaces the guess with
-            // the tags the runtime already computes.
-            val reasoningStartsOpen = selection.localModel?.thinkingEnabled == true
+            // Reported by the runtime before any text arrives, since only it knows what the loaded
+            // chat template uses. Until it does, an empty format leaves the stream alone rather
+            // than splitting it on tags that may not be this model's.
+            var reasoningFormat = ReasoningFormat()
             var assistantText = ""
             var completedMessage: ConversationMessage? = null
             val activity = mutableListOf<AgentActivity>()
@@ -889,6 +893,7 @@ class MainViewModel(
                 ).collect { event ->
                     when (event) {
                         is AgentEvent.Status -> mutableState.update { it.copy(status = event.text) }
+                        is AgentEvent.Reasoning -> reasoningFormat = event.format
                         is AgentEvent.ContextPrepared -> mutableState.update {
                             it.copy(
                                 status = buildString {
@@ -901,7 +906,7 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
-                            val streaming = streamingReply(assistantText, reasoningStartsOpen)
+                            val streaming = streamingReply(assistantText, reasoningFormat)
                             val now = System.currentTimeMillis()
                             // A block that has just closed keeps the time it actually took; leaving
                             // it on the running clock would have every finished block claim the
@@ -947,7 +952,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = "Running ${event.call.name}…",
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningStartsOpen).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningFormat).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -962,7 +967,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = null,
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningStartsOpen).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningFormat).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
