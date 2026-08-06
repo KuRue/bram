@@ -1221,26 +1221,16 @@ private fun ChatBubble(
     var draft by rememberSaveable(message.id.value) { mutableStateOf(message.content) }
     var showActions by rememberSaveable(message.id.value) { mutableStateOf(false) }
 
-    // Assistant replies run the full width with only a small label above them: they are long, often
-    // contain code, and a tinted container around several paragraphs makes them harder to read, not
-    // easier. Only the user's own turns are enclosed, which is what marks the alternation.
+    // Assistant replies run the full width: they are long, often contain code, and a tinted
+    // container around several paragraphs makes them harder to read, not easier. Only the user's
+    // own turns are enclosed, and that alternation is what marks who is speaking — a "You"/"Bram"
+    // label above every turn says the same thing again in more furniture.
     Column(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
             .clickable(enabled = !editing) { showActions = !showActions },
     ) {
-        Text(
-            if (isUser) "You" else BramDefaults.IDENTITY.displayName,
-            style = MaterialTheme.typography.labelSmall,
-            color = if (isUser) {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            } else {
-                MaterialTheme.colorScheme.primary
-            },
-            modifier = Modifier.padding(start = 2.dp, bottom = 4.dp),
-        )
-
         if (isUser) {
             GlassSurface(
                 modifier = Modifier.fillMaxWidth(),

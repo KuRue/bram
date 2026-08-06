@@ -111,6 +111,55 @@ enum class RuntimeBackend(val label: String, val devicePrefix: String) {
     }
 }
 
+/** A partial reply, split the way the finished one will be. */
+internal data class StreamingReply(
+    /** What the model has said so far, with reasoning markup removed. */
+    val visibleText: String,
+    /** Reasoning blocks the model has already closed, oldest first. */
+    val closedReasoning: List<String>,
+    /** The block still being written, if the model is reasoning right now. */
+    val openReasoning: String?,
+)
+
+/**
+ * Splits a partial reply into visible text and reasoning.
+ *
+ * The finished reply is split by the runtime's own structured parser, which needs the whole
+ * thing. Until it arrives this does the same job on the marked case, so a closed `<think>`
+ * block folds into a collapsed row the moment it closes rather than sitting in the transcript
+ * as raw markup until the turn ends. A model that reasons in unmarked prose is
+ * indistinguishable from one that is answering, so nothing is claimed about it.
+ */
+internal fun streamingReply(text: String): StreamingReply {
+    if (!text.contains(OPEN_THINK)) return StreamingReply(text, emptyList(), null)
+    val visible = StringBuilder()
+    val closed = mutableListOf<String>()
+    var open: String? = null
+    var cursor = 0
+    while (cursor < text.length) {
+        val start = text.indexOf(OPEN_THINK, cursor)
+        if (start < 0) {
+            visible.append(text, cursor, text.length)
+            break
+        }
+        visible.append(text, cursor, start)
+        val bodyStart = start + OPEN_THINK.length
+        val end = text.indexOf(CLOSE_THINK, bodyStart)
+        if (end < 0) {
+            // Still being written: everything after the marker is reasoning, and there is no
+            // answer yet.
+            open = text.substring(bodyStart)
+            break
+        }
+        closed += text.substring(bodyStart, end)
+        cursor = end + CLOSE_THINK.length
+    }
+    return StreamingReply(visible.toString(), closed, open)
+}
+
+private const val OPEN_THINK = "<think>"
+private const val CLOSE_THINK = "</think>"
+
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
@@ -705,31 +754,6 @@ class MainViewModel(
         }
     }
 
-    /**
-     * Splits a partial reply into visible text and an in-flight reasoning entry.
-     *
-     * Only handles the marked case: when a model emits an unclosed `<think>` block, everything
-     * inside it is reasoning and nothing after it exists yet. A model that reasons in unmarked
-     * prose is indistinguishable from one that is answering, so nothing is claimed about it.
-     */
-    private fun streamingActivity(
-        text: String,
-        activity: List<AgentActivity>,
-        startedAt: Long,
-    ): Pair<String, AgentActivity.Thinking?> {
-        val open = text.indexOf("<think>")
-        if (open < 0) return text to null
-        val close = text.indexOf("</think>", startIndex = open)
-        if (close >= 0) return text to null
-        val reasoning = text.substring(open + "<think>".length)
-        val elapsed = if (startedAt > 0) System.currentTimeMillis() - startedAt else 0L
-        return text.take(open) to AgentActivity.Thinking(
-            text = reasoning,
-            durationMillis = elapsed,
-            inProgress = true,
-        )
-    }
-
     /** The assistant bubble as it stands mid-turn, so tool steps appear as they happen. */
     private fun inFlightMessage(text: String, activity: List<AgentActivity>) = ConversationMessage(
         role = MessageRole.ASSISTANT,
@@ -810,6 +834,8 @@ class MainViewModel(
             var completedMessage: ConversationMessage? = null
             val activity = mutableListOf<AgentActivity>()
             var thinkingStartedAt = 0L
+            val finishedThinking = mutableListOf<AgentActivity.Thinking>()
+            var thinkingMillisTotal = 0L
             try {
                 agent.run(
                     request = AgentRunRequest(
@@ -834,20 +860,39 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
+                            val streaming = streamingReply(assistantText)
+                            val now = System.currentTimeMillis()
+                            // A block that has just closed keeps the time it actually took; leaving
+                            // it on the running clock would have every finished block claim the
+                            // duration of the whole turn.
+                            while (finishedThinking.size < streaming.closedReasoning.size) {
+                                val index = finishedThinking.size
+                                val took = if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
+                                finishedThinking += AgentActivity.Thinking(
+                                    text = streaming.closedReasoning[index],
+                                    durationMillis = took,
+                                    inProgress = false,
+                                )
+                                thinkingMillisTotal += took
+                                thinkingStartedAt = 0L
+                            }
                             // Say "Thinking…" while the block is still open rather than waiting for
                             // it to close. On a slow device that wait is long, and a blank reply
                             // with no explanation looks like a stall.
-                            val streaming = streamingActivity(assistantText, activity, thinkingStartedAt)
-                            if (streaming.second != null && thinkingStartedAt == 0L) {
-                                thinkingStartedAt = System.currentTimeMillis()
+                            val inFlight = streaming.openReasoning?.let { reasoning ->
+                                if (thinkingStartedAt == 0L) thinkingStartedAt = now
+                                AgentActivity.Thinking(
+                                    text = reasoning,
+                                    durationMillis = now - thinkingStartedAt,
+                                    inProgress = true,
+                                )
                             }
                             mutableState.update {
                                 it.copy(
                                     messages = requestMessages + ConversationMessage(
                                         role = MessageRole.ASSISTANT,
-                                        content = streaming.first,
-                                        activity = streaming.second?.let { thinking -> activity + thinking }
-                                            ?: activity.toList(),
+                                        content = streaming.visibleText,
+                                        activity = activity + finishedThinking + listOfNotNull(inFlight),
                                     ),
                                 )
                             }
@@ -861,7 +906,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = "Running ${event.call.name}…",
-                                    messages = requestMessages + inFlightMessage(assistantText, activity),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -876,7 +921,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = null,
-                                    messages = requestMessages + inFlightMessage(assistantText, activity),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -910,7 +955,8 @@ class MainViewModel(
                         parsed.optString("content").ifBlank { rawReply } to parsed.optString("reasoning")
                     }.getOrDefault(rawReply to "")
                 }
-                val thinkingMillis = if (thinkingStartedAt > 0) {
+                // Every block the model opened, including one it never closed.
+                val thinkingMillis = thinkingMillisTotal + if (thinkingStartedAt > 0) {
                     System.currentTimeMillis() - thinkingStartedAt
                 } else {
                     0L
@@ -974,6 +1020,10 @@ class MainViewModel(
                     error = null,
                 )
             }
+            // This is the startup path. Without this the last model was only reopened after an
+            // import, so every launch after the first one landed on an empty chat that silently
+            // refused to send.
+            restoreLastModel()
         }
     }
 
