@@ -75,8 +75,13 @@ fun GlassSurface(
     val base = if (tint.isSpecified()) tint else if (dark) Color(0xFF2A2A31) else Color.White
 
     Box(modifier.clip(shape)) {
-        if (blur) BackdropBlur(blurRadius)
-        Box(Modifier.matchParentSize().background(base.copy(alpha = alpha)))
+        if (blur) {
+            // The blur carries the tint, so the panel is one layer rather than a blur with a
+            // separate film over it.
+            BackdropBlur(blurRadius, base, alpha)
+        } else {
+            Box(Modifier.matchParentSize().background(base.copy(alpha = alpha)))
+        }
         content()
     }
 }

@@ -1,64 +1,48 @@
 package io.github.kurue.bram.app
 
-import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PointMode
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TileMode
-import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.layer.GraphicsLayer
-import androidx.compose.ui.graphics.layer.drawLayer
-import androidx.compose.ui.graphics.rememberGraphicsLayer
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 
 /**
- * Shared state for real backdrop blur.
+ * Shared state for backdrop blur.
  *
- * [layer] holds a recording of everything that should appear blurred behind a panel — the field and
- * the transcript. A panel draws that recording, shifted so the region under it lands in place, with
- * a blur applied. That is what makes text scrolling behind a panel actually go soft; a stylised
- * redraw of the background cannot, because it knows nothing about the content on top of it.
- *
- * The recording deliberately excludes the panels themselves. A panel that sampled a recording
- * containing itself would blur an image of its own previous frame, which feeds back.
+ * Compose has no built-in way to sample what is already on screen behind a composable. Doing it by
+ * hand — record the content into a GraphicsLayer, then draw that recording blurred inside each
+ * panel — runs into ownership rules that leave a layer recorded by one node painting nothing when
+ * sampled from another, and into a native stack overflow if anything inside the recording samples
+ * it. Haze handles that lifecycle, so the app supplies only the two ends: the content to blur, and
+ * the panels that blur it.
  */
-class Backdrop(val layer: GraphicsLayer)
-
-val LocalBackdrop = compositionLocalOf<Backdrop?> { null }
-
-/** RenderEffect blur arrived in API 31. Below that, panels stay translucent but unblurred. */
-private val blurSupported: Boolean get() = Build.VERSION.SDK_INT >= 31
+val LocalHaze = compositionLocalOf<HazeState?> { null }
 
 private const val LATTICE_STEP_DP = 22
 private const val LATTICE_RADIUS_DP = 1.1f
 
-/** Owns the recording so anything under it — including the drawer — can blur the same frame. */
+/** Owns the blur state so anything below it — including the drawer — samples the same frame. */
 @Composable
 fun BackdropHost(content: @Composable () -> Unit) {
-    val layer = rememberGraphicsLayer()
-    CompositionLocalProvider(LocalBackdrop provides Backdrop(layer), content = content)
+    val hazeState = rememberHazeState()
+    CompositionLocalProvider(LocalHaze provides hazeState, content = content)
 }
 
 /**
@@ -108,49 +92,32 @@ fun Modifier.bramField(): Modifier {
     }
 }
 
-/** Records this element's drawing as the frame panels will blur. */
+/** Marks this element as the content that panels blur. */
 @Composable
 fun Modifier.recordBackdrop(): Modifier {
-    val backdrop = LocalBackdrop.current ?: return this
-    return drawWithContent {
-        backdrop.layer.record { this@drawWithContent.drawContent() }
-        drawLayer(backdrop.layer)
-    }
+    val hazeState = LocalHaze.current ?: return this
+    return hazeSource(hazeState)
 }
 
 /**
- * Draws the recorded backdrop, blurred, filling its parent.
+ * Blurs whatever sits behind this element.
  *
- * The blur belongs to *this* element's layer, not to the recording. A GraphicsLayer carries one
- * render effect, so setting it on the shared recording blurs every use of it — including the main
- * draw, which smears the whole screen. Giving the effect to a private layer that merely samples the
- * recording keeps the recording itself sharp.
- *
- * Placed under the caller's content so the content stays legible; blurring the whole element would
- * take its text with it.
+ * Drawn as a child under the caller's content so the content itself stays sharp; blurring the whole
+ * element would take its text with it. The tint rides along with the blur, so a panel is one layer
+ * rather than a blur with a separate film over it.
  */
 @Composable
-fun BoxScope.BackdropBlur(radius: Dp) {
-    val backdrop = LocalBackdrop.current ?: return
-    if (!blurSupported) return
-    var origin by remember { mutableStateOf(Offset.Zero) }
+fun BoxScope.BackdropBlur(radius: Dp, tint: Color, tintAlpha: Float) {
+    val hazeState = LocalHaze.current ?: return
     Box(
         Modifier
             .matchParentSize()
-            .onGloballyPositioned { origin = it.positionInRoot() }
-            .graphicsLayer {
-                renderEffect = BlurEffect(
-                    radiusX = radius.toPx(),
-                    radiusY = radius.toPx(),
-                    edgeTreatment = TileMode.Clamp,
-                )
-                clip = true
-            }
-            .drawBehind {
-                // Shift the recording so the region sitting under this panel lands beneath it.
-                translate(left = -origin.x, top = -origin.y) {
-                    drawLayer(backdrop.layer)
-                }
+            .hazeEffect(state = hazeState) {
+                blurRadius = radius
+                backgroundColor = tint
+                tints = listOf(HazeTint(tint.copy(alpha = tintAlpha)))
+                // A little grain stops a large uniform blur banding on an OLED panel.
+                noiseFactor = 0.06f
             },
     )
 }
