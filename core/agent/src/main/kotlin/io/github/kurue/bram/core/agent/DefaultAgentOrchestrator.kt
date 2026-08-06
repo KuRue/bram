@@ -66,6 +66,7 @@ class DefaultAgentOrchestrator(
                     messages = context.messages,
                     tools = toolRegistry.definitions(),
                     maxOutputTokens = request.maxOutputTokens,
+                    sampler = request.sampler,
                     requestId = UUID.randomUUID().toString(),
                 ),
             ).collect { event ->

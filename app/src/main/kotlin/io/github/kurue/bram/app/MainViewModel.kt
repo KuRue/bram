@@ -16,6 +16,8 @@ import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.ReasoningFormat
+import io.github.kurue.bram.core.domain.ModelProfile
+import io.github.kurue.bram.core.domain.SamplerSettings
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.RemoteApiKind
 import io.github.kurue.bram.core.domain.RemoteEndpoint
@@ -197,6 +199,9 @@ private fun ReasoningFormat.firstEndTagFrom(text: String, from: Int): Pair<Int, 
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
+    val profiles: List<ModelProfile> = emptyList(),
+    /** The profile a load uses. Every model has at least a default one. */
+    val activeProfileId: String? = null,
     val endpoints: List<RemoteEndpoint> = emptyList(),
     val selectedRuntimeId: String? = null,
     val loadedModelId: String? = null,
@@ -233,8 +238,23 @@ data class AppUiState(
 
     /** The backend a given model will load onto, falling back to CPU when unavailable. */
     fun backendFor(model: LocalModelRecord): RuntimeBackend =
-        RuntimeBackend.fromId(model.preferredBackendId).takeIf { it in availableBackends }
+        RuntimeBackend.fromId(profileFor(model).backendId).takeIf { it in availableBackends }
             ?: RuntimeBackend.CPU
+
+    /**
+     * The profile a model runs under: the one explicitly active, otherwise its first.
+     *
+     * Falls back to a profile derived from the record so a model is never unusable because its
+     * profile has not been written yet — the store creates one on import, but a caller reading
+     * state mid-load should not have to care.
+     */
+    fun profileFor(model: LocalModelRecord): ModelProfile =
+        profiles.firstOrNull { it.id == activeProfileId && it.modelId == model.id }
+            ?: profiles.firstOrNull { it.modelId == model.id }
+            ?: ModelProfile.defaultFor(model)
+
+    val activeProfile: ModelProfile?
+        get() = profiles.firstOrNull { it.id == activeProfileId }
 }
 
 data class EndpointDraft(
@@ -467,49 +487,89 @@ class MainViewModel(
         }
     }
 
-    fun setPreferredContext(modelId: String, tokens: Int) {
+    fun setPreferredContext(modelId: String, tokens: Int) =
+        editProfileFor(modelId) { it.copy(contextTokens = tokens) }
+
+    fun setThinkingEnabled(modelId: String, enabled: Boolean) =
+        editProfileFor(modelId) { it.copy(thinkingEnabled = enabled) }
+
+    fun selectBackend(modelId: String, backend: RuntimeBackend) =
+        editProfileFor(modelId) { it.copy(backendId = backend.name) }
+
+    fun updateProfile(profile: ModelProfile) {
         viewModelScope.launch {
-            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
-            container.localModelStore.updatePreferredContext(
-                io.github.kurue.bram.core.domain.ModelId(modelId),
-                tokens,
-            )
-            reloadLocalModels(selectId = modelId)
+            // A loaded model is configured the way it was loaded, so a changed profile only takes
+            // effect on the next load. Unloading says that plainly rather than leaving the screen
+            // describing settings the runtime is not using.
+            if (mutableState.value.activeProfileId == profile.id &&
+                mutableState.value.loadedModelId != null
+            ) {
+                unloadModelInternal(forget = false)
+            }
+            container.modelProfileStore.save(profile)
+            reloadProfiles(selectId = profile.id)
         }
     }
 
-    fun setThinkingEnabled(modelId: String, enabled: Boolean) {
-        viewModelScope.launch {
-            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
-            container.localModelStore.updateThinkingEnabled(
-                io.github.kurue.bram.core.domain.ModelId(modelId),
-                enabled,
+    /** Edits whichever profile the model currently runs under. */
+    private fun editProfileFor(modelId: String, edit: (ModelProfile) -> ModelProfile) {
+        val state = mutableState.value
+        val model = state.localModels.firstOrNull { it.id.value == modelId } ?: return
+        updateProfile(edit(state.profileFor(model)))
+    }
+
+    private fun reloadProfiles(selectId: String? = null) {
+        viewModelScope.launch { syncProfiles(mutableState.value.localModels, selectId) }
+    }
+
+    /**
+     * Brings the profile list into state, creating any a model is missing and dropping any whose
+     * model is gone. Suspends rather than launching, so a caller that needs profiles present
+     * before its next step can wait for it.
+     */
+    private suspend fun syncProfiles(
+        models: List<LocalModelRecord>,
+        selectId: String? = null,
+    ) {
+        runCatching { container.modelProfileStore.removeOrphans(models) }
+        val profiles = runCatching { container.modelProfileStore.ensureDefaults(models) }
+            .getOrDefault(emptyList())
+        mutableState.update { current ->
+            current.copy(
+                profiles = profiles,
+                activeProfileId = selectId
+                    ?: current.activeProfileId?.takeIf { id -> profiles.any { it.id == id } },
             )
-            reloadLocalModels(selectId = modelId)
         }
     }
 
-    fun selectBackend(modelId: String, backend: RuntimeBackend) {
-        viewModelScope.launch {
-            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
-            container.localModelStore.updatePreferredBackend(
-                io.github.kurue.bram.core.domain.ModelId(modelId),
-                backend.name,
-            )
-            reloadLocalModels(selectId = modelId)
-        }
-    }
-
+    /** Loads a model under whichever profile is active for it. */
     fun loadModel(modelId: String) {
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
-        if (mutableState.value.isLoadingModel || mutableState.value.isGenerating) return
-        val backend = mutableState.value.backendFor(model)
+        loadProfile(mutableState.value.profileFor(model).id)
+    }
+
+    /**
+     * Loads the model a profile names, configured the way the profile says.
+     *
+     * Context size, processor, and reasoning come from the profile rather than the file, which is
+     * what lets one GGUF be run several ways.
+     */
+    fun loadProfile(profileId: String) {
+        val state = mutableState.value
+        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
+        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        val modelId = model.id.value
+        if (state.isLoadingModel || state.isGenerating) return
+        val backend = RuntimeBackend.fromId(profile.backendId)
+            .takeIf { it in state.availableBackends } ?: RuntimeBackend.CPU
         viewModelScope.launch {
             mutableState.update {
                 it.copy(
                     selectedRuntimeId = modelId,
+                    activeProfileId = profile.id,
                     isLoadingModel = true,
-                    status = "Loading ${model.displayName} on ${backend.label}…",
+                    status = "Loading ${profile.name} on ${backend.label}…",
                     error = null,
                     modelLoadDetail = null,
                 )
@@ -518,14 +578,19 @@ class MainViewModel(
                 val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
                 val threads = (visibleCores - 2).coerceIn(1, 4)
                 container.llamaCppClient.load(
-                    model = model,
+                    // The profile's context size, not the file's: the same GGUF may be configured
+                    // for a long context in one profile and a cheap one in another.
+                    model = model.copy(preferredContextTokens = profile.contextTokens),
                     threads = threads,
                     gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0,
                     deviceFilter = backend.devicePrefix,
-                    enableThinking = model.thinkingEnabled,
+                    enableThinking = profile.thinkingEnabled,
                 )
             }.onSuccess { result ->
-                viewModelScope.launch { container.localModelStore.setLastLoadedModelId(modelId) }
+                viewModelScope.launch {
+                    container.localModelStore.setLastLoadedModelId(modelId)
+                    container.modelProfileStore.setLastUsedProfileId(profile.id)
+                }
                 mutableState.update {
                     it.copy(
                         loadedModelId = modelId,
@@ -888,6 +953,7 @@ class MainViewModel(
                         messages = requestMessages,
                         identity = BramDefaults.IDENTITY,
                         maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
+                        sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
                     ),
                     runtime = selection.runtime,
                 ).collect { event ->
@@ -1071,6 +1137,9 @@ class MainViewModel(
                     error = null,
                 )
             }
+            // Profiles first: the restore below reads them, and a model imported before profiles
+            // existed needs its default written before it can be loaded through one.
+            syncProfiles(models)
             // This is the startup path. Without this the last model was only reopened after an
             // import, so every launch after the first one landed on an empty chat that silently
             // refused to send.
@@ -1089,6 +1158,16 @@ class MainViewModel(
         viewModelScope.launch {
             val current = mutableState.value
             if (current.loadedModelId != null || current.isLoadingModel) return@launch
+            // Prefer the profile: it restores the context size, processor, and sampling as well as
+            // the file. The model id remains the fallback for a catalog written before profiles.
+            val lastProfileId = runCatching { container.modelProfileStore.lastUsedProfileId() }
+                .getOrNull()
+            val profile = current.profiles.firstOrNull { it.id == lastProfileId }
+            if (profile != null) {
+                selectLocalModel(profile.modelId.value)
+                loadProfile(profile.id)
+                return@launch
+            }
             val lastId = runCatching { container.localModelStore.lastLoadedModelId() }.getOrNull()
                 ?: return@launch
             val model = current.localModels.firstOrNull { it.id.value == lastId } ?: return@launch
@@ -1108,6 +1187,7 @@ class MainViewModel(
                 current.copy(localModels = models, selectedRuntimeId = selected, error = null)
             }
             refreshModelStorage()
+            syncProfiles(models)
             restoreLastModel()
         }
     }
