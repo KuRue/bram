@@ -64,8 +64,13 @@ enum class ToolApprovalDecision {
  * unattended runs, where nobody is present to answer and the honest outcome is a recorded refusal
  * rather than a hang.
  */
-fun interface ToolApprovalGate {
-    suspend fun decide(tool: ToolDefinition, argumentsJson: String): ToolApprovalDecision
+interface ToolApprovalGate {
+    suspend fun decide(
+        tool: ToolDefinition,
+        argumentsJson: String,
+        /** A call recovered from unmarked text. Always asked about; see [ToolCall.recovered]. */
+        recovered: Boolean = false,
+    ): ToolApprovalDecision
 }
 
 data class AgentRunRequest(

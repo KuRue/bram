@@ -225,8 +225,15 @@ fires when it does not and stayed silent on a further run. So an eager, attached
 still permits the reply LFM2.5 gives. Forcing the tool choice does not make this model emit the
 marker its own format requires.
 
-That closes the REQUIRED route for this model. What remains is a model that emits the marker, or
-accepting bare calls as a fallback parse. If the fallback is taken it should be fenced: only when
+That closed the REQUIRED route for this model, so the bare-call fallback was taken, fenced as
+below. On the emulator the whole chain now runs: LFM2.5 writes a bare call, the parser declines, the
+forced retry declines, the fallback recovers it, and the approval card appears in the transcript
+naming the tool. Left unanswered for two minutes it was refused and the tool did not run, which is
+the timeout fence behaving as designed. A granted approval writing the note has not been observed
+yet — that is the one step left to confirm.
+
+The fallback is a compatibility shim, not the intended path. What remains is a model that emits the
+marker. If the fallback is taken it should be fenced: only when
 tools were offered this turn, only when the name matches a registered tool, only at the start or end
 of a reply rather than mid-prose, and never eligible for an "always allow" match, so a recovered
 call always asks. A model echoing tool output containing a call-shaped string is the case those

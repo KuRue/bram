@@ -84,10 +84,12 @@ reports the loaded format's markers, and Qwen3.5 reports `<think>` with two clos
 `</think>` and `<tool_call>`. Its own template does not render, though, so Bram falls back to a
 built-in one and the model reasons in unmarked prose — nothing marks it, so nothing can collapse it.
 
-**A local model now asks for tools but the call is not executed.** LFM2.5 replies
-`<think>[write_note(name='shopping', body='milk')]` — right tool, right arguments — and it reaches
-the transcript as text. Nothing runs and no approval card appears, so the permission gate is still
-unexercised on a device.
+**The tool path runs end to end on the emulator, through a fallback.** LFM2.5 writes a bare
+`[write_note(name='q', body='z')]` without the marker its format requires; the parser and a forced
+retry both decline it; a fenced fallback recovers it; and the approval card appears. Left
+unanswered it was refused after two minutes and nothing ran. A recovered call always asks — it
+never matches a remembered allowance — because it is text read as an intent rather than the format
+saying so.
 
 **Tools need the model's own template to render.** Tool definitions are passed to
 `common_chat_templates_apply`, which produces the grammar that constrains a tool call. When a

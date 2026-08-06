@@ -136,6 +136,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                                         id = call.optString("id").ifBlank { "call_$index" },
                                         name = call.optString("name"),
                                         argumentsJson = call.optString("arguments").ifBlank { "{}" },
+                                        recovered = call.optBoolean("recovered"),
                                     ),
                                 ),
                             )

@@ -188,4 +188,46 @@ class InteractiveApprovalGateTest {
         )
         assertEquals("run_command with command = git status", label)
     }
+
+    // A recovered call is text read as an intent, and text can be echoed from anywhere the model
+    // has read — including a tool's own output. It is always asked about.
+
+    @Test
+    fun `a recovered call is asked about even when the tool is always allowed`() = runTest {
+        val permissions = FakePermissions()
+        val gate = InteractiveApprovalGate(permissions)
+
+        val first = async { gate.decide(tool(), "{}") }
+        yield()
+        gate.pending.value?.resolve(ToolApprovalDecision.ALLOW_ALWAYS)
+        first.await()
+        assertEquals(ToolApprovalDecision.ALLOW_ONCE, gate.decide(tool(), "{}"))
+
+        val recovered = async { gate.decide(tool(), "{}", recovered = true) }
+        yield()
+        assertEquals("send_message", gate.pending.value?.toolName)
+        gate.pending.value?.resolve(ToolApprovalDecision.DENY)
+        assertEquals(ToolApprovalDecision.DENY, recovered.await())
+    }
+
+    @Test
+    fun `a recovered call is asked about even when the tool only reads`() = runTest {
+        val gate = InteractiveApprovalGate(FakePermissions())
+        val decision = async { gate.decide(tool(readOnly = true), "{}", recovered = true) }
+        yield()
+        assertEquals("send_message", gate.pending.value?.toolName)
+        gate.pending.value?.resolve(ToolApprovalDecision.DENY)
+        assertEquals(ToolApprovalDecision.DENY, decision.await())
+    }
+
+    @Test
+    fun `allowing a recovered call always is not remembered`() = runTest {
+        val permissions = FakePermissions()
+        val gate = InteractiveApprovalGate(permissions)
+        val decision = async { gate.decide(tool(), "{}", recovered = true) }
+        yield()
+        gate.pending.value?.resolve(ToolApprovalDecision.ALLOW_ALWAYS)
+        decision.await()
+        assertTrue(permissions.allowed.isEmpty())
+    }
 }

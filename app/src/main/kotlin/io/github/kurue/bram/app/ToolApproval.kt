@@ -22,6 +22,8 @@ data class PendingToolApproval(
     val readOnly: Boolean,
     /** What an "always allow" would actually be granting, in words. */
     val scopeLabel: String,
+    /** Read out of unmarked text rather than marked as a call by the model's format. */
+    val recovered: Boolean = false,
     private val answer: CompletableDeferred<ToolApprovalDecision>,
 ) {
     fun resolve(decision: ToolApprovalDecision) {
@@ -116,10 +118,15 @@ class InteractiveApprovalGate(
     override suspend fun decide(
         tool: ToolDefinition,
         argumentsJson: String,
+        recovered: Boolean,
     ): ToolApprovalDecision {
-        if (tool.readOnly && tool.requiredPermissions.isEmpty()) return ToolApprovalDecision.ALLOW_ONCE
+        // A recovered call skips both shortcuts. It is text read as an intent, and the text could
+        // have come from anywhere the model has read — including a tool's own output.
+        if (!recovered && tool.readOnly && tool.requiredPermissions.isEmpty()) {
+            return ToolApprovalDecision.ALLOW_ONCE
+        }
         val scope = approvalScope(tool, argumentsJson)
-        if (scope in permissions.alwaysAllowed()) return ToolApprovalDecision.ALLOW_ONCE
+        if (!recovered && scope in permissions.alwaysAllowed()) return ToolApprovalDecision.ALLOW_ONCE
 
         val answer = CompletableDeferred<ToolApprovalDecision>()
         val request = PendingToolApproval(
@@ -129,12 +136,15 @@ class InteractiveApprovalGate(
             requiredPermissions = tool.requiredPermissions,
             readOnly = tool.readOnly,
             scopeLabel = scopeLabel(tool, argumentsJson),
+            recovered = recovered,
             answer = answer,
         )
         mutablePending.value = request
         return try {
             val decision = withTimeout(timeoutMillis) { answer.await() }
-            if (decision == ToolApprovalDecision.ALLOW_ALWAYS) permissions.allowAlways(scope)
+            if (decision == ToolApprovalDecision.ALLOW_ALWAYS && !recovered) {
+                permissions.allowAlways(scope)
+            }
             decision
         } catch (_: TimeoutCancellationException) {
             ToolApprovalDecision.DENY

@@ -163,6 +163,24 @@ class InferenceProcessService : Service() {
                                 toolCalls = retryCalls
                             }
                         }
+
+                        // Last resort, after the parser and the forced retry have both declined.
+                        // Marked as recovered so the approval gate always asks about it.
+                        if (toolCalls == null || toolCalls.length() == 0) {
+                            val names = runCatching {
+                                val array = JSONArray(toolsJson)
+                                (0 until array.length())
+                                    .mapNotNull { array.optJSONObject(it)?.optString("name") }
+                                    .filter(String::isNotEmpty)
+                                    .toSet()
+                            }.getOrDefault(emptySet())
+                            val content = runCatching {
+                                JSONObject(parsedReply.orEmpty()).optString("content")
+                            }.getOrDefault("")
+                            BareToolCall.recover(content, names)?.let { recoveredCall ->
+                                toolCalls = JSONArray().put(recoveredCall.put("recovered", true))
+                            }
+                        }
                     }
                     if (toolCalls != null && toolCalls.length() > 0) {
                         emit(

@@ -26,6 +26,14 @@ data class ToolCall(
     val id: String,
     val name: String,
     val argumentsJson: String,
+    /**
+     * Whether this was recovered from a reply that did not mark it as a call.
+     *
+     * A recovered call is the model's text read as an intent rather than the format saying so, and
+     * text can be echoed from somewhere untrusted. It is always asked about: it never matches a
+     * remembered allowance and never rides on one granted earlier in the run.
+     */
+    val recovered: Boolean = false,
 )
 
 /**

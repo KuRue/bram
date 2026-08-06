@@ -127,18 +127,20 @@ class DefaultAgentOrchestrator(
         val handler = toolRegistry.find(call.name)
             ?: return errorJson("unknown_tool", "No tool named '${call.name}' is registered")
 
-        val decision = if (call.name in allowedForRun) {
+        val decision = if (call.name in allowedForRun && !call.recovered) {
             ToolApprovalDecision.ALLOW_ONCE
         } else {
-            approvalGate.decide(handler.definition, call.argumentsJson)
+            approvalGate.decide(handler.definition, call.argumentsJson, call.recovered)
         }
 
         when (decision) {
             ToolApprovalDecision.DENY -> return errorJson("permission_denied", "The user or policy denied this tool call")
             // Remembering past the run is the gate's business, not the loop's; here both mean the
             // same thing — do not ask again before this run ends.
+            // A recovered call grants nothing forward: allowing this one says nothing about the
+            // next piece of text that happens to look like it.
             ToolApprovalDecision.ALLOW_FOR_RUN, ToolApprovalDecision.ALLOW_ALWAYS ->
-                allowedForRun += call.name
+                if (!call.recovered) allowedForRun += call.name
             ToolApprovalDecision.ALLOW_ONCE -> Unit
         }
 
@@ -190,8 +192,12 @@ class StaticToolRegistry(
 }
 
 class ReadOnlyApprovalGate : ToolApprovalGate {
-    override suspend fun decide(tool: ToolDefinition, argumentsJson: String): ToolApprovalDecision =
-        if (tool.readOnly && tool.requiredPermissions.isEmpty()) {
+    override suspend fun decide(
+        tool: ToolDefinition,
+        argumentsJson: String,
+        recovered: Boolean,
+    ): ToolApprovalDecision =
+        if (!recovered && tool.readOnly && tool.requiredPermissions.isEmpty()) {
             ToolApprovalDecision.ALLOW_ONCE
         } else {
             ToolApprovalDecision.DENY
