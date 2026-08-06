@@ -38,10 +38,10 @@ object Glass {
     const val DETAIL_ALPHA: Float = 0.22f
 
     /**
-     * Blur radius applied to whatever sits behind a panel. Large enough that text passing under one
-     * is unmistakably soft rather than merely slightly smeared.
+     * Blur radius applied to whatever sits behind a panel. Enough that text passing under one is
+     * clearly soft, without erasing it — a panel should read as glass, not as a hole.
      */
-    val blurRadius: Dp = 28.dp
+    val blurRadius: Dp = 14.dp
 
     val cornerLarge: Dp = 22.dp
     val cornerMedium: Dp = 16.dp

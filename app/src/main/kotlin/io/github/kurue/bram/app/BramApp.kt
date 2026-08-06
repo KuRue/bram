@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -118,7 +119,10 @@ fun BramApp(viewModel: MainViewModel) {
     }
 
     BackdropHost {
-        Box(Modifier.fillMaxSize()) {
+        // Applied once, at the root, so the whole shell lifts clear of the keyboard together.
+        // Padding only the composer left it correct but the transcript underneath it, and padding
+        // both moved the composer twice.
+        Box(Modifier.fillMaxSize().imePadding()) {
             // Recorded: the field and the transcript, and nothing else. This is the frame every
             // panel blurs, which is why a reply scrolling past one goes soft rather than staying
             // sharp behind it. Panels are drawn after, outside the recording, so none of them ends

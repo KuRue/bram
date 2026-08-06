@@ -130,8 +130,7 @@ class LocalModelStore(
         }
         val record = LocalModelRecord(
             id = ModelId("local:${hash.take(24)}"),
-            displayName = metadata.name?.takeIf(String::isNotBlank)
-                ?: document.fileName.removeSuffix(".gguf").removeSuffix(".GGUF"),
+            displayName = displayNameFor(metadata.name, document.fileName),
             fileName = document.fileName,
             contentUri = uri.toString(),
             localPath = modelFile.absolutePath,
@@ -275,7 +274,7 @@ class LocalModelStore(
 
     private fun JSONObject.toRecord(): LocalModelRecord = LocalModelRecord(
         id = ModelId(getString("id")),
-        displayName = getString("displayName"),
+        displayName = displayNameFor(getString("displayName"), getString("fileName")),
         fileName = getString("fileName"),
         contentUri = getString("contentUri"),
         localPath = optString("localPath"),
@@ -292,6 +291,26 @@ class LocalModelStore(
         preferredBackendId = optString("preferredBackendId"),
         thinkingEnabled = optBoolean("thinkingEnabled", false),
     )
+
+    /**
+     * Picks a name a person would recognise.
+     *
+     * A GGUF's `general.name` is often useful, but plenty of published models set it to a commit
+     * hash or a bare repository id, which tells the reader nothing. The filename they picked is
+     * usually the informative one in that case, so anything that looks like a hash loses to it.
+     */
+    private fun displayNameFor(metadataName: String?, fileName: String): String {
+        val fromFile = fileName.removeSuffix(".gguf").removeSuffix(".GGUF").trim()
+        val candidate = metadataName?.trim().orEmpty()
+        return when {
+            candidate.isBlank() || looksLikeHash(candidate) -> fromFile.ifBlank { candidate }
+            else -> candidate
+        }.ifBlank { "Local model" }
+    }
+
+    /** Long, unbroken, and entirely hexadecimal: a digest rather than a name. */
+    private fun looksLikeHash(value: String): Boolean =
+        value.length >= 16 && value.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
 
     private fun recommendInitialContext(trainedMaximum: Int): Int {
         if (trainedMaximum <= 0) return 4_096
