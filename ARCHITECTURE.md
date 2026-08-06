@@ -151,6 +151,33 @@ duration. The model already executes in `:inference`; what needs protecting is t
 which would otherwise be cancelled when the screen goes away. Stopping is a user action, not a
 consequence of navigation.
 
+## Running code on Android
+
+Two consequences of one platform rule shape what Bram's agent can be, so they are recorded here
+rather than rediscovered as failed attempts.
+
+Android blocks `execve()` on files under an app's data directory for apps targeting API 29 and
+above — a write-xor-execute policy enforced through SELinux. Bram targets well above that. The only
+sanctioned way for an app to execute native code it ships is from the APK's native library
+directory, which is where Bram's own `.so` files already live and is not a general-purpose place to
+put downloaded binaries.
+
+**Bram cannot host stdio MCP servers.** That transport works by spawning the server as a child
+process. Streamable HTTP is the transport Bram can support, so its MCP story is remote servers plus
+in-process native tools. Most published servers are stdio, so this is a real limitation and is
+stated as one rather than left for a user to discover.
+
+**Bram will not ship its own shell.** Doing so means a Termux-sized userland — shell, coreutils,
+package management — with every binary repackaged as a library, on a path the platform keeps
+tightening. Termux itself stays on an old `targetSdkVersion` to avoid the rule and is rebuilding its
+packaging to escape that dependence.
+
+Instead Bram delegates to Termux when the user has it, through Termux's `RUN_COMMAND` intent, and
+the execution restriction remains Termux's problem to solve. This is the widest capability Bram
+offers — running commands as the user — so it sits behind the tool permission model rather than
+beside it. Termux being absent, not configured for external apps, or refusing the permission are
+all ordinary outcomes, and Bram reports them as conditions rather than failures.
+
 ## Remote providers and routing
 
 The first remote adapter targets the widely supported `POST /chat/completions` contract, including function tools. The domain API does not expose Chat Completions types, so a later Responses adapter or another provider does not leak into the agent.
