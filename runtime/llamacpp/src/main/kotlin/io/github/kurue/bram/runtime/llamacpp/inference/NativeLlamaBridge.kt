@@ -20,7 +20,13 @@ internal class NativeLlamaBridge {
     external fun referenceDecode(tokenCount: Int): String
     external fun teacherForced(forcedTokens: IntArray): String
     external fun parseReply(reply: String): String
-    external fun formatChat(roles: Array<String>, contents: Array<String>, addAssistant: Boolean): String
+    external fun formatChat(
+        roles: Array<String>,
+        contents: Array<String>,
+        addAssistant: Boolean,
+        /** Tool definitions as a JSON array, empty when the run offers none. */
+        toolsJson: String,
+    ): String
 
     /**
      * The reasoning tags of the format the last prompt was built with, so the streaming split can

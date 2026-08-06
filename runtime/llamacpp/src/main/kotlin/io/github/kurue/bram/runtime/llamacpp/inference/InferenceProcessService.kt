@@ -62,7 +62,8 @@ class InferenceProcessService : Service() {
         }
 
         override fun countTokens(requestJson: String): Int = runSerialized {
-            val prompt = formatPrompt(JSONObject(requestJson).getJSONArray("messages"))
+            // Counting is about the conversation, not about what tools a later run might offer.
+            val prompt = formatPrompt(JSONObject(requestJson).getJSONArray("messages"), "")
             bridge.countTokens(prompt)
         }
 
@@ -73,7 +74,10 @@ class InferenceProcessService : Service() {
                 try {
                     check(loadedModelId != null) { "Load a local model before generating" }
                     val request = JSONObject(requestJson)
-                    val prompt = formatPrompt(request.getJSONArray("messages"))
+                    val prompt = formatPrompt(
+                        request.getJSONArray("messages"),
+                        request.optJSONArray("tools")?.toString().orEmpty(),
+                    )
                     // Read after the prompt is built, since applying the template is what decides
                     // the format, and reported with the start event so the caller has the tags
                     // before the first token arrives.
@@ -86,6 +90,9 @@ class InferenceProcessService : Service() {
                             .put("runtimeDescription", "Local CPU · ${loadedContextTokens} token context")
                             .put("chatFormat", chatFormat),
                     )
+                    // Kept so the finished reply can be parsed for tool calls. The deltas are what
+                    // the transcript shows; the whole thing is what the parser needs.
+                    val reply = StringBuilder()
                     val result = JSONObject(
                         bridge.generate(
                             prompt = prompt,
@@ -96,6 +103,7 @@ class InferenceProcessService : Service() {
                             repeatPenalty = request.optDouble("repeatPenalty", 1.1).toFloat(),
                             repeatLastTokens = request.optInt("repeatLastTokens", 64),
                             sink = NativeTokenSink { token ->
+                                reply.append(token)
                                 emit(
                                     callback,
                                     requestId,
@@ -104,6 +112,19 @@ class InferenceProcessService : Service() {
                             },
                         ),
                     )
+                    // Parsed here rather than by the caller: this process owns the chat format the
+                    // reply has to be read against, and a tool call has to reach the agent loop
+                    // before the turn is reported finished.
+                    val toolCalls = runCatching {
+                        JSONObject(bridge.parseReply(reply.toString())).optJSONArray("toolCalls")
+                    }.getOrNull()
+                    if (toolCalls != null && toolCalls.length() > 0) {
+                        emit(
+                            callback,
+                            requestId,
+                            JSONObject().put("type", "toolCalls").put("calls", toolCalls),
+                        )
+                    }
                     emit(
                         callback,
                         requestId,
@@ -258,10 +279,10 @@ class InferenceProcessService : Service() {
         return result
     }
 
-    private fun formatPrompt(messages: JSONArray): String {
+    private fun formatPrompt(messages: JSONArray, toolsJson: String): String {
         val roles = Array(messages.length()) { index -> messages.getJSONObject(index).getString("role") }
         val contents = Array(messages.length()) { index -> messages.getJSONObject(index).optString("content") }
-        return bridge.formatChat(roles, contents, true)
+        return bridge.formatChat(roles, contents, true, toolsJson)
     }
 
     private fun emit(callback: IInferenceCallback, requestId: String, event: JSONObject) {

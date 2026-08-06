@@ -307,10 +307,84 @@ std::string token_piece(const llama_vocab * vocab, llama_token token) {
     return {buffer.data(), static_cast<size_t>(count)};
 }
 
+/** The string value of the key whose quoted name starts at [key], with escapes undone. */
+std::string json_field(const std::string & source, size_t key) {
+    const size_t colon = source.find(':', key);
+    if (colon == std::string::npos) return {};
+    const size_t open = source.find('"', colon);
+    if (open == std::string::npos) return {};
+    std::string value;
+    for (size_t index = open + 1; index < source.size(); ++index) {
+        const char character = source[index];
+        if (character == '\\' && index + 1 < source.size()) {
+            const char escaped = source[++index];
+            switch (escaped) {
+                case 'n': value += '\n'; break;
+                case 't': value += '\t'; break;
+                case 'r': value += '\r'; break;
+                default: value += escaped; break;
+            }
+            continue;
+        }
+        if (character == '"') break;
+        value += character;
+    }
+    return value;
+}
+
+/** The whole object value of the key whose quoted name starts at [key], braces included. */
+std::string json_object_at(const std::string & source, size_t key) {
+    const size_t open = source.find('{', key);
+    if (open == std::string::npos) return "{}";
+    int depth = 0;
+    bool in_string = false;
+    for (size_t index = open; index < source.size(); ++index) {
+        const char character = source[index];
+        if (in_string) {
+            if (character == '\\') ++index;
+            else if (character == '"') in_string = false;
+            continue;
+        }
+        if (character == '"') in_string = true;
+        else if (character == '{') ++depth;
+        else if (character == '}' && --depth == 0) return source.substr(open, index - open + 1);
+    }
+    return "{}";
+}
+
+/**
+ * Parses the tool list the app sends into what the template engine expects.
+ *
+ * Each entry is `{"name","description","parameters"}`, where parameters is the JSON schema as a
+ * string — llama.cpp wants the schema unparsed, since it feeds it to the grammar builder.
+ */
+std::vector<common_chat_tool> parse_tools(const std::string & tools_json) {
+    std::vector<common_chat_tool> tools;
+    if (tools_json.empty()) return tools;
+    // The app has already validated this JSON; what arrives is an array of flat objects whose
+    // only nested value is the schema. Reading it with the string helpers keeps this file free of
+    // a JSON dependency that the vendored headers only forward-declare here.
+    size_t cursor = 0;
+    while (true) {
+        const size_t name = tools_json.find("\"name\"", cursor);
+        if (name == std::string::npos) break;
+        common_chat_tool tool;
+        tool.name = json_field(tools_json, name);
+        const size_t description = tools_json.find("\"description\"", name);
+        tool.description = description == std::string::npos ? "" : json_field(tools_json, description);
+        const size_t parameters = tools_json.find("\"parameters\"", name);
+        tool.parameters = parameters == std::string::npos ? "{}" : json_object_at(tools_json, parameters);
+        cursor = parameters == std::string::npos ? name + 6 : parameters + 12;
+        if (!tool.name.empty()) tools.push_back(std::move(tool));
+    }
+    return tools;
+}
+
 std::string apply_chat_template(
     const std::vector<std::string> & roles,
     const std::vector<std::string> & contents,
-    bool add_assistant) {
+    bool add_assistant,
+    const std::string & tools_json) {
     if (g_state.model == nullptr) throw std::runtime_error("No model is loaded");
     if (!g_state.chat_templates) {
         throw std::runtime_error("This GGUF does not contain a usable chat template");
@@ -325,6 +399,7 @@ std::string apply_chat_template(
     }
     inputs.add_generation_prompt = add_assistant;
     inputs.enable_thinking = g_state.enable_thinking;
+    inputs.tools = parse_tools(tools_json);
 
     // Prefer the model's own Jinja template, but do not let a template the engine cannot render
     // take chat down with it. Some published templates use constructs minja does not implement
@@ -461,7 +536,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_formatChat(
-    JNIEnv * env, jobject, jobjectArray role_array, jobjectArray content_array, jboolean add_assistant) {
+    JNIEnv * env, jobject, jobjectArray role_array, jobjectArray content_array, jboolean add_assistant,
+    jstring tools_value) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         const jsize count = env->GetArrayLength(role_array);
@@ -478,7 +554,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_formatCha
             env->DeleteLocalRef(role);
             env->DeleteLocalRef(content);
         }
-        return apply_chat_template(roles, contents, add_assistant == JNI_TRUE);
+        return apply_chat_template(
+            roles, contents, add_assistant == JNI_TRUE, from_jstring(env, tools_value));
     });
 }
 
@@ -502,7 +579,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_chatForma
         const bool forced_open = !start.empty() && params.prompt.size() >= start.size() &&
             params.prompt.compare(params.prompt.size() - start.size(), start.size(), start) == 0;
         std::ostringstream result;
-        result << "{\"supportsThinking\":" << (params.supports_thinking ? "true" : "false")
+        result << "{\"supportsTools\":" << (params.grammar.empty() ? "false" : "true")
+               << ",\"supportsThinking\":" << (params.supports_thinking ? "true" : "false")
                << ",\"forcedOpen\":" << (forced_open ? "true" : "false")
                << ",\"startTag\":\"" << json_escape(start) << "\""
                << ",\"endTags\":[";
@@ -595,6 +673,16 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
         sampler_params.no_perf = false;
         llama_sampler * sampler = llama_sampler_chain_init(sampler_params);
+        // First in the chain, so the grammar constrains what the later samplers choose between
+        // rather than being asked to fix a choice already made. Without it a small model produces
+        // something that looks like a tool call but does not parse.
+        if (!g_state.last_chat_params.grammar.empty()) {
+            llama_sampler * grammar = llama_sampler_init_grammar(
+                llama_model_get_vocab(g_state.model),
+                g_state.last_chat_params.grammar.c_str(),
+                "root");
+            if (grammar != nullptr) llama_sampler_chain_add(sampler, grammar);
+        }
         const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
         // Repetition is penalised before truncation, so the penalty applies to the full
         // distribution rather than to whatever top-k happened to leave behind.
@@ -734,7 +822,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_reference
         if (g_state.model == nullptr) throw std::runtime_error("Load a model before running the reference decode");
         g_cancelled.store(false, std::memory_order_relaxed);
         const int wanted = std::max(1, std::min(static_cast<int>(token_count), 64));
-        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true);
+        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "");
         const auto tokens = tokenize(prompt);
         if (tokens.empty()) throw std::runtime_error("Reference decode tokenizer returned no tokens");
         llama_context * context = create_context();
@@ -792,7 +880,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
             }
         }
 
-        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true);
+        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "");
         auto tokens = tokenize(prompt);
         if (tokens.empty()) throw std::runtime_error("Agreement check tokenizer returned no tokens");
 
@@ -840,16 +928,20 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_parseRepl
 
         std::string content = text;
         std::string reasoning;
+        std::vector<common_chat_tool_call> tool_calls;
 
         // Try the structured parser first: when the chat format is known it is the only thing that
         // understands where reasoning ends and the answer begins.
         try {
             common_chat_parser_params params(g_state.last_chat_params);
             params.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
-            params.parse_tool_calls = false;
+            // Tool calls come from the same parse. They were being discarded, which is why a
+            // local model could not call a tool even once the template offered it one.
+            params.parse_tool_calls = true;
             const common_chat_msg parsed = common_chat_parse(text, false, params);
             if (!parsed.content.empty()) content = parsed.content;
             if (!parsed.reasoning_content.empty()) reasoning = parsed.reasoning_content;
+            tool_calls = parsed.tool_calls;
         } catch (const std::exception & error) {
             __android_log_print(ANDROID_LOG_WARN, "BramLlama",
                 "reply parse failed (%s); cleaning the raw reply instead", error.what());
@@ -893,7 +985,17 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_parseRepl
 
         std::ostringstream result;
         result << "{" << '"' << "content" << '"' << ":" << '"' << json_escape(content) << '"'
-               << "," << '"' << "reasoning" << '"' << ":" << '"' << json_escape(reasoning) << '"' << "}";
+               << "," << '"' << "reasoning" << '"' << ":" << '"' << json_escape(reasoning) << '"'
+               << ",\"toolCalls\":[";
+        bool first = true;
+        for (const common_chat_tool_call & call : tool_calls) {
+            if (!first) result << ",";
+            result << "{\"name\":\"" << json_escape(call.name) << "\""
+                   << ",\"arguments\":\"" << json_escape(call.arguments) << "\""
+                   << ",\"id\":\"" << json_escape(call.id) << "\"}";
+            first = false;
+        }
+        result << "]}";
         return result.str();
     });
 }
@@ -904,7 +1006,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_selfTest(
     return guarded_string(env, [] {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cancelled.store(false, std::memory_order_relaxed);
-        const std::string prompt = apply_chat_template({"user"}, {"Reply with OK."}, true);
+        const std::string prompt = apply_chat_template({"user"}, {"Reply with OK."}, true, "");
         const auto tokens = tokenize(prompt);
         if (tokens.empty()) throw std::runtime_error("CPU self-test tokenizer returned no tokens");
         llama_context * context = create_context();

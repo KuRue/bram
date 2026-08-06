@@ -12,6 +12,7 @@ import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.GenerationRequest
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.TokenUsage
+import io.github.kurue.bram.core.domain.ToolCall
 import java.io.Closeable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -122,6 +123,24 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                         ),
                     )
                     "textDelta" -> trySend(GenerationEvent.TextDelta(event.optString("text")))
+                    "toolCalls" -> {
+                        val calls = event.optJSONArray("calls")
+                        for (index in 0 until (calls?.length() ?: 0)) {
+                            val call = calls?.optJSONObject(index) ?: continue
+                            trySend(
+                                GenerationEvent.ToolCallReady(
+                                    ToolCall(
+                                        // llama.cpp leaves the id empty for formats that have no
+                                        // notion of one, and the loop needs it to match a result
+                                        // back to its call.
+                                        id = call.optString("id").ifBlank { "call_$index" },
+                                        name = call.optString("name"),
+                                        argumentsJson = call.optString("arguments").ifBlank { "{}" },
+                                    ),
+                                ),
+                            )
+                        }
+                    }
                     "usage" -> trySend(
                         GenerationEvent.Usage(
                             TokenUsage(
@@ -163,6 +182,25 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             service.generate(
                 request.requestId,
                 messagesRequest(request.messages)
+                    // The tools the run is offering. Without these the template never mentions a
+                    // tool and the model cannot call one, which is what it used to do.
+                    .put(
+                        "tools",
+                        JSONArray().also { array ->
+                            request.tools.forEach { tool ->
+                                array.put(
+                                    JSONObject()
+                                        .put("name", tool.name)
+                                        .put("description", tool.description)
+                                        .put(
+                                            "parameters",
+                                            runCatching { JSONObject(tool.inputSchemaJson) }
+                                                .getOrElse { JSONObject() },
+                                        ),
+                                )
+                            }
+                        },
+                    )
                     .put("maxOutputTokens", request.maxOutputTokens)
                     .put("temperature", request.sampler.temperature)
                     .put("topP", request.sampler.topP)

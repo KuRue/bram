@@ -84,6 +84,12 @@ reports the loaded format's markers, and Qwen3.5 reports `<think>` with two clos
 `</think>` and `<tool_call>`. Its own template does not render, though, so Bram falls back to a
 built-in one and the model reasons in unmarked prose — nothing marks it, so nothing can collapse it.
 
+**Tools need the model's own template to render.** Tool definitions are passed to
+`common_chat_templates_apply`, which produces the grammar that constrains a tool call. When a
+template fails to render, Bram falls back to a built-in one, and that path has no tool support: the
+tools are accepted and silently ignored. Qwen3.5 is in exactly that state, so it cannot call a tool
+however it is asked.
+
 **Reasoning is expensive.** A reasoning model asked to say hello can spend paragraphs deliberating.
 Reasoning is off by default, per model.
 
