@@ -209,10 +209,20 @@ writes a bare `[write_note(name='x', body='y')]` — the right tool and argument
 A lazy grammar constrains what follows a trigger; it cannot make a model emit the trigger. So the
 remaining gap is a 2.6B model not following its own format's convention, not a wiring fault.
 
-Where that leaves the milestone: forcing the grammar eagerly would make every reply a tool call and
-is not an option. The honest routes are a model that emits the marker reliably, or accepting bare
-calls as a fallback parse — which trades correctness for compatibility and should be a decision
-taken deliberately rather than by default.
+A required-tool retry is now implemented: when the first reply names a tool but the parser accepts
+nothing, the turn is asked again with `COMMON_CHAT_TOOL_CHOICE_REQUIRED`, which makes the grammar
+eager so the call is constrained as it is written and comes back through the real parser. The
+pattern match only decides whether to ask again — it never produces a call, so a false positive
+costs one generation rather than an unintended action.
+
+**Its effect is unverified.** On the emulator LFM2.5 still ends the turn with a bare
+`[write_note(name='x', body='y')]` and no note is written, and it has not been established whether
+the retry fired and failed or did not fire. That is the next thing to measure: log whether the
+retry path is entered, and what the eager grammar produced if it was.
+
+The alternative remains accepting bare calls as a fallback parse, which trades correctness for
+compatibility — a model echoing tool output containing a call-shaped string would then trigger one —
+and should be a decision taken deliberately rather than by default.
 
 ## Milestone 11 — Android tool surface (not started)
 

@@ -26,6 +26,8 @@ internal class NativeLlamaBridge {
         addAssistant: Boolean,
         /** Tool definitions as a JSON array, empty when the run offers none. */
         toolsJson: String,
+        /** Forces the reply to be a tool call. Only for a retry; see [InferenceProcessService]. */
+        requireTool: Boolean,
     ): String
 
     /**

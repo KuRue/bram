@@ -115,10 +115,55 @@ class InferenceProcessService : Service() {
                     // Parsed here rather than by the caller: this process owns the chat format the
                     // reply has to be read against, and a tool call has to reach the agent loop
                     // before the turn is reported finished.
-                    val parsedReply = runCatching { bridge.parseReply(reply.toString()) }.getOrNull()
-                    val toolCalls = runCatching {
+                    var parsedReply = runCatching { bridge.parseReply(reply.toString()) }.getOrNull()
+                    var toolCalls = runCatching {
                         JSONObject(parsedReply.orEmpty()).optJSONArray("toolCalls")
                     }.getOrNull()
+
+                    // A model can describe a tool call without emitting the marker its format
+                    // requires, which leaves a well-formed intent the parser will not accept. Asking
+                    // again with the tool choice required makes the grammar eager, so the call is
+                    // constrained as it is written and comes back through the real parser rather
+                    // than being recovered from prose by pattern matching.
+                    val toolsJson = request.optJSONArray("tools")?.toString().orEmpty()
+                    if ((toolCalls == null || toolCalls.length() == 0) &&
+                        looksLikeUnparsedCall(reply.toString(), toolsJson)
+                    ) {
+                        emit(
+                            callback,
+                            requestId,
+                            JSONObject().put("type", "status").put("text", "Asking for that as a tool call..."),
+                        )
+                        val retryPrompt = formatPrompt(
+                            request.getJSONArray("messages"),
+                            toolsJson,
+                            requireTool = true,
+                        )
+                        val retry = StringBuilder()
+                        runCatching {
+                            bridge.generate(
+                                prompt = retryPrompt,
+                                maxOutputTokens = request.optInt("maxOutputTokens", 1_024).coerceIn(1, 16_384),
+                                // Greedy: the retry is about getting the format right, and a second
+                                // sampled variation is not what is wanted here.
+                                temperature = 0f,
+                                topP = 1f,
+                                topK = 0,
+                                repeatPenalty = 1f,
+                                repeatLastTokens = 0,
+                                sink = NativeTokenSink { token -> retry.append(token) },
+                            )
+                        }.onSuccess {
+                            val retryParsed = runCatching { bridge.parseReply(retry.toString()) }.getOrNull()
+                            val retryCalls = runCatching {
+                                JSONObject(retryParsed.orEmpty()).optJSONArray("toolCalls")
+                            }.getOrNull()
+                            if (retryCalls != null && retryCalls.length() > 0) {
+                                parsedReply = retryParsed
+                                toolCalls = retryCalls
+                            }
+                        }
+                    }
                     if (toolCalls != null && toolCalls.length() > 0) {
                         emit(
                             callback,
@@ -280,10 +325,34 @@ class InferenceProcessService : Service() {
         return result
     }
 
-    private fun formatPrompt(messages: JSONArray, toolsJson: String): String {
+    private fun formatPrompt(
+        messages: JSONArray,
+        toolsJson: String,
+        requireTool: Boolean = false,
+    ): String {
         val roles = Array(messages.length()) { index -> messages.getJSONObject(index).getString("role") }
         val contents = Array(messages.length()) { index -> messages.getJSONObject(index).optString("content") }
-        return bridge.formatChat(roles, contents, true, toolsJson)
+        return bridge.formatChat(roles, contents, true, toolsJson, requireTool)
+    }
+
+    /**
+     * Whether a reply reads as an attempt to call a tool that the parser did not accept.
+     *
+     * Only ever used to decide whether to ask again with the grammar forced — never to execute
+     * anything. A false positive here costs one wasted generation; it cannot produce a tool call,
+     * because the call that runs is the one the parser returns from the retry.
+     */
+    private fun looksLikeUnparsedCall(reply: String, toolsJson: String): Boolean {
+        if (toolsJson.isBlank()) return false
+        val names = runCatching {
+            val array = JSONArray(toolsJson)
+            (0 until array.length()).mapNotNull { array.optJSONObject(it)?.optString("name") }
+        }.getOrDefault(emptyList()).filter(String::isNotEmpty)
+        // The name has to be followed by an opening bracket or brace, so a reply that merely
+        // mentions a tool by name does not trigger a retry.
+        return names.any { name ->
+            Regex(Regex.escape(name) + """\s*[({\[]""").containsMatchIn(reply)
+        }
     }
 
     private fun emit(callback: IInferenceCallback, requestId: String, event: JSONObject) {

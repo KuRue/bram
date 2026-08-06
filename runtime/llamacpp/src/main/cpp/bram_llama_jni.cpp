@@ -384,7 +384,8 @@ std::string apply_chat_template(
     const std::vector<std::string> & roles,
     const std::vector<std::string> & contents,
     bool add_assistant,
-    const std::string & tools_json) {
+    const std::string & tools_json,
+    bool require_tool) {
     if (g_state.model == nullptr) throw std::runtime_error("No model is loaded");
     if (!g_state.chat_templates) {
         throw std::runtime_error("This GGUF does not contain a usable chat template");
@@ -400,6 +401,12 @@ std::string apply_chat_template(
     inputs.add_generation_prompt = add_assistant;
     inputs.enable_thinking = g_state.enable_thinking;
     inputs.tools = parse_tools(tools_json);
+    // Required tool choice makes the grammar eager rather than lazy, so the model cannot answer in
+    // prose instead of calling. Used only for a retry, never for a first attempt, since a run that
+    // must call a tool cannot say it has nothing to do.
+    inputs.tool_choice = require_tool
+        ? COMMON_CHAT_TOOL_CHOICE_REQUIRED
+        : COMMON_CHAT_TOOL_CHOICE_AUTO;
 
     // Prefer the model's own Jinja template, but do not let a template the engine cannot render
     // take chat down with it. Some published templates use constructs minja does not implement
@@ -537,7 +544,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_formatChat(
     JNIEnv * env, jobject, jobjectArray role_array, jobjectArray content_array, jboolean add_assistant,
-    jstring tools_value) {
+    jstring tools_value, jboolean require_tool) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         const jsize count = env->GetArrayLength(role_array);
@@ -555,7 +562,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_formatCha
             env->DeleteLocalRef(content);
         }
         return apply_chat_template(
-            roles, contents, add_assistant == JNI_TRUE, from_jstring(env, tools_value));
+            roles, contents, add_assistant == JNI_TRUE, from_jstring(env, tools_value),
+            require_tool == JNI_TRUE);
     });
 }
 
@@ -860,7 +868,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_reference
         if (g_state.model == nullptr) throw std::runtime_error("Load a model before running the reference decode");
         g_cancelled.store(false, std::memory_order_relaxed);
         const int wanted = std::max(1, std::min(static_cast<int>(token_count), 64));
-        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "");
+        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "", false);
         const auto tokens = tokenize(prompt);
         if (tokens.empty()) throw std::runtime_error("Reference decode tokenizer returned no tokens");
         llama_context * context = create_context();
@@ -918,7 +926,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
             }
         }
 
-        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "");
+        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "", false);
         auto tokens = tokenize(prompt);
         if (tokens.empty()) throw std::runtime_error("Agreement check tokenizer returned no tokens");
 
@@ -1044,7 +1052,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_selfTest(
     return guarded_string(env, [] {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cancelled.store(false, std::memory_order_relaxed);
-        const std::string prompt = apply_chat_template({"user"}, {"Reply with OK."}, true, "");
+        const std::string prompt = apply_chat_template({"user"}, {"Reply with OK."}, true, "", false);
         const auto tokens = tokenize(prompt);
         if (tokens.empty()) throw std::runtime_error("CPU self-test tokenizer returned no tokens");
         llama_context * context = create_context();
