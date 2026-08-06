@@ -111,6 +111,55 @@ enum class RuntimeBackend(val label: String, val devicePrefix: String) {
     }
 }
 
+/** A partial reply, split the way the finished one will be. */
+internal data class StreamingReply(
+    /** What the model has said so far, with reasoning markup removed. */
+    val visibleText: String,
+    /** Reasoning blocks the model has already closed, oldest first. */
+    val closedReasoning: List<String>,
+    /** The block still being written, if the model is reasoning right now. */
+    val openReasoning: String?,
+)
+
+/**
+ * Splits a partial reply into visible text and reasoning.
+ *
+ * The finished reply is split by the runtime's own structured parser, which needs the whole
+ * thing. Until it arrives this does the same job on the marked case, so a closed `<think>`
+ * block folds into a collapsed row the moment it closes rather than sitting in the transcript
+ * as raw markup until the turn ends. A model that reasons in unmarked prose is
+ * indistinguishable from one that is answering, so nothing is claimed about it.
+ */
+internal fun streamingReply(text: String): StreamingReply {
+    if (!text.contains(OPEN_THINK)) return StreamingReply(text, emptyList(), null)
+    val visible = StringBuilder()
+    val closed = mutableListOf<String>()
+    var open: String? = null
+    var cursor = 0
+    while (cursor < text.length) {
+        val start = text.indexOf(OPEN_THINK, cursor)
+        if (start < 0) {
+            visible.append(text, cursor, text.length)
+            break
+        }
+        visible.append(text, cursor, start)
+        val bodyStart = start + OPEN_THINK.length
+        val end = text.indexOf(CLOSE_THINK, bodyStart)
+        if (end < 0) {
+            // Still being written: everything after the marker is reasoning, and there is no
+            // answer yet.
+            open = text.substring(bodyStart)
+            break
+        }
+        closed += text.substring(bodyStart, end)
+        cursor = end + CLOSE_THINK.length
+    }
+    return StreamingReply(visible.toString(), closed, open)
+}
+
+private const val OPEN_THINK = "<think>"
+private const val CLOSE_THINK = "</think>"
+
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
@@ -442,6 +491,7 @@ class MainViewModel(
                     enableThinking = model.thinkingEnabled,
                 )
             }.onSuccess { result ->
+                viewModelScope.launch { container.localModelStore.setLastLoadedModelId(modelId) }
                 mutableState.update {
                     it.copy(
                         loadedModelId = modelId,
@@ -494,6 +544,8 @@ class MainViewModel(
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        // Put the chat back the way it was found: the run needs the runtime to itself.
+        val restoreLoaded = state.loadedModelId
         viewModelScope.launch {
             mutableState.update {
                 it.copy(
@@ -572,11 +624,13 @@ class MainViewModel(
                     it.copy(error = error.message ?: "Could not validate the accelerator")
                 }
             }
-            // The comparison leaves the runtime in whatever state the last load produced; drop it
-            // so the user always returns to a clean, explicitly chosen load.
-            runCatching { unloadModelInternal() }
+            // The comparison leaves the runtime in whatever state the last load produced, so drop
+            // it and put back what was loaded before. Leaving it unloaded stranded the chat: the
+            // composer stays enabled with no model behind it and sending does nothing.
+            runCatching { unloadModelInternal(forget = false) }
             mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
             refreshDeviceProfile()
+            restoreLoaded?.let { loadModel(it) }
         }
     }
 
@@ -590,6 +644,8 @@ class MainViewModel(
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        // Put the chat back the way it was found: the run needs the runtime to itself.
+        val restoreLoaded = state.loadedModelId
         viewModelScope.launch {
             mutableState.update {
                 it.copy(
@@ -664,9 +720,10 @@ class MainViewModel(
                     it.copy(error = error.message ?: "Could not bisect the accelerator")
                 }
             }
-            runCatching { unloadModelInternal() }
+            runCatching { unloadModelInternal(forget = false) }
             mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
             refreshDeviceProfile()
+            restoreLoaded?.let { loadModel(it) }
         }
     }
 
@@ -783,6 +840,9 @@ class MainViewModel(
             var assistantText = ""
             var completedMessage: ConversationMessage? = null
             val activity = mutableListOf<AgentActivity>()
+            var thinkingStartedAt = 0L
+            val finishedThinking = mutableListOf<AgentActivity.Thinking>()
+            var thinkingMillisTotal = 0L
             try {
                 agent.run(
                     request = AgentRunRequest(
@@ -807,8 +867,41 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
+                            val streaming = streamingReply(assistantText)
+                            val now = System.currentTimeMillis()
+                            // A block that has just closed keeps the time it actually took; leaving
+                            // it on the running clock would have every finished block claim the
+                            // duration of the whole turn.
+                            while (finishedThinking.size < streaming.closedReasoning.size) {
+                                val index = finishedThinking.size
+                                val took = if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
+                                finishedThinking += AgentActivity.Thinking(
+                                    text = streaming.closedReasoning[index],
+                                    durationMillis = took,
+                                    inProgress = false,
+                                )
+                                thinkingMillisTotal += took
+                                thinkingStartedAt = 0L
+                            }
+                            // Say "Thinking…" while the block is still open rather than waiting for
+                            // it to close. On a slow device that wait is long, and a blank reply
+                            // with no explanation looks like a stall.
+                            val inFlight = streaming.openReasoning?.let { reasoning ->
+                                if (thinkingStartedAt == 0L) thinkingStartedAt = now
+                                AgentActivity.Thinking(
+                                    text = reasoning,
+                                    durationMillis = now - thinkingStartedAt,
+                                    inProgress = true,
+                                )
+                            }
                             mutableState.update {
-                                it.copy(messages = requestMessages + inFlightMessage(assistantText, activity))
+                                it.copy(
+                                    messages = requestMessages + ConversationMessage(
+                                        role = MessageRole.ASSISTANT,
+                                        content = streaming.visibleText,
+                                        activity = activity + finishedThinking + listOfNotNull(inFlight),
+                                    ),
+                                )
                             }
                         }
                         is AgentEvent.ToolStarted -> {
@@ -820,7 +913,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = "Running ${event.call.name}…",
-                                    messages = requestMessages + inFlightMessage(assistantText, activity),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -835,7 +928,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = null,
-                                    messages = requestMessages + inFlightMessage(assistantText, activity),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -869,8 +962,16 @@ class MainViewModel(
                         parsed.optString("content").ifBlank { rawReply } to parsed.optString("reasoning")
                     }.getOrDefault(rawReply to "")
                 }
+                // Every block the model opened, including one it never closed.
+                val thinkingMillis = thinkingMillisTotal + if (thinkingStartedAt > 0) {
+                    System.currentTimeMillis() - thinkingStartedAt
+                } else {
+                    0L
+                }
                 val finalActivity = buildList {
-                    reply.second.takeIf(String::isNotBlank)?.let { add(AgentActivity.Thinking(it)) }
+                    reply.second.takeIf(String::isNotBlank)?.let {
+                        add(AgentActivity.Thinking(it, durationMillis = thinkingMillis))
+                    }
                     addAll(activity)
                 }
                 val settled = when {
@@ -894,8 +995,14 @@ class MainViewModel(
         }
     }
 
-    private suspend fun unloadModelInternal() {
+    /**
+     * @param forget whether to also drop the model from the startup restore. An unload the user
+     *   asked for should not come back by itself next launch; one the app does to free the runtime
+     *   for a moment should.
+     */
+    private suspend fun unloadModelInternal(forget: Boolean = true) {
         runCatching { container.llamaCppClient.unload() }
+        if (forget) runCatching { container.localModelStore.setLastLoadedModelId(null) }
         mutableState.update {
             it.copy(
                 loadedModelId = null,
@@ -925,6 +1032,29 @@ class MainViewModel(
                     error = null,
                 )
             }
+            // This is the startup path. Without this the last model was only reopened after an
+            // import, so every launch after the first one landed on an empty chat that silently
+            // refused to send.
+            restoreLastModel()
+        }
+    }
+
+    /**
+     * Loads whatever was open last time.
+     *
+     * Being met by an import prompt on every launch is wrong when a model is already sitting on
+     * disk: the common case is continuing with what was being used, so that is what happens unless
+     * it fails.
+     */
+    private fun restoreLastModel() {
+        viewModelScope.launch {
+            val current = mutableState.value
+            if (current.loadedModelId != null || current.isLoadingModel) return@launch
+            val lastId = runCatching { container.localModelStore.lastLoadedModelId() }.getOrNull()
+                ?: return@launch
+            val model = current.localModels.firstOrNull { it.id.value == lastId } ?: return@launch
+            selectLocalModel(model.id.value)
+            loadModel(model.id.value)
         }
     }
 
@@ -939,6 +1069,7 @@ class MainViewModel(
                 current.copy(localModels = models, selectedRuntimeId = selected, error = null)
             }
             refreshModelStorage()
+            restoreLastModel()
         }
     }
 

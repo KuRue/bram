@@ -71,6 +71,9 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
+    // Backdrop blur. Compose has no built-in way to sample what is behind a composable, and the
+    // GraphicsLayer route needs lifecycle handling this library already gets right.
+    implementation(libs.haze)
     implementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
     implementation(libs.activity.compose)

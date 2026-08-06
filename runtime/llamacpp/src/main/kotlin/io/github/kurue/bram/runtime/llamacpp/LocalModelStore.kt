@@ -35,6 +35,19 @@ class LocalModelStore(
             .sortedByDescending(LocalModelRecord::importedAtEpochMillis)
     }
 
+    /**
+     * The model Bram last had loaded, so a relaunch can restore it without being asked.
+     */
+    suspend fun lastLoadedModelId(): String? = withContext(Dispatchers.IO) {
+        preferences.getString(KEY_LAST_LOADED, null)
+    }
+
+    suspend fun setLastLoadedModelId(modelId: String?) = withContext(Dispatchers.IO) {
+        preferences.edit().apply {
+            if (modelId == null) remove(KEY_LAST_LOADED) else putString(KEY_LAST_LOADED, modelId)
+        }.apply()
+    }
+
     /** Total bytes the imported copies occupy in app-private storage. */
     suspend fun storageBytesUsed(): Long = withContext(Dispatchers.IO) {
         modelsDirectory.listFiles()?.sumOf(java.io.File::length) ?: 0L
@@ -117,8 +130,7 @@ class LocalModelStore(
         }
         val record = LocalModelRecord(
             id = ModelId("local:${hash.take(24)}"),
-            displayName = metadata.name?.takeIf(String::isNotBlank)
-                ?: document.fileName.removeSuffix(".gguf").removeSuffix(".GGUF"),
+            displayName = displayNameFor(metadata.name, document.fileName),
             fileName = document.fileName,
             contentUri = uri.toString(),
             localPath = modelFile.absolutePath,
@@ -262,7 +274,7 @@ class LocalModelStore(
 
     private fun JSONObject.toRecord(): LocalModelRecord = LocalModelRecord(
         id = ModelId(getString("id")),
-        displayName = getString("displayName"),
+        displayName = displayNameFor(getString("displayName"), getString("fileName")),
         fileName = getString("fileName"),
         contentUri = getString("contentUri"),
         localPath = optString("localPath"),
@@ -280,6 +292,26 @@ class LocalModelStore(
         thinkingEnabled = optBoolean("thinkingEnabled", false),
     )
 
+    /**
+     * Picks a name a person would recognise.
+     *
+     * A GGUF's `general.name` is often useful, but plenty of published models set it to a commit
+     * hash or a bare repository id, which tells the reader nothing. The filename they picked is
+     * usually the informative one in that case, so anything that looks like a hash loses to it.
+     */
+    private fun displayNameFor(metadataName: String?, fileName: String): String {
+        val fromFile = fileName.removeSuffix(".gguf").removeSuffix(".GGUF").trim()
+        val candidate = metadataName?.trim().orEmpty()
+        return when {
+            candidate.isBlank() || looksLikeHash(candidate) -> fromFile.ifBlank { candidate }
+            else -> candidate
+        }.ifBlank { "Local model" }
+    }
+
+    /** Long, unbroken, and entirely hexadecimal: a digest rather than a name. */
+    private fun looksLikeHash(value: String): Boolean =
+        value.length >= 16 && value.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
+
     private fun recommendInitialContext(trainedMaximum: Int): Int {
         if (trainedMaximum <= 0) return 4_096
         // Keep the first physical-device probation conservative. Larger trained contexts remain
@@ -294,6 +326,7 @@ class LocalModelStore(
     private companion object {
         const val PREFERENCES = "bram-local-models-v1"
         const val KEY_MODELS = "models"
+        const val KEY_LAST_LOADED = "lastLoadedModelId"
         const val HASH_BUFFER_BYTES = 4 * 1024 * 1024
     }
 }
