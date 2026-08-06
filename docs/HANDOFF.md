@@ -1,137 +1,131 @@
-# Session handoff — Milestone 1 local CPU alpha
+# Session handoff
 
-Last updated: 2026-08-04
+Last updated: 2026-08-05
 
 ## Current source of truth
 
 | Item | Value |
 |---|---|
 | Repository | Private `KuRue/bram` |
-| Base branch | `main` at Milestone 0 squash commit [`378879a`](https://github.com/KuRue/bram/commit/378879ac3db554600b143a305d06d84f1dfb74d1) |
-| Working branch | `milestone-1-local-cpu` |
-| Pull request | Draft [#2 — Milestone 1: Add local GGUF CPU inference alpha](https://github.com/KuRue/bram/pull/2) |
-| Last code-changing remote commit | [`8596bc8`](https://github.com/KuRue/bram/commit/8596bc8d189c856b85fd1d5b7900e442fc7702b7) |
-| Verified CI | [Android CI run #5](https://github.com/KuRue/bram/actions/runs/30963006531) passed tests, lint, native build, and APK assembly |
-| Target phone | Samsung `SM-S938U1`, SoC `SM8750`, 10.9 GB app-visible RAM |
-| Reference model | `LFM2.5-2.6B-Q4_0.gguf` |
+| Branch | `main` at [`dbc8271`](https://github.com/KuRue/bram/commit/dbc82716906da45d31513204223c5e81f41a5baa) |
+| Open pull requests | None |
+| In flight | `milestone-9-glass-ui`, not yet opened as a PR |
+| Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
+| Test emulator | AVD `Pixel_9a`, x86_64, resized to 16 GB storage and 6 GB RAM |
+| Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
 
-PR #2 is intentionally still a draft. Do not merge it until the physical-device test below passes
-or the user explicitly authorizes merging with a known limitation.
+Everything below has been exercised on real hardware or the emulator, not only compiled.
 
-## What is implemented
+## What works
 
-- Chat and Models are the primary workflow; remote endpoints are optional under Settings.
-- Android document-picker GGUF import with bounded metadata parsing, seekability checks, retained
-  read permission, full SHA-256 hashing, and a persistent local-model catalog.
-- A pinned llama.cpp revision (`474c92e722ce77aee2060cd08629b9afb008d81b`) compiled for ARM64
-  CPU through NDK/CMake.
-- Native loading and generation stay in the non-exported `:inference` process behind AIDL.
-- The runtime uses the GGUF tokenizer and llama.cpp common/Jinja chat-template engine, including
-  LFM2.5 templates.
-- Load, exact token count, streamed generation, cancellation, unload, Binder-death recovery, and
-  prompt/decode/PSS metrics.
-- CPU is reported as validated only after the selected model passes a tokenizer and one-token
-  decode self-test.
-- A conservative 8,192-token context is selected initially when supported; larger trained
-  contexts remain manually selectable.
+**Local CPU inference.** Import a GGUF through the document picker, verify it with SHA-256, load it
+in the isolated `:inference` process, and chat with streaming, cancellation, unload, and recovery
+from a killed inference process. Validated on the S25 Ultra.
 
-The last CI failure was a nullable `Unit` inference on cancellation. It was fixed in `8596bc8`, and
-the complete clean build then passed. There is no known compile or link failure at handoff.
+**Accelerators.** The Hexagon NPU passes correctness validation on the S25 Ultra at 23/24 (95.8%)
+teacher-forced agreement with CPU. Measured speed against the CPU reference has ranged from about
+1.5x to 1.9x across runs on the same phone and model; the 1.9x reading is the most recent. Vulkan on
+the same device fails:
+75% agreement with a single offloaded layer, collapsing to all-zero logits past about seven, with
+no error reported by the driver. Vulkan compiles and is offered, but is not validated.
 
-## Prior phone result
+**Conversations.** Persisted as one JSON file each with a rebuildable index. Multiple threads, New
+and History, titles derived from the first message, restored on launch. Survives `force-stop`.
 
-The Milestone 0 APK installed and launched successfully on the target phone. It reported:
+**Agentic transcript.** Messages carry ordered activity entries — reasoning and tool invocations —
+rendered as collapsed single lines that expand on tap, and persisted with the conversation.
 
-- 2.9 GB available of 10.9 GB app-visible RAM at that moment.
-- No active thermal status.
-- Java-side CPU detection only.
-- Vulkan validation pending.
-- Snapdragon and LiteRT unavailable because the old APK had no compatible native runtime.
+**Background runs.** Agent work belongs to an application scope and holds a foreground service, so
+a run continues and writes its reply when the user leaves the app.
 
-That result was for the control-plane APK, not the Milestone 1 native APK. The new APK must not be
-treated as device-validated based on the earlier smoke test.
+**Chat quality of life.** Retry, edit-and-resend, copy, Markdown rendering, and auto-scroll that
+follows a streaming reply.
 
-## Immediate next action: S25 Ultra acceptance test
 
-1. Download the debug APK artifact from CI run #5 and install it over the existing debug build.
-2. Launch Bram without configuring a remote endpoint. Confirm Chat, Models, and Settings are the
-   primary navigation and that endpoint setup is not the main empty state.
-3. In Models, import `LFM2.5-2.6B-Q4_0.gguf` from local, seekable device storage. Allow SHA-256
-   verification to finish.
-4. Confirm the displayed architecture, quantization, file size, trained context, chat-template
-   presence, and SHA prefix are plausible. Leave the first run at the recommended 8,192 tokens.
-5. Restart Bram before loading and confirm the imported model registration remains present.
-6. Load the model. Confirm the native self-test passes and CPU changes from detected/pending to
-   validated only after the successful load.
-7. Send a short prompt. Confirm output streams incrementally and prompt tokens, output tokens,
-   prompt speed, decode speed, and inference-process PSS are shown.
-8. Start a longer response and press Stop. Record whether cancellation is prompt and whether Bram
-   can generate again without reinstallation.
-9. Unload the model, then load it again. Confirm failures are recoverable and the UI remains alive.
-10. While the model is loaded or generating, kill only the inference process. For the debuggable
-    APK, obtain its PID with:
+## In flight on `milestone-9-glass-ui`
 
-    ```bash
-    adb shell pidof io.github.kurue.bram.app:inference
-    ```
+Not on `main` yet, and not opened as a pull request. Verified on the S25 Ultra:
 
-    Then substitute that PID here:
+- A translucent interface built on the Haze library for real backdrop blur, a bubble top bar with a
+  burger menu and status pill, and a dark field with a fine dot lattice behind it.
+- The last loaded model is reopened on launch. Auto-load had never worked: the startup path built
+  the catalog itself and never called the restore, so every launch after the first landed in a chat
+  whose send button silently did nothing.
+- Reasoning is split from the answer on every token rather than once the reply finishes, so a closed
+  `<think>` block folds into its collapsed row immediately instead of sitting in the transcript as
+  raw markup.
+- An accelerator run restores whatever model was loaded when it started. It used to leave the
+  runtime unloaded, stranding the chat in the same silent dead end as the auto-load bug.
+- A GGUF's `general.name` is ignored when it looks like a commit hash, which is what LFM2.5 ships.
 
-    ```bash
-    adb shell run-as io.github.kurue.bram.app kill -9 <PID>
-    ```
+## What is not implemented
 
-    Bram should keep the UI visible, explain that inference stopped, and offer a safe reload/retry.
+- **Model download.** Getting a GGUF in still needs a browser and the file picker. Deliberately
+  deferred.
+- **Task queue and scheduling.** One run is tracked at a time. There is no queue, no scheduled work,
+  and no per-task UI. `AgentTaskService` is the foundation for it, not the finished thing.
+- **Tools.** Only the read-only `device_status` tool exists. The transcript can display tool
+  activity, but there is little for it to display.
+- **Memory, skills, automations.** Interfaces only.
+- **OpenCL and LiteRT.** Not implemented.
+- **Remote endpoints.** Optional and non-streaming.
 
-If anything crashes, capture logs before relaunching:
+## Known issues
 
-```bash
-adb logcat -d > bram-logcat.txt
-```
+**Qwen3.5's chat template does not render.** It iterates `messages[::-1]`, which llama.cpp's Jinja
+engine (minja) yields nothing for, so the template raises `No user query found in messages`. Bram
+falls back to llama.cpp's built-in templates. Two consequences: the model emits its own turn header
+and empty `<think>` markers, which Bram strips after parsing; and its reasoning arrives as unmarked
+prose, so it cannot be folded into a collapsed entry. Turning reasoning off is the practical fix
+and is the default.
 
-Record the exact action, displayed error, selected context, load time, prompt/decode speed,
-inference PSS, cancellation latency, and whether the phone became hot or reported thermal status.
+**Reasoning is expensive.** A reasoning model asked to say hello can spend paragraphs deliberating.
+Reasoning is off by default, per model.
 
-## Acceptance decision
+**Vulkan's failure is in a shared operation, not a layer.** Bisection on the Adreno 830 shows even
+a single offloaded layer disagreeing, so the fault is in something every layer uses. Nothing has
+been attempted to fix it; the backend is offered and reported as unvalidated.
 
-Milestone 1 passes only if the reference GGUF can import, persist, load, generate, cancel, unload,
-reload, and survive an inference-process kill without taking down the UI. CPU must not be labeled
-validated before the native model self-test succeeds.
+## Build
 
-If the test passes, the next repository action is to mark PR #2 ready and merge it only after
-explicit user authorization. The next engineering milestone is accelerator validation: compare
-Adreno and Hexagon candidates with the CPU output as the correctness reference.
+See [Building Bram](BUILDING.md) for the full toolchain. The parts that are easy to get wrong:
 
-If the test fails, stay on `milestone-1-local-cpu`, preserve the failing plan and logs, and fix the
-smallest failing boundary before adding acceleration or durable memory.
+- **CMake 3.30.5**, not the NDK default, because the Vulkan backend needs FetchContent's
+  `find_package` redirect.
+- **WSL is the recommended local environment.** Incremental native rebuilds take about 8 seconds
+  there against roughly 12 minutes in CI, and its Linux host compiler avoids the MSVC requirement
+  Windows hosts hit when building `vulkan-shaders-gen`.
+- **Hexagon is opt-in** through `HEXAGON_SDK_ROOT`, since the SDK is proprietary and absent on CI.
+- **Emulator builds are opt-in** through `BRAM_EMULATOR_ABI=true`, which adds `x86_64`. Bram is
+  otherwise ARM64-only and its native library cannot load on a stock emulator image.
+- Keep `ninja` on `PATH`; several native sub-builds inherit the generator without the make program.
 
-## Known limitations and guardrails
+## Testing
 
-- Vulkan, OpenCL/Adreno, Hexagon, and LiteRT acceleration are not implemented.
-- Conversations, memories, skills, and automations are not durable implementations yet.
-- Imported model registration persists, but conversation recovery after full app death is deferred.
-- The selected document provider must expose a seekable descriptor. App-managed copying and model
-  downloading are deferred.
-- SHA-256 is an integrity fingerprint for the imported bytes, not publisher provenance.
-- Remote Chat Completions remains optional and non-streaming.
-- Do not expand Bram's persona, tool permissions, routing, or agent features while diagnosing the
-  CPU acceptance test.
+CI runs JVM tests, Android lint, and a full native build with CPU and Vulkan. It cannot build
+Hexagon, which needs the proprietary SDK, and it cannot run any accelerator correctness test, which
+needs real hardware.
 
-## Code landmarks
+Unit tests cover accelerator agreement scoring, offload bisection, and Markdown rendering. The
+accelerator tests exist because two earlier acceptance criteria produced confidently wrong verdicts
+on device; the cases that misled us are pinned.
 
-| Area | Path |
-|---|---|
-| App state and local/remote selection | `app/src/main/kotlin/io/github/kurue/bram/app/MainViewModel.kt` |
-| Compose navigation and model UI | `app/src/main/kotlin/io/github/kurue/bram/app/BramApp.kt` |
-| GGUF metadata parser | `runtime/llamacpp/src/main/kotlin/io/github/kurue/bram/runtime/llamacpp/GgufMetadataReader.kt` |
-| Persistent model catalog/import | `runtime/llamacpp/src/main/kotlin/io/github/kurue/bram/runtime/llamacpp/LocalModelStore.kt` |
-| Runtime adapter | `runtime/llamacpp/src/main/kotlin/io/github/kurue/bram/runtime/llamacpp/LlamaCppRuntime.kt` |
-| AIDL client and crash recovery | `runtime/llamacpp/src/main/kotlin/io/github/kurue/bram/runtime/llamacpp/inference/LlamaCppServiceClient.kt` |
-| Isolated service and self-test gate | `runtime/llamacpp/src/main/kotlin/io/github/kurue/bram/runtime/llamacpp/inference/InferenceProcessService.kt` |
-| JNI generation implementation | `runtime/llamacpp/src/main/cpp/bram_llama_jni.cpp` |
-| Pinned native build | `runtime/llamacpp/src/main/cpp/CMakeLists.txt` |
-| CI/toolchain | `.github/workflows/android-ci.yml`, `docs/BUILDING.md` |
+For anything touching inference or the UI, run it on the emulator. Three separate defects in this
+codebase compiled cleanly, passed CI, and were only visible when the app actually ran.
 
-Start a new session by giving it this file, PR #2, and the physical-device results. The most useful
-first response from that session is a pass/fail table against the acceptance steps, followed by a
-minimal fix plan for any failure.
+## Working agreements
+
+- Verify accelerators against CPU output rather than benchmarking them. A speed-only comparison
+  reported a broken Vulkan backend as working.
+- Compare with teacher forcing, not free-running generation. One differing token otherwise sends
+  the rest of the reply somewhere unrelated, and a small numerical difference becomes
+  indistinguishable from a broken kernel.
+- Do not report an accelerator as validated because it compiled and produced output.
+- Squash-merge one commit per milestone.
+
+## Next
+
+Open a pull request for `milestone-9-glass-ui`, then continue on stability and on the accelerators.
+Hexagon is validated but nothing yet routes chat to it by default; Vulkan needs its shared broken
+operation identified before it is worth offering. Model download is explicitly not wanted right
+now.
