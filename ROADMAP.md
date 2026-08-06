@@ -185,12 +185,23 @@ Everything agentic depends on this. The permission gate cannot be reached on dev
 - Report honestly when a loaded model's template has no tool support, rather than offering tools
   that will never be called. `chatFormat` reports `supportsTools`; nothing consumes it yet.
 
-Measured on the emulator with `Qwen3.5-0.8B`: the tools reach the template (`tools=2`) but come
+Measured on the emulator twice. With `Qwen3.5-0.8B` the tools reach the template (`tools=2`) but come
 back `supportsTools:false` with no tool definitions in the prompt. Tool support rides on the model's
 own Jinja template, and Qwen3.5's does not render under minja — Bram falls back to a built-in
 template, and the built-in path has no notion of tools. So local tool calling works only for models
 whose own template renders, which is a narrower claim than "local tool calling works" and needs
 saying in the UI rather than discovered.
+
+With `LFM2.5-2.6B`, whose template does render, the model was told about the tool and asked for it:
+it replied `<think>[write_note(name='shopping', body='milk')]` — the right tool with the right
+arguments. The call is still not executed, because it arrives as text rather than as a parsed tool
+call. Two things to establish before this milestone closes:
+
+- Whether the grammar was applied at all. The call is wrapped in an unclosed `<think>`, which is
+  what a model does when nothing is constraining it.
+- Whether `common_chat_parse` recognises LFM2's call syntax. A call emitted inside a reasoning
+  block may be read as reasoning content, in which case it will never surface however well formed
+  it is.
 
 ## Milestone 11 — Android tool surface (not started)
 

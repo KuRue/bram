@@ -84,6 +84,11 @@ reports the loaded format's markers, and Qwen3.5 reports `<think>` with two clos
 `</think>` and `<tool_call>`. Its own template does not render, though, so Bram falls back to a
 built-in one and the model reasons in unmarked prose — nothing marks it, so nothing can collapse it.
 
+**A local model now asks for tools but the call is not executed.** LFM2.5 replies
+`<think>[write_note(name='shopping', body='milk')]` — right tool, right arguments — and it reaches
+the transcript as text. Nothing runs and no approval card appears, so the permission gate is still
+unexercised on a device.
+
 **Tools need the model's own template to render.** Tool definitions are passed to
 `common_chat_templates_apply`, which produces the grammar that constrains a tool call. When a
 template fails to render, Bram falls back to a built-in one, and that path has no tool support: the
