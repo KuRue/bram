@@ -215,10 +215,22 @@ eager so the call is constrained as it is written and comes back through the rea
 pattern match only decides whether to ask again — it never produces a call, so a false positive
 costs one generation rather than an unintended action.
 
-**Its effect is unverified.** On the emulator LFM2.5 still ends the turn with a bare
-`[write_note(name='x', body='y')]` and no note is written, and it has not been established whether
-the retry fired and failed or did not fire. That is the next thing to measure: log whether the
-retry path is entered, and what the eager grammar produced if it was.
+**It fires, and it does not help this model.** Measured on the emulator: the first pass reports
+`tools=3 grammar=956 lazy=1`, the retry is entered (`calls=0 wantsRetry=true`), and the retry
+template reports `require=1 grammar=2363 lazy=0` — eager, as intended. The model still replies with
+a bare `[write_note(name='x', body='y')]`, the parser still accepts nothing, and no note is written.
+
+The grammar is not the problem either: it compiles and is attached, verified by a warning that now
+fires when it does not and stayed silent on a further run. So an eager, attached, 2363-byte grammar
+still permits the reply LFM2.5 gives. Forcing the tool choice does not make this model emit the
+marker its own format requires.
+
+That closes the REQUIRED route for this model. What remains is a model that emits the marker, or
+accepting bare calls as a fallback parse. If the fallback is taken it should be fenced: only when
+tools were offered this turn, only when the name matches a registered tool, only at the start or end
+of a reply rather than mid-prose, and never eligible for an "always allow" match, so a recovered
+call always asks. A model echoing tool output containing a call-shaped string is the case those
+fences exist for.
 
 The alternative remains accepting bare calls as a fallback parse, which trades correctness for
 compatibility — a model echoing tool output containing a call-shaped string would then trigger one —

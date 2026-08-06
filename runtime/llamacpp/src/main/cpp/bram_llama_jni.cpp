@@ -727,7 +727,13 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
             } else {
                 grammar = llama_sampler_init_grammar(grammar_vocab, chat.grammar.c_str(), "root");
             }
-            if (grammar != nullptr) llama_sampler_chain_add(sampler, grammar);
+            if (grammar == nullptr) {
+                __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                    "tool grammar failed to compile (%zu bytes, lazy=%d); the reply is unconstrained",
+                    chat.grammar.size(), chat.grammar_lazy ? 1 : 0);
+            } else {
+                llama_sampler_chain_add(sampler, grammar);
+            }
         }
         const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
         // Repetition is penalised before truncation, so the penalty applies to the full
