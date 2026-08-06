@@ -986,6 +986,13 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_parseRepl
         // understands where reasoning ends and the answer begins.
         try {
             common_chat_parser_params params(g_state.last_chat_params);
+            // The constructor copies only the format and generation prompt, not the parser the
+            // template built. Without it the parse falls back to what the format alone implies and
+            // cannot see a marked tool call, which is why every call arrived as text. llama.cpp's
+            // own server loads it, and with it loaded the same model returns a parsed call.
+            if (!g_state.last_chat_params.parser.empty()) {
+                params.parser.load(g_state.last_chat_params.parser);
+            }
             params.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
             // Tool calls come from the same parse. They were being discarded, which is why a
             // local model could not call a tool even once the template offered it one.

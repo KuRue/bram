@@ -221,9 +221,17 @@ template reports `require=1 grammar=2363 lazy=0` — eager, as intended. The mod
 a bare `[write_note(name='x', body='y')]`, the parser still accepts nothing, and no note is written.
 
 The grammar is not the problem either: it compiles and is attached, verified by a warning that now
-fires when it does not and stayed silent on a further run. So an eager, attached, 2363-byte grammar
-still permits the reply LFM2.5 gives. Forcing the tool choice does not make this model emit the
-marker its own format requires.
+fires when it does not and stayed silent on a further run.
+
+**The parse was.** Running the same model with the same tool through llama.cpp's own `llama-server`
+returned `finish_reason: tool_calls` with correct arguments in under two seconds, which ruled the
+model out and pointed back at Bram. `common_chat_parser_params(const common_chat_params &)` copies
+only the format and the generation prompt — not the `parser` the template built. Bram was parsing
+every reply with an empty parser, so a marked tool call was unrecognisable. Loading it with
+`common_peg_arena::load` is the fix, and the tool loop now runs end to end on the emulator.
+
+The conclusion recorded here before — that a small model was failing to follow its own format — was
+wrong. The model had been producing what its format asks for; Bram could not read it.
 
 That closed the REQUIRED route for this model, so the bare-call fallback was taken, fenced as
 below. On the emulator the whole chain now runs: LFM2.5 writes a bare call, the parser declines, the
