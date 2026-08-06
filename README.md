@@ -45,7 +45,7 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 | Encrypted-at-rest endpoint API keys using Android Keystore | Working |
 | OpenAI-compatible `/chat/completions` with function tools | Working, non-streaming |
 | Context budgeting and recent-turn preservation | Working |
-| Permission-gated iterative tool loop | Working |
+| Permission-gated iterative tool loop | Working; the gate denies anything not read-only |
 | Read-only `device_status` phone tool | Working |
 | Hardware execution-plan generation | Working |
 | Separate `:inference` process and AIDL protocol | Implemented |
