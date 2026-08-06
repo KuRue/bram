@@ -41,7 +41,7 @@ object Glass {
      * How far the lattice spreads behind a panel. Higher is softer; at 1 the panel would show the
      * backdrop exactly as it appears elsewhere, which is the flat look this replaces.
      */
-    const val DIFFUSION: Float = 3.2f
+    const val DIFFUSION: Float = 5.5f
 
     val cornerLarge: Dp = 22.dp
     val cornerMedium: Dp = 16.dp

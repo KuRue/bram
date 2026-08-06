@@ -10,6 +10,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -73,6 +75,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -113,6 +116,7 @@ fun BramApp(viewModel: MainViewModel) {
         uri?.let(viewModel::importModel)
     }
 
+    BramBackground(Modifier.fillMaxSize()) {
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -134,37 +138,58 @@ fun BramApp(viewModel: MainViewModel) {
             )
         },
     ) {
-        BramBackground(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-                // The chrome is three bubbles rather than a title bar: the app's name is not news
-                // after the first launch, while what is loaded and how fast it is running are.
-                TopBubbleBar(
-                    state = state,
-                    onMenu = { scope.launch { drawerState.open() } },
-                    onNewConversation = viewModel::startNewConversation,
-                    // With no models there is nothing to choose between, so the pill goes straight
-                    // to the place that fixes that.
-                    onPickModel = { panel = AppPanel.MODELS },
-                )
-                ChatScreen(
-                    state = state,
-                    onSelectLocal = viewModel::selectLocalModel,
-                    onSelectEndpoint = viewModel::selectEndpoint,
-                    onSend = viewModel::send,
-                    onStop = viewModel::stopGeneration,
-                    onLoad = viewModel::loadModel,
-                    onRegenerate = viewModel::regenerateLastReply,
-                    onEdit = viewModel::editAndResend,
-                )
-            }
+        // The transcript fills the window and the chrome floats over it, so text passes behind
+        // the bars as it scrolls rather than stopping at them.
+        Box(Modifier.fillMaxSize()) {
+            ChatScreen(
+                state = state,
+                onSelectLocal = viewModel::selectLocalModel,
+                onSelectEndpoint = viewModel::selectEndpoint,
+                onSend = viewModel::send,
+                onStop = viewModel::stopGeneration,
+                onLoad = viewModel::loadModel,
+                onRegenerate = viewModel::regenerateLastReply,
+                onEdit = viewModel::editAndResend,
+            )
+            // A short fade over the status-bar strip only. The transcript still passes behind the
+            // bubbles, which is the point, but stops colliding with the system clock and icons
+            // where nothing can be done about the contrast.
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(TOP_FADE_HEIGHT)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.background,
+                                MaterialTheme.colorScheme.background.copy(alpha = 0.85f),
+                                Color.Transparent,
+                            ),
+                        ),
+                    ),
+            )
+            TopBubbleBar(
+                state = state,
+                modifier = Modifier.align(Alignment.TopCenter),
+                onMenu = { scope.launch { drawerState.open() } },
+                onNewConversation = viewModel::startNewConversation,
+                // With no models there is nothing to choose between, so the pill goes straight to
+                // the place that fixes that.
+                onPickModel = { panel = AppPanel.MODELS },
+            )
         }
+    }
     }
 
     if (panel != null) {
         ModalBottomSheet(
             onDismissRequest = { panel = null },
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha),
+            containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.onBackground,
             dragHandle = { BottomSheetDefaults.DragHandle() },
+            modifier = Modifier.frostedBackdrop(Glass.DIFFUSION)
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha)),
         ) {
             when (panel) {
                 AppPanel.MODELS -> ModelsScreen(
@@ -197,12 +222,16 @@ fun BramApp(viewModel: MainViewModel) {
 @Composable
 private fun TopBubbleBar(
     state: AppUiState,
+    modifier: Modifier = Modifier,
     onMenu: () -> Unit,
     onNewConversation: () -> Unit,
     onPickModel: () -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         BubbleButton(onClick = onMenu) {
@@ -268,8 +297,10 @@ private fun BramDrawer(
     onOpenPanel: (AppPanel) -> Unit,
 ) {
     ModalDrawerSheet(
-        drawerContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-        modifier = Modifier.widthIn(max = 320.dp),
+        drawerContainerColor = Color.Transparent,
+        drawerContentColor = MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier.widthIn(max = 320.dp).frostedBackdrop(Glass.DIFFUSION)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha)),
     ) {
         Column(
             Modifier
@@ -476,11 +507,18 @@ private fun ChatScreen(
             runCatching { listState.animateScrollToItem(state.messages.lastIndex, LARGE_SCROLL_OFFSET) }
         }
     }
-    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+    Box(Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(vertical = 10.dp),
+            modifier = Modifier.fillMaxSize(),
+            // Room for the chrome at both ends: the transcript passes behind the bars, but its
+            // first and last lines must still be reachable rather than parked underneath them.
+            contentPadding = PaddingValues(
+                start = 12.dp,
+                end = 12.dp,
+                top = TOP_BAR_SPACE,
+                bottom = COMPOSER_SPACE,
+            ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (state.messages.isEmpty()) {
@@ -511,73 +549,92 @@ private fun ChatScreen(
                 )
             }
             state.status?.let { status ->
-                item { Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
+                item {
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
             state.error?.let { error -> item { ErrorCard(error) } }
         }
 
-        state.lastMetrics?.let { metrics ->
-            Text(
-                buildString {
-                    append(state.loadedBackend?.label ?: "Runtime")
-                    append(": ${formatRate(metrics.promptTokensPerSecond)} prompt")
-                    append(" · ${formatRate(metrics.decodeTokensPerSecond)} generation")
-                    metrics.processPssBytes?.let { append(" · ${formatBytes(it)} PSS") }
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-        } ?: state.lastUsage?.let { usage ->
-            Text(
-                "Last run: ${usage.inputTokens ?: "?"} in · ${usage.outputTokens ?: "?"} out",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-        }
-
-        GlassSurface(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-            // A percentage radius, so an empty composer is a true stadium matching the round send
-            // button and only softens once the text grows tall enough for a full pill to stretch.
-            shape = RoundedCornerShape(percent = 50),
-            alpha = Glass.chromeAlpha,
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp),
         ) {
-            Row(
-                Modifier.fillMaxWidth().padding(6.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message Bram") },
-                    minLines = 1,
-                    maxLines = 5,
-                    enabled = !state.isGenerating,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color.Transparent,
-                        unfocusedBorderColor = Color.Transparent,
-                        disabledBorderColor = Color.Transparent,
-                    ),
-                )
-                Spacer(Modifier.width(4.dp))
-                SendButton(
-                    generating = state.isGenerating,
-                    enabled = input.isNotBlank() && (
-                        state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
-                    ),
-                    onSend = {
-                        onSend(input)
-                        input = ""
+            state.lastMetrics?.let { metrics ->
+                Text(
+                    buildString {
+                        append(state.loadedBackend?.label ?: "Runtime")
+                        append(": ${formatRate(metrics.promptTokensPerSecond)} prompt")
+                        append(" · ${formatRate(metrics.decodeTokensPerSecond)} generation")
+                        metrics.processPssBytes?.let { append(" · ${formatBytes(it)} PSS") }
                     },
-                    onStop = onStop,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
                 )
+            }
+
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                shape = RoundedCornerShape(percent = 50),
+                alpha = Glass.chromeAlpha,
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 18.dp, end = 5.dp, top = 5.dp, bottom = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // A bare text field rather than OutlinedTextField: the latter reserves a 56dp
+                    // touch target and its own padding, which makes the composer taller than the
+                    // pill needs and pushes the text off centre.
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (input.isEmpty()) {
+                            Text(
+                                "Message Bram",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        BasicTextField(
+                            value = input,
+                            onValueChange = { input = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !state.isGenerating,
+                            maxLines = 5,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = MaterialTheme.colorScheme.onSurface,
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    SendButton(
+                        generating = state.isGenerating,
+                        enabled = input.isNotBlank() && (
+                            state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
+                        ),
+                        onSend = {
+                            onSend(input)
+                            input = ""
+                        },
+                        onStop = onStop,
+                    )
+                }
             }
         }
     }
 }
+
+/** Reserves the space the floating chrome occupies so the transcript is not trapped under it. */
+private val TOP_BAR_SPACE = 76.dp
+private val TOP_FADE_HEIGHT = 64.dp
+private val COMPOSER_SPACE = 92.dp
 
 @Composable
 private fun RuntimeSelector(
