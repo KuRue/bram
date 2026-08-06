@@ -35,6 +35,19 @@ class LocalModelStore(
             .sortedByDescending(LocalModelRecord::importedAtEpochMillis)
     }
 
+    /**
+     * The model Bram last had loaded, so a relaunch can restore it without being asked.
+     */
+    suspend fun lastLoadedModelId(): String? = withContext(Dispatchers.IO) {
+        preferences.getString(KEY_LAST_LOADED, null)
+    }
+
+    suspend fun setLastLoadedModelId(modelId: String?) = withContext(Dispatchers.IO) {
+        preferences.edit().apply {
+            if (modelId == null) remove(KEY_LAST_LOADED) else putString(KEY_LAST_LOADED, modelId)
+        }.apply()
+    }
+
     /** Total bytes the imported copies occupy in app-private storage. */
     suspend fun storageBytesUsed(): Long = withContext(Dispatchers.IO) {
         modelsDirectory.listFiles()?.sumOf(java.io.File::length) ?: 0L
@@ -294,6 +307,7 @@ class LocalModelStore(
     private companion object {
         const val PREFERENCES = "bram-local-models-v1"
         const val KEY_MODELS = "models"
+        const val KEY_LAST_LOADED = "lastLoadedModelId"
         const val HASH_BUFFER_BYTES = 4 * 1024 * 1024
     }
 }

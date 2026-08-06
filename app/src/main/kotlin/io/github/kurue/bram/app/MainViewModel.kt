@@ -442,6 +442,7 @@ class MainViewModel(
                     enableThinking = model.thinkingEnabled,
                 )
             }.onSuccess { result ->
+                viewModelScope.launch { container.localModelStore.setLastLoadedModelId(modelId) }
                 mutableState.update {
                     it.copy(
                         loadedModelId = modelId,
@@ -943,6 +944,7 @@ class MainViewModel(
 
     private suspend fun unloadModelInternal() {
         runCatching { container.llamaCppClient.unload() }
+        runCatching { container.localModelStore.setLastLoadedModelId(null) }
         mutableState.update {
             it.copy(
                 loadedModelId = null,
@@ -975,6 +977,25 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Loads whatever was open last time.
+     *
+     * Being met by an import prompt on every launch is wrong when a model is already sitting on
+     * disk: the common case is continuing with what was being used, so that is what happens unless
+     * it fails.
+     */
+    private fun restoreLastModel() {
+        viewModelScope.launch {
+            val current = mutableState.value
+            if (current.loadedModelId != null || current.isLoadingModel) return@launch
+            val lastId = runCatching { container.localModelStore.lastLoadedModelId() }.getOrNull()
+                ?: return@launch
+            val model = current.localModels.firstOrNull { it.id.value == lastId } ?: return@launch
+            selectLocalModel(model.id.value)
+            loadModel(model.id.value)
+        }
+    }
+
     private fun reloadLocalModels(selectId: String? = null) {
         viewModelScope.launch {
             val models = container.localModelStore.list()
@@ -986,6 +1007,7 @@ class MainViewModel(
                 current.copy(localModels = models, selectedRuntimeId = selected, error = null)
             }
             refreshModelStorage()
+            restoreLastModel()
         }
     }
 

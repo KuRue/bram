@@ -37,17 +37,23 @@ object Glass {
     /** Recessed detail (an expanded activity trace) sits behind body text and reads as inset. */
     const val DETAIL_ALPHA: Float = 0.22f
 
+    /**
+     * How far the lattice spreads behind a panel. Higher is softer; at 1 the panel would show the
+     * backdrop exactly as it appears elsewhere, which is the flat look this replaces.
+     */
+    const val DIFFUSION: Float = 3.2f
+
     val cornerLarge: Dp = 22.dp
     val cornerMedium: Dp = 16.dp
 }
 
 /**
- * A frosted panel: translucent fill, nothing else.
+ * A frosted panel.
  *
- * Earlier versions added a sheen gradient and a lit rim to imply thickness. Against a real
- * background those read as drawn-on decoration rather than as material — the eye goes to the
- * outline instead of through the surface. With a field behind it ([BramBackground]) the
- * translucency alone is what makes it look like glass, so that is all this draws.
+ * Plain translucency showed the lattice behind it pin-sharp, which reads as a tinted hole rather
+ * than as glass — what makes glass legible as glass is that detail behind it goes soft. The panel
+ * therefore redraws the backdrop at its own position with the lattice diffused, then lays its tint
+ * over that. See [Backdrop] for why redrawing is used instead of sampling the screen.
  */
 @Composable
 fun GlassSurface(
@@ -55,6 +61,7 @@ fun GlassSurface(
     shape: Shape = RoundedCornerShape(Glass.cornerLarge),
     alpha: Float = Glass.CARD_ALPHA,
     tint: Color = Color.Unspecified,
+    diffusion: Float = Glass.DIFFUSION,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val dark = isSystemInDarkTheme()
@@ -63,6 +70,7 @@ fun GlassSurface(
     Box(
         modifier
             .clip(shape)
+            .frostedBackdrop(diffusion)
             .background(base.copy(alpha = alpha)),
         content = content,
     )

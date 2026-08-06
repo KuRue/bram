@@ -142,6 +142,9 @@ fun BramApp(viewModel: MainViewModel) {
                     state = state,
                     onMenu = { scope.launch { drawerState.open() } },
                     onNewConversation = viewModel::startNewConversation,
+                    // With no models there is nothing to choose between, so the pill goes straight
+                    // to the place that fixes that.
+                    onPickModel = { panel = AppPanel.MODELS },
                 )
                 ChatScreen(
                     state = state,
@@ -150,7 +153,6 @@ fun BramApp(viewModel: MainViewModel) {
                     onSend = viewModel::send,
                     onStop = viewModel::stopGeneration,
                     onLoad = viewModel::loadModel,
-                    onOpenModels = { panel = AppPanel.MODELS },
                     onRegenerate = viewModel::regenerateLastReply,
                     onEdit = viewModel::editAndResend,
                 )
@@ -197,6 +199,7 @@ private fun TopBubbleBar(
     state: AppUiState,
     onMenu: () -> Unit,
     onNewConversation: () -> Unit,
+    onPickModel: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -208,7 +211,7 @@ private fun TopBubbleBar(
         Spacer(Modifier.width(10.dp))
 
         GlassSurface(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).clickable(onClick = onPickModel),
             shape = RoundedCornerShape(50),
             alpha = Glass.chromeAlpha,
         ) {
@@ -457,12 +460,10 @@ private fun ChatScreen(
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     onLoad: (String) -> Unit,
-    onOpenModels: () -> Unit,
     onRegenerate: () -> Unit,
     onEdit: (String, String) -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf("") }
-    val hasAnyRuntime = state.localModels.isNotEmpty() || state.endpoints.isNotEmpty()
     val listState = rememberLazyListState()
     val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
 
@@ -476,61 +477,22 @@ private fun ChatScreen(
         }
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
-        if (!hasAnyRuntime) {
-            GlassSurface(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Run Bram locally", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Import a GGUF model from your phone. No endpoint or account is required.")
-                    Button(onClick = onOpenModels) { Text("Import a GGUF") }
-                    Text(
-                        "Remote OpenAI-compatible providers remain optional under Settings.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-
-        state.selectedLocalModel?.takeIf { !state.selectedLocalModelIsLoaded }?.let { model ->
-            GlassSurface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(Glass.cornerMedium),
-            ) {
-                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("${model.displayName} is not loaded", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "It will run on ${state.backendFor(model).label} with a " +
-                                "${formatTokens(model.preferredContextTokens)} context. " +
-                                "Change that under Models.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Button(
-                        onClick = { onLoad(model.id.value) },
-                        enabled = !state.isLoadingModel,
-                    ) {
-                        if (state.isLoadingModel) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        else Text("Load")
-                    }
-                }
-            }
-        }
-
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (state.messages.isEmpty() && hasAnyRuntime) {
+            if (state.messages.isEmpty()) {
                 item {
+                    // One line, and only when there is nothing else to look at. The status pill
+                    // already says what is loaded, so this does not repeat it.
                     Text(
-                        if (state.selectedLocalModelIsLoaded) {
-                            "Running on ${state.loadedBackend?.label ?: "this device"}. Ask Bram anything."
-                        } else {
-                            "Load a local model, or choose an optional remote provider."
+                        when {
+                            state.selectedLocalModelIsLoaded || state.selectedEndpoint != null ->
+                                "Ask Bram anything."
+                            state.localModels.isEmpty() -> "Import a model to begin."
+                            else -> "Choose a model above to begin."
                         },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(8.dp),
@@ -577,7 +539,9 @@ private fun ChatScreen(
 
         GlassSurface(
             modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-            shape = RoundedCornerShape(Glass.cornerLarge),
+            // A percentage radius, so an empty composer is a true stadium matching the round send
+            // button and only softens once the text grows tall enough for a full pill to stretch.
+            shape = RoundedCornerShape(percent = 50),
             alpha = Glass.chromeAlpha,
         ) {
             Row(
