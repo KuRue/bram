@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -66,6 +68,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -105,52 +108,29 @@ private enum class AppSection(val label: String, val glyph: String) {
 /** Panels reachable from the menu, each shown as a sheet over the conversation. */
 private enum class AppPanel { MODELS, SETTINGS }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BramApp(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
+    var drawerOpen by rememberSaveable { mutableStateOf(false) }
     var panel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
     }
 
-    BramBackground(Modifier.fillMaxSize()) {
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            BramDrawer(
-                state = state,
-                onOpenConversation = {
-                    viewModel.openConversation(it)
-                    scope.launch { drawerState.close() }
-                },
-                onDeleteConversation = viewModel::deleteConversation,
-                onNewConversation = {
-                    viewModel.startNewConversation()
-                    scope.launch { drawerState.close() }
-                },
-                onOpenPanel = {
-                    panel = it
-                    scope.launch { drawerState.close() }
-                },
-            )
-        },
-    ) {
-        // The transcript fills the window and the chrome floats over it, so text passes behind
-        // the bars as it scrolls rather than stopping at them.
+    BackdropHost {
         Box(Modifier.fillMaxSize()) {
-            ChatScreen(
-                state = state,
-                onSelectLocal = viewModel::selectLocalModel,
-                onSelectEndpoint = viewModel::selectEndpoint,
-                onSend = viewModel::send,
-                onStop = viewModel::stopGeneration,
-                onLoad = viewModel::loadModel,
-                onRegenerate = viewModel::regenerateLastReply,
-                onEdit = viewModel::editAndResend,
-            )
+            // Recorded: the field and the transcript, and nothing else. This is the frame every
+            // panel blurs, which is why a reply scrolling past one goes soft rather than staying
+            // sharp behind it. Panels are drawn after, outside the recording, so none of them ends
+            // up blurring an image of itself.
+            Box(Modifier.fillMaxSize().bramField().recordBackdrop()) {
+                ChatTranscript(
+                    state = state,
+                    onRegenerate = viewModel::regenerateLastReply,
+                    onEdit = viewModel::editAndResend,
+                )
+            }
+
             // A short fade over the status-bar strip only. The transcript still passes behind the
             // bubbles, which is the point, but stops colliding with the system clock and icons
             // where nothing can be done about the contrast.
@@ -169,53 +149,109 @@ fun BramApp(viewModel: MainViewModel) {
                         ),
                     ),
             )
+
             TopBubbleBar(
                 state = state,
                 modifier = Modifier.align(Alignment.TopCenter),
-                onMenu = { scope.launch { drawerState.open() } },
+                onMenu = { drawerOpen = true },
                 onNewConversation = viewModel::startNewConversation,
                 // With no models there is nothing to choose between, so the pill goes straight to
                 // the place that fixes that.
                 onPickModel = { panel = AppPanel.MODELS },
             )
-        }
-    }
-    }
 
-    if (panel != null) {
-        ModalBottomSheet(
-            onDismissRequest = { panel = null },
-            containerColor = Color.Transparent,
-            contentColor = MaterialTheme.colorScheme.onBackground,
-            dragHandle = { BottomSheetDefaults.DragHandle() },
-            modifier = Modifier.frostedBackdrop(Glass.DIFFUSION)
-                .background(MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha)),
-        ) {
-            when (panel) {
-                AppPanel.MODELS -> ModelsScreen(
+            ChatComposer(
+                state = state,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                onSend = viewModel::send,
+                onStop = viewModel::stopGeneration,
+            )
+
+            // The drawer and panels are drawn in this tree rather than in their own windows.
+            // A separate window has nothing of the app behind it to sample, which is why the
+            // Material sheet could not be frosted however it was configured.
+            if (drawerOpen) {
+                Scrim(onDismiss = { drawerOpen = false })
+                BramDrawer(
                     state = state,
-                    onImport = { modelPicker.launch(arrayOf("*/*")) },
-                    onSelect = viewModel::selectLocalModel,
-                    onLoad = viewModel::loadModel,
-                    onUnload = viewModel::unloadModel,
-                    onRemove = viewModel::removeLocalModel,
-                    onContext = viewModel::setPreferredContext,
-                    onValidateAccelerator = viewModel::validateAccelerator,
-                    onBisectAccelerator = viewModel::bisectAccelerator,
-                    onReclaimStorage = viewModel::reclaimModelStorage,
-                    onSelectBackend = viewModel::selectBackend,
-                    onThinkingEnabled = viewModel::setThinkingEnabled,
+                    modifier = Modifier.align(Alignment.CenterStart),
+                    onOpenConversation = {
+                        viewModel.openConversation(it)
+                        drawerOpen = false
+                    },
+                    onDeleteConversation = viewModel::deleteConversation,
+                    onNewConversation = {
+                        viewModel.startNewConversation()
+                        drawerOpen = false
+                    },
+                    onOpenPanel = {
+                        panel = it
+                        drawerOpen = false
+                    },
                 )
-                AppPanel.SETTINGS -> SettingsScreen(
-                    state = state,
-                    onSaveEndpoint = viewModel::saveEndpoint,
-                    onRemoveEndpoint = viewModel::removeEndpoint,
-                    onRefreshDiagnostics = viewModel::refreshDeviceProfile,
-                )
-                null -> Unit
+            }
+
+            panel?.let { open ->
+                Scrim(onDismiss = { panel = null })
+                GlassSurface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.88f),
+                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                    alpha = Glass.chromeAlpha,
+                ) {
+                    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                        Box(
+                            Modifier
+                                .align(Alignment.CenterHorizontally)
+                                .padding(vertical = 10.dp)
+                                .size(width = 36.dp, height = 4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)),
+                        )
+                        when (open) {
+                            AppPanel.MODELS -> ModelsScreen(
+                                state = state,
+                                onImport = { modelPicker.launch(arrayOf("*/*")) },
+                                onSelect = viewModel::selectLocalModel,
+                                onLoad = viewModel::loadModel,
+                                onUnload = viewModel::unloadModel,
+                                onRemove = viewModel::removeLocalModel,
+                                onContext = viewModel::setPreferredContext,
+                                onValidateAccelerator = viewModel::validateAccelerator,
+                                onBisectAccelerator = viewModel::bisectAccelerator,
+                                onReclaimStorage = viewModel::reclaimModelStorage,
+                                onSelectBackend = viewModel::selectBackend,
+                                onThinkingEnabled = viewModel::setThinkingEnabled,
+                            )
+                            AppPanel.SETTINGS -> SettingsScreen(
+                                state = state,
+                                onSaveEndpoint = viewModel::saveEndpoint,
+                                onRemoveEndpoint = viewModel::removeEndpoint,
+                                onRefreshDiagnostics = viewModel::refreshDeviceProfile,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+/** Dismisses whatever is open, and dims what is behind it. */
+@Composable
+private fun BoxScope.Scrim(onDismiss: () -> Unit) {
+    Box(
+        Modifier
+            .matchParentSize()
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onDismiss,
+            ),
+    )
 }
 
 /** Menu, live model state, and a fresh conversation — the three things wanted from any screen. */
@@ -291,16 +327,16 @@ private fun modelStatusLine(state: AppUiState): String = when {
 @Composable
 private fun BramDrawer(
     state: AppUiState,
+    modifier: Modifier = Modifier,
     onOpenConversation: (String) -> Unit,
     onDeleteConversation: (String) -> Unit,
     onNewConversation: () -> Unit,
     onOpenPanel: (AppPanel) -> Unit,
 ) {
-    ModalDrawerSheet(
-        drawerContainerColor = Color.Transparent,
-        drawerContentColor = MaterialTheme.colorScheme.onBackground,
-        modifier = Modifier.widthIn(max = 320.dp).frostedBackdrop(Glass.DIFFUSION)
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha)),
+    GlassSurface(
+        modifier = modifier.fillMaxHeight().widthIn(max = 320.dp),
+        shape = RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp),
+        alpha = Glass.chromeAlpha,
     ) {
         Column(
             Modifier
@@ -484,17 +520,11 @@ private fun BubbleButton(onClick: () -> Unit, content: @Composable BoxScope.() -
 }
 
 @Composable
-private fun ChatScreen(
+private fun ChatTranscript(
     state: AppUiState,
-    onSelectLocal: (String) -> Unit,
-    onSelectEndpoint: (String) -> Unit,
-    onSend: (String) -> Unit,
-    onStop: () -> Unit,
-    onLoad: (String) -> Unit,
     onRegenerate: () -> Unit,
     onEdit: (String, String) -> Unit,
 ) {
-    var input by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
     val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
 
@@ -507,125 +537,133 @@ private fun ChatScreen(
             runCatching { listState.animateScrollToItem(state.messages.lastIndex, LARGE_SCROLL_OFFSET) }
         }
     }
-    Box(Modifier.fillMaxSize()) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            // Room for the chrome at both ends: the transcript passes behind the bars, but its
-            // first and last lines must still be reachable rather than parked underneath them.
-            contentPadding = PaddingValues(
-                start = 12.dp,
-                end = 12.dp,
-                top = TOP_BAR_SPACE,
-                bottom = COMPOSER_SPACE,
-            ),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (state.messages.isEmpty()) {
-                item {
-                    // One line, and only when there is nothing else to look at. The status pill
-                    // already says what is loaded, so this does not repeat it.
-                    Text(
-                        when {
-                            state.selectedLocalModelIsLoaded || state.selectedEndpoint != null ->
-                                "Ask Bram anything."
-                            state.localModels.isEmpty() -> "Import a model to begin."
-                            else -> "Choose a model above to begin."
-                        },
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(8.dp),
-                    )
-                }
-            }
-            items(state.messages, key = { it.id.value }) { message ->
-                ChatBubble(
-                    message = message,
-                    canAct = !state.isGenerating,
-                    onCopy = { text ->
-                        clipboard.setPrimaryClip(ClipData.newPlainText("Bram", text))
+
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        // Room for the chrome at both ends: the transcript passes behind the bars, but its first
+        // and last lines must still be reachable rather than parked underneath them.
+        contentPadding = PaddingValues(
+            start = 12.dp,
+            end = 12.dp,
+            top = TOP_BAR_SPACE,
+            bottom = COMPOSER_SPACE,
+        ),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (state.messages.isEmpty()) {
+            item {
+                // One line, and only when there is nothing else to look at. The status pill already
+                // says what is loaded, so this does not repeat it.
+                Text(
+                    when {
+                        state.selectedLocalModelIsLoaded || state.selectedEndpoint != null ->
+                            "Ask Bram anything."
+                        state.localModels.isEmpty() -> "Import a model to begin."
+                        else -> "Choose a model above to begin."
                     },
-                    onRegenerate = onRegenerate,
-                    onEdit = { text -> onEdit(message.id.value, text) },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(8.dp),
                 )
             }
-            state.status?.let { status ->
-                item {
-                    Text(
-                        status,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
+        }
+        items(state.messages, key = { it.id.value }) { message ->
+            ChatBubble(
+                message = message,
+                canAct = !state.isGenerating,
+                onCopy = { text ->
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Bram", text))
+                },
+                onRegenerate = onRegenerate,
+                onEdit = { text -> onEdit(message.id.value, text) },
+            )
+        }
+        state.status?.let { status ->
+            item {
+                Text(
+                    status,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
-            state.error?.let { error -> item { ErrorCard(error) } }
+        }
+        state.error?.let { error -> item { ErrorCard(error) } }
+    }
+}
+
+@Composable
+private fun ChatComposer(
+    state: AppUiState,
+    modifier: Modifier = Modifier,
+    onSend: (String) -> Unit,
+    onStop: () -> Unit,
+) {
+    var input by rememberSaveable { mutableStateOf("") }
+
+    Column(
+        modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 12.dp),
+    ) {
+        state.lastMetrics?.let { metrics ->
+            Text(
+                buildString {
+                    append(state.loadedBackend?.label ?: "Runtime")
+                    append(": ${formatRate(metrics.promptTokensPerSecond)} prompt")
+                    append(" · ${formatRate(metrics.decodeTokensPerSecond)} generation")
+                    metrics.processPssBytes?.let { append(" · ${formatBytes(it)} PSS") }
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
+            )
         }
 
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 12.dp),
+        GlassSurface(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+            shape = RoundedCornerShape(percent = 50),
+            alpha = Glass.chromeAlpha,
         ) {
-            state.lastMetrics?.let { metrics ->
-                Text(
-                    buildString {
-                        append(state.loadedBackend?.label ?: "Runtime")
-                        append(": ${formatRate(metrics.promptTokensPerSecond)} prompt")
-                        append(" · ${formatRate(metrics.decodeTokensPerSecond)} generation")
-                        metrics.processPssBytes?.let { append(" · ${formatBytes(it)} PSS") }
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
-                )
-            }
-
-            GlassSurface(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-                shape = RoundedCornerShape(percent = 50),
-                alpha = Glass.chromeAlpha,
+            Row(
+                Modifier.fillMaxWidth().padding(start = 18.dp, end = 5.dp, top = 5.dp, bottom = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    Modifier.fillMaxWidth().padding(start = 18.dp, end = 5.dp, top = 5.dp, bottom = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // A bare text field rather than OutlinedTextField: the latter reserves a 56dp
-                    // touch target and its own padding, which makes the composer taller than the
-                    // pill needs and pushes the text off centre.
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                        if (input.isEmpty()) {
-                            Text(
-                                "Message Bram",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        BasicTextField(
-                            value = input,
-                            onValueChange = { input = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !state.isGenerating,
-                            maxLines = 5,
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                color = MaterialTheme.colorScheme.onSurface,
-                            ),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                // A bare text field rather than OutlinedTextField: the latter reserves a 56dp touch
+                // target and its own padding, which makes the composer taller than the pill needs
+                // and pushes the text off centre.
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    if (input.isEmpty()) {
+                        Text(
+                            "Message Bram",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Spacer(Modifier.width(6.dp))
-                    SendButton(
-                        generating = state.isGenerating,
-                        enabled = input.isNotBlank() && (
-                            state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
+                    BasicTextField(
+                        value = input,
+                        onValueChange = { input = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !state.isGenerating,
+                        maxLines = 5,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
                         ),
-                        onSend = {
-                            onSend(input)
-                            input = ""
-                        },
-                        onStop = onStop,
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     )
                 }
+                Spacer(Modifier.width(6.dp))
+                SendButton(
+                    generating = state.isGenerating,
+                    enabled = input.isNotBlank() && (
+                        state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
+                    ),
+                    onSend = {
+                        onSend(input)
+                        input = ""
+                    },
+                    onStop = onStop,
+                )
             }
         }
     }
@@ -635,144 +673,6 @@ private fun ChatScreen(
 private val TOP_BAR_SPACE = 76.dp
 private val TOP_FADE_HEIGHT = 64.dp
 private val COMPOSER_SPACE = 92.dp
-
-@Composable
-private fun RuntimeSelector(
-    state: AppUiState,
-    onSelectLocal: (String) -> Unit,
-    onSelectEndpoint: (String) -> Unit,
-    onNewConversation: () -> Unit,
-    onOpenConversation: (String) -> Unit,
-    onDeleteConversation: (String) -> Unit,
-) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    var showHistory by rememberSaveable { mutableStateOf(false) }
-    val activeLabel = when {
-        state.selectedLocalModelIsLoaded -> state.selectedLocalModel?.let { model ->
-            "${model.displayName} · ${state.loadedBackend?.label ?: "local"} · " +
-                formatTokens(model.preferredContextTokens)
-        }
-        state.selectedLocalModel != null -> "${state.selectedLocalModel?.displayName} · not loaded"
-        state.selectedEndpoint != null -> "Cloud · ${state.selectedEndpoint?.displayName}"
-        else -> "No runtime selected"
-    }
-    val runtimeCount = state.localModels.size + state.endpoints.size
-
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        // A single line naming what will answer, rather than a scrolling row of chips that pushed
-        // the conversation down the screen.
-        Row(
-            Modifier.fillMaxWidth().clickable(enabled = runtimeCount > 1) { expanded = !expanded },
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                if (state.selectedLocalModelIsLoaded) "● " else "○ ",
-                color = if (state.selectedLocalModelIsLoaded) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-            Text(
-                activeLabel.orEmpty(),
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                modifier = Modifier.weight(1f),
-            )
-            if (runtimeCount > 1) {
-                Text(
-                    if (expanded) "▲" else "▼",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            TextButton(onClick = onNewConversation, enabled = !state.isGenerating) { Text("New") }
-            TextButton(
-                onClick = { showHistory = !showHistory },
-                enabled = !state.isGenerating && state.conversations.isNotEmpty(),
-            ) { Text("History") }
-        }
-
-        if (showHistory) {
-            Column(
-                Modifier.fillMaxWidth().padding(top = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                state.conversations.forEach { summary ->
-                    GlassSurface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(Glass.cornerMedium),
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(
-                                Modifier.weight(1f).clickable {
-                                    onOpenConversation(summary.id.value)
-                                    showHistory = false
-                                },
-                            ) {
-                                Text(
-                                    summary.title.ifBlank { "Untitled conversation" },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    maxLines = 1,
-                                    fontWeight = if (summary.id.value == state.activeConversationId) {
-                                        FontWeight.SemiBold
-                                    } else {
-                                        FontWeight.Normal
-                                    },
-                                )
-                                Text(
-                                    "${summary.messageCount} messages",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            TextButton(onClick = { onDeleteConversation(summary.id.value) }) {
-                                Text("Delete")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (expanded) {
-            Column(
-                Modifier.fillMaxWidth().padding(top = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                state.localModels.forEach { model ->
-                    RuntimeOption(
-                        title = model.displayName,
-                        subtitle = if (model.id.value == state.loadedModelId) {
-                            "Loaded on ${state.loadedBackend?.label ?: "this device"}"
-                        } else {
-                            "Runs on ${state.backendFor(model).label}"
-                        },
-                        selected = model.id.value == state.selectedRuntimeId,
-                        onClick = {
-                            onSelectLocal(model.id.value)
-                            expanded = false
-                        },
-                    )
-                }
-                state.endpoints.forEach { endpoint ->
-                    RuntimeOption(
-                        title = endpoint.displayName,
-                        subtitle = "Remote provider",
-                        selected = remoteRuntimeId(endpoint.id) == state.selectedRuntimeId,
-                        onClick = {
-                            onSelectEndpoint(endpoint.id)
-                            expanded = false
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun RuntimeOption(
@@ -1343,6 +1243,7 @@ private fun ChatBubble(
                 shape = RoundedCornerShape(Glass.cornerMedium),
                 alpha = Glass.BUBBLE_ALPHA,
                 tint = MaterialTheme.colorScheme.primaryContainer,
+                blur = false,
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     MessageBody(message, editing, draft, { draft = it }) {
@@ -1455,6 +1356,7 @@ private fun ActivityRow(entry: AgentActivity) {
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                 shape = RoundedCornerShape(Glass.cornerMedium),
                 alpha = Glass.DETAIL_ALPHA,
+                blur = false,
             ) {
                 Text(
                     detail,
@@ -1537,6 +1439,9 @@ private fun ErrorCard(error: String) {
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Glass.cornerMedium),
+        // Shown inside the transcript as well as in panels, and anything inside the recorded
+        // backdrop must not blur it.
+        blur = false,
         tint = MaterialTheme.colorScheme.errorContainer,
     ) {
         Text(error, modifier = Modifier.padding(12.dp), color = MaterialTheme.colorScheme.onErrorContainer)

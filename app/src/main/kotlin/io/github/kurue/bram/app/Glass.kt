@@ -38,10 +38,10 @@ object Glass {
     const val DETAIL_ALPHA: Float = 0.22f
 
     /**
-     * How far the lattice spreads behind a panel. Higher is softer; at 1 the panel would show the
-     * backdrop exactly as it appears elsewhere, which is the flat look this replaces.
+     * Blur radius applied to whatever sits behind a panel. Large enough that text passing under one
+     * is unmistakably soft rather than merely slightly smeared.
      */
-    const val DIFFUSION: Float = 5.5f
+    val blurRadius: Dp = 28.dp
 
     val cornerLarge: Dp = 22.dp
     val cornerMedium: Dp = 16.dp
@@ -53,7 +53,8 @@ object Glass {
  * Plain translucency showed the lattice behind it pin-sharp, which reads as a tinted hole rather
  * than as glass — what makes glass legible as glass is that detail behind it goes soft. The panel
  * therefore redraws the backdrop at its own position with the lattice diffused, then lays its tint
- * over that. See [Backdrop] for why redrawing is used instead of sampling the screen.
+ * therefore blurs the recorded backdrop behind itself, then lays its tint over that. See
+ * [Backdrop] for how the recording is made.
  */
 @Composable
 fun GlassSurface(
@@ -61,19 +62,23 @@ fun GlassSurface(
     shape: Shape = RoundedCornerShape(Glass.cornerLarge),
     alpha: Float = Glass.CARD_ALPHA,
     tint: Color = Color.Unspecified,
-    diffusion: Float = Glass.DIFFUSION,
+    blurRadius: Dp = Glass.blurRadius,
+    /**
+     * Whether to blur what is behind. Must be false for anything drawn inside the recorded
+     * backdrop — a surface that blurs a recording containing itself recurses until the renderer
+     * overflows its stack, which is a hard native crash rather than a visual glitch.
+     */
+    blur: Boolean = true,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val dark = isSystemInDarkTheme()
     val base = if (tint.isSpecified()) tint else if (dark) Color(0xFF2A2A31) else Color.White
 
-    Box(
-        modifier
-            .clip(shape)
-            .frostedBackdrop(diffusion)
-            .background(base.copy(alpha = alpha)),
-        content = content,
-    )
+    Box(modifier.clip(shape)) {
+        if (blur) BackdropBlur(blurRadius)
+        Box(Modifier.matchParentSize().background(base.copy(alpha = alpha)))
+        content()
+    }
 }
 
 private fun Color.isSpecified(): Boolean = this != Color.Unspecified
