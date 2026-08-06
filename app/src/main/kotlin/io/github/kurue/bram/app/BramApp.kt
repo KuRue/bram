@@ -243,6 +243,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onSaveEndpoint = viewModel::saveEndpoint,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onRefreshDiagnostics = viewModel::refreshDeviceProfile,
+                                onWithdrawToolPermission = viewModel::withdrawToolPermission,
                             )
                         }
                     }
@@ -1335,6 +1336,7 @@ private fun SettingsScreen(
     onSaveEndpoint: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
     onRefreshDiagnostics: () -> Unit,
+    onWithdrawToolPermission: (String) -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
@@ -1418,6 +1420,31 @@ private fun SettingsScreen(
                 )
                 ReadinessRow("Durable conversation memory", "Deferred")
                 ReadinessRow("Skills and automation", "Deferred")
+            }
+        }
+        if (state.alwaysAllowedTools.isNotEmpty()) {
+            GlassSurface(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Tools you always allow", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Granted for the target shown. Anything else still asks.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    state.alwaysAllowedTools.forEach { scope ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                scope,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            TextButton(onClick = { onWithdrawToolPermission(scope) }) {
+                                Text("Withdraw")
+                            }
+                        }
+                    }
+                }
             }
         }
         state.error?.let { ErrorCard(it) }
@@ -1575,13 +1602,20 @@ private fun ToolApprovalCard(
                 Button(onClick = { onResolve(ToolApprovalDecision.ALLOW_ONCE) }) { Text("Allow once") }
                 TextButton(onClick = { onResolve(ToolApprovalDecision.DENY) }) { Text("Refuse") }
             }
+            Text(
+                // Said before the button is pressed, since "always" is the one answer that is hard
+                // to take back and the scope is what makes it safe or not.
+                "\"Always\" would allow ${pending.scopeLabel}.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TextButton(
                     onClick = { onResolve(ToolApprovalDecision.ALLOW_FOR_RUN) },
                 ) { Text("Allow for this run") }
                 TextButton(
                     onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
-                ) { Text("Always allow") }
+                ) { Text("Always allow this") }
             }
         }
     }

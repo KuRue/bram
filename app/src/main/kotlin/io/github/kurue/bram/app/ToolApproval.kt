@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withTimeout
+import org.json.JSONObject
 
 /** A tool call waiting on the user, and the answer it is waiting for. */
 data class PendingToolApproval(
@@ -19,6 +20,8 @@ data class PendingToolApproval(
     /** What the tool says it needs. Empty for a tool that only reads. */
     val requiredPermissions: Set<String>,
     val readOnly: Boolean,
+    /** What an "always allow" would actually be granting, in words. */
+    val scopeLabel: String,
     private val answer: CompletableDeferred<ToolApprovalDecision>,
 ) {
     fun resolve(decision: ToolApprovalDecision) {
@@ -80,6 +83,34 @@ class InteractiveApprovalGate(
 ) : ToolApprovalGate {
 
     private val mutablePending = MutableStateFlow<PendingToolApproval?>(null)
+
+    companion object {
+        /**
+         * The key an allowance is remembered under: the tool, plus the values of the arguments it
+         * says identify its target.
+         *
+         * An argument the call omits is recorded as absent rather than skipped, so a later call
+         * that supplies one cannot slip through an allowance granted without it.
+         */
+        fun approvalScope(tool: ToolDefinition, argumentsJson: String): String {
+            if (tool.approvalScopeKeys.isEmpty()) return tool.name
+            val arguments = runCatching { JSONObject(argumentsJson) }.getOrNull()
+            val targets = tool.approvalScopeKeys.sorted().joinToString(",") { key ->
+                "$key=" + (arguments?.opt(key)?.toString() ?: "<absent>")
+            }
+            return "${tool.name}($targets)"
+        }
+
+        /** The same thing said to a person rather than to a preferences file. */
+        fun scopeLabel(tool: ToolDefinition, argumentsJson: String): String {
+            if (tool.approvalScopeKeys.isEmpty()) return "every use of ${tool.name}"
+            val arguments = runCatching { JSONObject(argumentsJson) }.getOrNull()
+            val targets = tool.approvalScopeKeys.sorted().joinToString(", ") { key ->
+                "$key = " + (arguments?.opt(key)?.toString() ?: "(not set)")
+            }
+            return "${tool.name} with $targets"
+        }
+    }
     val pending: StateFlow<PendingToolApproval?> = mutablePending.asStateFlow()
 
     override suspend fun decide(
@@ -87,7 +118,8 @@ class InteractiveApprovalGate(
         argumentsJson: String,
     ): ToolApprovalDecision {
         if (tool.readOnly && tool.requiredPermissions.isEmpty()) return ToolApprovalDecision.ALLOW_ONCE
-        if (tool.name in permissions.alwaysAllowed()) return ToolApprovalDecision.ALLOW_ONCE
+        val scope = approvalScope(tool, argumentsJson)
+        if (scope in permissions.alwaysAllowed()) return ToolApprovalDecision.ALLOW_ONCE
 
         val answer = CompletableDeferred<ToolApprovalDecision>()
         val request = PendingToolApproval(
@@ -96,12 +128,13 @@ class InteractiveApprovalGate(
             argumentsJson = argumentsJson,
             requiredPermissions = tool.requiredPermissions,
             readOnly = tool.readOnly,
+            scopeLabel = scopeLabel(tool, argumentsJson),
             answer = answer,
         )
         mutablePending.value = request
         return try {
             val decision = withTimeout(timeoutMillis) { answer.await() }
-            if (decision == ToolApprovalDecision.ALLOW_ALWAYS) permissions.allowAlways(tool.name)
+            if (decision == ToolApprovalDecision.ALLOW_ALWAYS) permissions.allowAlways(scope)
             decision
         } catch (_: TimeoutCancellationException) {
             ToolApprovalDecision.DENY

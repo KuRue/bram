@@ -203,6 +203,8 @@ data class AppUiState(
     val profiles: List<ModelProfile> = emptyList(),
     /** A tool call waiting on the user. The run is blocked until this is answered. */
     val pendingApproval: PendingToolApproval? = null,
+    /** Tool allowances the user granted for good, so they can be seen and taken back. */
+    val alwaysAllowedTools: List<String> = emptyList(),
     /** The profile a load uses. Every model has at least a default one. */
     val activeProfileId: String? = null,
     val endpoints: List<RemoteEndpoint> = emptyList(),
@@ -294,6 +296,7 @@ class MainViewModel(
                 mutableState.update { it.copy(pendingApproval = pending) }
             }
         }
+        refreshToolPermissions()
         refreshDeviceProfile()
         reloadCatalogs()
         detectBackends()
@@ -506,6 +509,19 @@ class MainViewModel(
 
     fun resolveApproval(decision: ToolApprovalDecision) {
         mutableState.value.pendingApproval?.resolve(decision)
+        // Granting one is the only way the list grows, so this is the only place it needs refreshing.
+        if (decision == ToolApprovalDecision.ALLOW_ALWAYS) refreshToolPermissions()
+    }
+
+    fun withdrawToolPermission(scope: String) {
+        container.toolPermissionStore.withdraw(scope)
+        refreshToolPermissions()
+    }
+
+    private fun refreshToolPermissions() {
+        val allowed = runCatching { container.toolPermissionStore.alwaysAllowed() }
+            .getOrDefault(emptySet())
+        mutableState.update { it.copy(alwaysAllowedTools = allowed.sorted()) }
     }
 
     /** Switches which profile a model runs under, without loading it. */

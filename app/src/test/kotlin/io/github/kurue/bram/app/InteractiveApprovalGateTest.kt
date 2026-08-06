@@ -31,12 +31,14 @@ class InteractiveApprovalGateTest {
         name: String = "send_message",
         readOnly: Boolean = false,
         permissions: Set<String> = emptySet(),
+        scopeKeys: List<String> = emptyList(),
     ) = ToolDefinition(
         name = name,
         description = "does a thing",
         inputSchemaJson = "{}",
         readOnly = readOnly,
         requiredPermissions = permissions,
+        approvalScopeKeys = scopeKeys,
     )
 
     @Test
@@ -113,5 +115,77 @@ class InteractiveApprovalGateTest {
         assertEquals(setOf("sms"), pending.requiredPermissions)
         gate.pending.value?.resolve(ToolApprovalDecision.DENY)
         decision.await()
+    }
+
+    // A permission granted for good has to be granted for something. "Always allow run_command" is
+    // a blanket grant; "always allow run_command with command = git status" is a real decision.
+
+    @Test
+    fun `an allowance covers the target it was granted for`() = runTest {
+        val permissions = FakePermissions()
+        val gate = InteractiveApprovalGate(permissions)
+        val runner = tool(name = "run_command", scopeKeys = listOf("command"))
+
+        val first = async { gate.decide(runner, """{"command":"git status"}""") }
+        yield()
+        gate.pending.value?.resolve(ToolApprovalDecision.ALLOW_ALWAYS)
+        first.await()
+
+        // The same command again goes through.
+        assertEquals(
+            ToolApprovalDecision.ALLOW_ONCE,
+            gate.decide(runner, """{"command":"git status"}"""),
+        )
+    }
+
+    @Test
+    fun `an allowance does not cover a different target`() = runTest {
+        val permissions = FakePermissions()
+        val gate = InteractiveApprovalGate(permissions)
+        val runner = tool(name = "run_command", scopeKeys = listOf("command"))
+
+        val first = async { gate.decide(runner, """{"command":"git status"}""") }
+        yield()
+        gate.pending.value?.resolve(ToolApprovalDecision.ALLOW_ALWAYS)
+        first.await()
+
+        // Allowing one command must not allow every command.
+        val second = async { gate.decide(runner, """{"command":"rm -rf /"}""") }
+        yield()
+        assertEquals("run_command", gate.pending.value?.toolName)
+        gate.pending.value?.resolve(ToolApprovalDecision.DENY)
+        assertEquals(ToolApprovalDecision.DENY, second.await())
+    }
+
+    @Test
+    fun `a missing target is not the same as any target`() = runTest {
+        // Otherwise an allowance granted for a call that omitted the field would silently cover a
+        // later call that supplies one.
+        val withTarget = InteractiveApprovalGate.approvalScope(
+            tool(name = "write_file", scopeKeys = listOf("path")),
+            """{"path":"/tmp/x"}""",
+        )
+        val withoutTarget = InteractiveApprovalGate.approvalScope(
+            tool(name = "write_file", scopeKeys = listOf("path")),
+            "{}",
+        )
+        assertTrue(withTarget != withoutTarget)
+    }
+
+    @Test
+    fun `a tool with no target scopes to the tool itself`() = runTest {
+        assertEquals(
+            "read_clock",
+            InteractiveApprovalGate.approvalScope(tool(name = "read_clock"), """{"zone":"UTC"}"""),
+        )
+    }
+
+    @Test
+    fun `the label says what always would grant`() {
+        val label = InteractiveApprovalGate.scopeLabel(
+            tool(name = "run_command", scopeKeys = listOf("command")),
+            """{"command":"git status"}""",
+        )
+        assertEquals("run_command with command = git status", label)
     }
 }
