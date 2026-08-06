@@ -103,6 +103,17 @@ window and the send button animates continuously during generation, so the acces
 never dumpable mid-turn. Screenshots still work. This is why the approval card's accept branch is
 still unverified: the card only exists mid-turn.
 
+**The build can silently lose Hexagon.** The packaged `libbram_llama.so` currently contains no
+`ggml-hex` symbols and no HTP skel libraries, so the phone offers only Adreno and the NPU is gone.
+Nothing failed: several builds during the tool-calling work ran without `HEXAGON_SDK_ROOT`, CMake
+cached `GGML_HEXAGON=OFF`, and later builds that did export it reused the cache. A UI observation
+caught it, not the build.
+
+Recovering it needs the CMake cache cleared — delete `runtime/llamacpp/.cxx` — and a rebuild with
+`HEXAGON_SDK_ROOT` set. Worth checking with `strings ... | grep ggml-hex` afterwards rather than
+trusting the build to say so, and worth making CI or the app report which backends the library
+actually contains, since a validated hardware capability disappeared without a single warning.
+
 **Tools need the model's own template to render.** Tool definitions are passed to
 `common_chat_templates_apply`, which produces the grammar that constrains a tool call. When a
 template fails to render, Bram falls back to a built-in one, and that path has no tool support: the
