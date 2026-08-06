@@ -1192,6 +1192,9 @@ private fun ProfilePicker(
         )
     }
 
+    var editingPrompt by rememberSaveable(activeProfile.id) { mutableStateOf(false) }
+    var draftPrompt by rememberSaveable(activeProfile.id) { mutableStateOf(activeProfile.systemPrompt) }
+
     // Renaming is safe at any time; it is the only edit here that the runtime never reads.
     if (renaming) {
         OutlinedTextField(
@@ -1217,12 +1220,44 @@ private fun ProfilePicker(
     } else {
         Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             TextButton(onClick = { renaming = true }) { Text("Rename") }
+            TextButton(onClick = { editingPrompt = !editingPrompt }) {
+                Text(if (activeProfile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
+            }
             if (profiles.size > 1) {
                 TextButton(
                     onClick = { onDeleteProfile(activeProfile.id) },
                     enabled = !locked,
                 ) { Text("Delete profile") }
             }
+        }
+    }
+
+    if (editingPrompt) {
+        OutlinedTextField(
+            value = draftPrompt,
+            onValueChange = { draftPrompt = it },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3,
+            maxLines = 8,
+            label = { Text("Instructions for this profile") },
+        )
+        Text(
+            "Added to Bram's own instructions rather than replacing them, so a profile can change " +
+                "how Bram answers without dropping the rules that keep a run honest.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    onUpdateProfile(activeProfile.copy(systemPrompt = draftPrompt.trim()))
+                    editingPrompt = false
+                },
+            ) { Text("Save") }
+            TextButton(onClick = {
+                draftPrompt = activeProfile.systemPrompt
+                editingPrompt = false
+            }) { Text("Cancel") }
         }
     }
 }

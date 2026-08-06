@@ -43,6 +43,7 @@ class DefaultAgentOrchestrator(
         repeat(request.maxToolTurns + 1) { turn ->
             val context = contextWindowManager.plan(
                 systemPrompt = request.identity.systemPrompt,
+                profileInstructions = request.profileInstructions,
                 transcript = workingMessages,
                 contextWindowTokens = runtime.model.contextWindowTokens,
                 requestedOutputTokens = request.maxOutputTokens,

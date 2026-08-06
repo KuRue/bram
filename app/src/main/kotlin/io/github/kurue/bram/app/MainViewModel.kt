@@ -1015,6 +1015,7 @@ class MainViewModel(
                         identity = BramDefaults.IDENTITY,
                         maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
                         sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
+                        profileInstructions = snapshot.activeProfile?.systemPrompt.orEmpty(),
                     ),
                     runtime = selection.runtime,
                 ).collect { event ->

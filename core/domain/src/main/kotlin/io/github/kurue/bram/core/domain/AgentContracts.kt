@@ -65,6 +65,8 @@ data class AgentRunRequest(
     val maxOutputTokens: Int = 1_024,
     /** Taken from the profile the run is using, so sampling is part of the saved configuration. */
     val sampler: SamplerSettings = SamplerSettings(),
+    /** The profile's own instructions. Layered after [identity], never in place of it. */
+    val profileInstructions: String = "",
     val maxToolTurns: Int = 6,
     val memoryQuery: String = messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
 )
