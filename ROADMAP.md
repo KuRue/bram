@@ -63,8 +63,8 @@ for the next-token prediction at each position — because free-running generati
 token derail everything after it, making a small numerical difference indistinguishable from a
 broken kernel.
 
-Deferred to a later milestone: OpenCL, LiteRT, automatic plan selection and probation runs, KV/batch
-tuning, storage-assisted mode, and a multi-vendor device matrix.
+Deferred to a later milestone: OpenCL, LiteRT, automatic plan selection and probation runs,
+storage-assisted mode, and a multi-vendor device matrix. KV and batch tuning became Milestone 7.
 
 ## Milestones 3 to 6 — a usable local assistant (complete)
 
@@ -85,7 +85,41 @@ Also in this stretch: emulator support (an opt-in `x86_64` ABI), which exposed t
 a phone would also hit — a CPU load failing because an unusable GPU was merely present, and a model
 being unusable because its Jinja template could not be rendered.
 
-## Milestone 7 — durable agent (not started)
+## Milestone 7 — runtime performance (in progress)
+
+Promotes the deferred "KV/batch tuning" line above to a milestone of its own, because measurement
+showed it is the largest user-visible cost left. Every turn built a fresh `llama_context` and
+re-decoded the whole prompt, so at the measured 16.2 tok/s prompt speed a conversation grown to
+2,000 tokens spent about two minutes before its first token, worsening with every turn.
+
+- **KV reuse across turns.** Keep the context alive between turns, keep the longest common token
+  prefix, and decode only what is new.
+- **KV cache quantization.** `type_k`/`type_v` at `q8_0` roughly halves KV memory. The payoff is
+  context length within a phone's RAM rather than speed.
+- **FlashAttention.** Per-backend rather than global: supported on CPU, and to be confirmed on the
+  Hexagon HTP path before being enabled there. Also a practical prerequisite for quantized KV.
+- **Batch tuning.** `n_ubatch` is pinned at 128; both it and `n_batch` should follow measured
+  prompt throughput instead of a fixed guess.
+
+Exit criterion: each optimization reproduces the CPU reference under teacher forcing before it is
+reported as working. A prefix-matching bug produces plausible wrong output rather than a crash,
+which is the failure mode that already made a broken Vulkan backend look healthy.
+
+## Milestone 8 — model profiles (not started)
+
+Replaces the model card with saved configurations. Per-model preferences already exist as fields on
+the GGUF record; this makes them a named record instead, many profiles to one file.
+
+- A profile owns a name, a GGUF reference, sampler settings, context size, backend, reasoning
+  on/off, and a system prompt.
+- Sampler settings become per-profile rather than fixed. Only temperature currently crosses the
+  process boundary; `top_k` is pinned at 40 and `top_p` at 0.95 in the JNI layer.
+- The status pill selects a profile rather than a model.
+
+Ordering note: Milestone 7 lands first so profiles have the KV and attention settings to expose,
+rather than needing a second pass to add them.
+
+## Milestone 9 — durable agent (not started)
 
 - Room-backed run journal, memory provenance, and FTS retrieval.
 - Optional embeddings/vector index selected per device.
@@ -94,7 +128,7 @@ being unusable because its Jinja template could not be rendered.
 - A task queue with scheduled execution and result notifications. `AgentTaskService` is the
   foundation; there is no queue or per-task UI yet.
 
-## Milestone 8 — curated runtimes and routing (not started)
+## Milestone 10 — curated runtimes and routing (not started)
 
 - LiteRT-LM packages and device-specific compiled caches.
 - OpenAI Responses adapter where supported.
