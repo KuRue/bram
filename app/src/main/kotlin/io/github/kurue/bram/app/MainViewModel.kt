@@ -496,14 +496,75 @@ class MainViewModel(
     fun selectBackend(modelId: String, backend: RuntimeBackend) =
         editProfileFor(modelId) { it.copy(backendId = backend.name) }
 
+    /** Switches which profile a model runs under, without loading it. */
+    fun selectProfile(profileId: String) {
+        val profile = mutableState.value.profiles.firstOrNull { it.id == profileId } ?: return
+        viewModelScope.launch {
+            // Switching away from the profile the runtime was loaded with leaves the two
+            // disagreeing, so the load goes rather than quietly meaning something else.
+            if (mutableState.value.loadedModelId != null &&
+                mutableState.value.activeProfileId != profileId
+            ) {
+                unloadModelInternal(forget = false)
+            }
+            mutableState.update {
+                it.copy(activeProfileId = profileId, selectedRuntimeId = profile.modelId.value)
+            }
+            container.modelProfileStore.setLastUsedProfileId(profileId)
+        }
+    }
+
+    /**
+     * Adds a profile for a model, copied from the one it is running under.
+     *
+     * Copying rather than starting from defaults is the useful default: a new profile is nearly
+     * always a variation on the current one — the same model with a longer context, or reasoning
+     * turned on — not a blank slate.
+     */
+    fun createProfile(model: LocalModelRecord) {
+        viewModelScope.launch {
+            val source = mutableState.value.profileFor(model)
+            val existing = mutableState.value.profiles.count { it.modelId == model.id }
+            val created = source.copy(
+                id = "profile:${model.id.value}:${System.currentTimeMillis()}",
+                name = "${model.displayName} ${existing + 1}",
+                isDefault = false,
+                createdAtEpochMillis = System.currentTimeMillis(),
+            )
+            container.modelProfileStore.save(created)
+            reloadProfiles(selectId = created.id)
+        }
+    }
+
+    fun deleteProfile(profileId: String) {
+        viewModelScope.launch {
+            val state = mutableState.value
+            val profile = state.profiles.firstOrNull { it.id == profileId } ?: return@launch
+            // A model with no profile cannot be loaded, and the store would just recreate a default
+            // on the next sync, so the last one stays.
+            if (state.profiles.count { it.modelId == profile.modelId } <= 1) return@launch
+            if (state.activeProfileId == profileId && state.loadedModelId != null) {
+                unloadModelInternal(forget = false)
+            }
+            container.modelProfileStore.delete(profileId)
+            reloadProfiles()
+        }
+    }
+
     fun updateProfile(profile: ModelProfile) {
         viewModelScope.launch {
-            // A loaded model is configured the way it was loaded, so a changed profile only takes
-            // effect on the next load. Unloading says that plainly rather than leaving the screen
-            // describing settings the runtime is not using.
-            if (mutableState.value.activeProfileId == profile.id &&
-                mutableState.value.loadedModelId != null
-            ) {
+            val state = mutableState.value
+            val previous = state.profiles.firstOrNull { it.id == profile.id }
+            // Only settings the runtime reads at load time need it torn down. Sampling travels with
+            // each request, so a temperature change takes effect on the next reply — unloading for
+            // that would throw away a loaded model for nothing, and it is the setting most likely
+            // to be nudged repeatedly.
+            val needsReload = previous != null && (
+                previous.contextTokens != profile.contextTokens ||
+                    previous.backendId != profile.backendId ||
+                    previous.thinkingEnabled != profile.thinkingEnabled
+                )
+            if (needsReload && state.activeProfileId == profile.id && state.loadedModelId != null) {
                 unloadModelInternal(forget = false)
             }
             container.modelProfileStore.save(profile)
