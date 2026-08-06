@@ -84,7 +84,14 @@ reports the loaded format's markers, and Qwen3.5 reports `<think>` with two clos
 `</think>` and `<tool_call>`. Its own template does not render, though, so Bram falls back to a
 built-in one and the model reasons in unmarked prose — nothing marks it, so nothing can collapse it.
 
-**The tool path runs end to end on the emulator, through a fallback.** LFM2.5 writes a bare
+**The tool path runs end to end on the emulator, properly.** The model calls `write_note`, the call
+is parsed from its own format, the approval card shows the arguments, `Allow once` executes it, and
+the file appears. Two defects had to go first: the parse ran without the parser the template built,
+and generation rendered special tokens away before parsing, deleting the very marker that identifies
+a call. The retry and bare-call fallback that were built to work around those are now dead weight
+and should be removed.
+
+**Superseded — the tool path used to run only through a fallback.** LFM2.5 writes a bare
 `[write_note(name='q', body='z')]` without the marker its format requires; the parser and a forced
 retry both decline it; a fenced fallback recovers it; and the approval card appears. Left
 unanswered it was refused after two minutes and nothing ran. A recovered call always asks — it

@@ -115,7 +115,10 @@ class InferenceProcessService : Service() {
                     // Parsed here rather than by the caller: this process owns the chat format the
                     // reply has to be read against, and a tool call has to reach the agent loop
                     // before the turn is reported finished.
-                    var parsedReply = runCatching { bridge.parseReply(reply.toString()) }.getOrNull()
+                    // The streamed text has its special tokens rendered away for display; this
+                    // copy keeps them, and they are what marks a tool call.
+                    val rawReply = result.optString("rawReply").ifBlank { reply.toString() }
+                    var parsedReply = runCatching { bridge.parseReply(rawReply) }.getOrNull()
                     var toolCalls = runCatching {
                         JSONObject(parsedReply.orEmpty()).optJSONArray("toolCalls")
                     }.getOrNull()
@@ -127,7 +130,7 @@ class InferenceProcessService : Service() {
                     // than being recovered from prose by pattern matching.
                     val toolsJson = request.optJSONArray("tools")?.toString().orEmpty()
                     if ((toolCalls == null || toolCalls.length() == 0) &&
-                        looksLikeUnparsedCall(reply.toString(), toolsJson)
+                        looksLikeUnparsedCall(rawReply, toolsJson)
                     ) {
                         emit(
                             callback,

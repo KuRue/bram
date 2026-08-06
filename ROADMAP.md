@@ -233,7 +233,25 @@ every reply with an empty parser, so a marked tool call was unrecognisable. Load
 The conclusion recorded here before — that a small model was failing to follow its own format — was
 wrong. The model had been producing what its format asks for; Bram could not read it.
 
-The parser fix alone is not sufficient, though. Removing the retry and the bare-call fallback and
+**The other half was that Bram was deleting the marker before parsing.** `llama_token_to_piece` was
+called with `special = false`, which renders a special token as an empty string. The model had been
+emitting `<|tool_call_start|>` all along and Bram was erasing it, then parsing what was left and
+finding a bare call. Generation now keeps a second copy of the reply with special tokens intact —
+the transcript still gets the display form, since nobody wants to read a marker — and the parser
+reads that.
+
+With both fixes the whole loop runs on the emulator: the model calls `write_note`, the call is
+parsed, the approval card appears with the arguments shown, `Allow once` executes it, and
+`files/notes/marker` contains `found`. Milestone 9's gate is verified end to end, including the
+accept branch.
+
+The forced retry and the bare-call fallback should now be removed. An earlier attempt to remove them
+failed because only the parser fix was in place; with the special-token fix as well, the reason they
+existed is gone. That is the next change, and it needs the same clean-run check.
+
+The earlier note about the parser fix being insufficient is kept below for the record.
+
+The parser fix alone was not sufficient. Removing the retry and the bare-call fallback and
 running a clean turn put the reply back to text: `[write_note(name='clean', body='works')]`, no call,
 no approval. So a difference between Bram and `llama-server` remains, and the workarounds stay until
 it is found. The useful thing is that there is now a working reference to diff against, running the

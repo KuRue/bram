@@ -296,12 +296,19 @@ void decode_prompt(llama_context * context, const std::vector<llama_token> & tok
     }
 }
 
-std::string token_piece(const llama_vocab * vocab, llama_token token) {
+/**
+ * Renders a token, optionally keeping special tokens as their text.
+ *
+ * The transcript wants them gone — nobody wants to read `<|tool_call_start|>` — but the parser
+ * needs them, because they are exactly what marks a tool call. Rendering them away before parsing
+ * deleted the evidence that a call had been made.
+ */
+std::string token_piece(const llama_vocab * vocab, llama_token token, bool special) {
     std::vector<char> buffer(256);
-    int32_t count = llama_token_to_piece(vocab, token, buffer.data(), static_cast<int32_t>(buffer.size()), 0, false);
+    int32_t count = llama_token_to_piece(vocab, token, buffer.data(), static_cast<int32_t>(buffer.size()), 0, special);
     if (count < 0) {
         buffer.resize(static_cast<size_t>(-count));
-        count = llama_token_to_piece(vocab, token, buffer.data(), static_cast<int32_t>(buffer.size()), 0, false);
+        count = llama_token_to_piece(vocab, token, buffer.data(), static_cast<int32_t>(buffer.size()), 0, special);
     }
     if (count < 0) throw std::runtime_error("Could not decode an output token");
     return {buffer.data(), static_cast<size_t>(count)};
@@ -766,6 +773,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
 
         int output_count = 0;
         std::string pending_utf8;
+        // What the parser will read: the same tokens with their markers intact.
+        std::string raw_reply;
         std::string finish_reason = "length";
         const auto decode_start = std::chrono::steady_clock::now();
         for (; output_count < max_output_tokens; ++output_count) {
@@ -778,7 +787,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
                 finish_reason = "stop";
                 break;
             }
-            pending_utf8 += token_piece(vocab, token);
+            pending_utf8 += token_piece(vocab, token, false);
+            raw_reply += token_piece(vocab, token, true);
             if (is_complete_utf8(pending_utf8)) {
                 jstring text = to_jstring(env, pending_utf8);
                 env->CallVoidMethod(sink, on_token, text);
@@ -812,7 +822,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         const auto prompt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prompt_end - prompt_start).count();
         const auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start).count();
         std::ostringstream result;
-        result << "{\"promptTokens\":" << prompt_tokens.size()
+        result << "{\"rawReply\":\"" << json_escape(raw_reply) << "\""
+               << ",\"promptTokens\":" << prompt_tokens.size()
                << ",\"cachedPromptTokens\":" << reused
                << ",\"outputTokens\":" << output_count
                << ",\"promptMillis\":" << prompt_ms
@@ -892,7 +903,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_reference
             if (index > 0) ids << ",";
             ids << token;
             if (llama_vocab_is_eog(vocab, token)) break;
-            text += token_piece(vocab, token);
+            text += token_piece(vocab, token, false);
             llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(&token), 1);
             if (llama_decode(context, batch) != 0) {
                 throw std::runtime_error("Reference decode failed while advancing the context");
@@ -1075,7 +1086,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_selfTest(
         const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
         const llama_token token = llama_sampler_sample(sampler, context, -1);
         const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
-        const std::string piece = llama_vocab_is_eog(vocab, token) ? "<eog>" : token_piece(vocab, token);
+        const std::string piece = llama_vocab_is_eog(vocab, token) ? "<eog>" : token_piece(vocab, token, false);
         if (piece.empty()) throw std::runtime_error("CPU self-test produced an empty token");
         return std::string("{\"passed\":true,\"detail\":\"tokenizer + one-token CPU decode\",\"sample\":\"") +
             json_escape(piece) + "\"}";
