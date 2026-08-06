@@ -544,6 +544,8 @@ class MainViewModel(
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        // Put the chat back the way it was found: the run needs the runtime to itself.
+        val restoreLoaded = state.loadedModelId
         viewModelScope.launch {
             mutableState.update {
                 it.copy(
@@ -622,11 +624,13 @@ class MainViewModel(
                     it.copy(error = error.message ?: "Could not validate the accelerator")
                 }
             }
-            // The comparison leaves the runtime in whatever state the last load produced; drop it
-            // so the user always returns to a clean, explicitly chosen load.
-            runCatching { unloadModelInternal() }
+            // The comparison leaves the runtime in whatever state the last load produced, so drop
+            // it and put back what was loaded before. Leaving it unloaded stranded the chat: the
+            // composer stays enabled with no model behind it and sending does nothing.
+            runCatching { unloadModelInternal(forget = false) }
             mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
             refreshDeviceProfile()
+            restoreLoaded?.let { loadModel(it) }
         }
     }
 
@@ -640,6 +644,8 @@ class MainViewModel(
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        // Put the chat back the way it was found: the run needs the runtime to itself.
+        val restoreLoaded = state.loadedModelId
         viewModelScope.launch {
             mutableState.update {
                 it.copy(
@@ -714,9 +720,10 @@ class MainViewModel(
                     it.copy(error = error.message ?: "Could not bisect the accelerator")
                 }
             }
-            runCatching { unloadModelInternal() }
+            runCatching { unloadModelInternal(forget = false) }
             mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
             refreshDeviceProfile()
+            restoreLoaded?.let { loadModel(it) }
         }
     }
 
@@ -988,9 +995,14 @@ class MainViewModel(
         }
     }
 
-    private suspend fun unloadModelInternal() {
+    /**
+     * @param forget whether to also drop the model from the startup restore. An unload the user
+     *   asked for should not come back by itself next launch; one the app does to free the runtime
+     *   for a moment should.
+     */
+    private suspend fun unloadModelInternal(forget: Boolean = true) {
         runCatching { container.llamaCppClient.unload() }
-        runCatching { container.localModelStore.setLastLoadedModelId(null) }
+        if (forget) runCatching { container.localModelStore.setLastLoadedModelId(null) }
         mutableState.update {
             it.copy(
                 loadedModelId = null,
