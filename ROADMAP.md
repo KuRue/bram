@@ -21,7 +21,7 @@ the S25 Ultra.
 - Native inference process contract.
 - Versioned Bram default identity, independent of model runtime.
 
-## Milestone 1 — local CPU alpha (device validation pending)
+## Milestone 1 — local CPU alpha (complete)
 
 - Vendor a pinned llama.cpp revision and record its license/build fingerprint.
 - Model-first Chat/Models UI; remote endpoints move under Settings.
@@ -33,30 +33,68 @@ the S25 Ultra.
 
 Exit criterion: install, load, chat, cancel, unload, and recover from a killed inference process on the S25 Ultra.
 
-Implementation result: the full Android/Compose/NDK build, tests, lint, and APK assembly pass in
-CI. The remaining work is the physical-device acceptance test in
-[the current handoff](docs/HANDOFF.md). Keep PR #2 in draft until that test passes or the user
-explicitly decides to merge with a known limitation.
+Result: complete. All ten acceptance steps passed on the S25 Ultra, including recovery from a
+killed inference process. Getting there required two fixes: llama.cpp's native logs were being
+discarded, hiding the real failure; and the model was handed to native code as a `/proc/self/fd`
+path, which scoped storage refuses to let it re-open. Imports are now copied into app-private
+storage and loaded from a real path.
 
-## Milestone 2 — accelerator validation and hardware planner
+## Milestone 2 — accelerator validation (complete for Vulkan and Hexagon)
 
-- Native Vulkan/OpenCL/Hexagon probes with tiny correctness tests.
-- CPU/Adreno/Hexagon candidate plans and automatic probation runs.
-- KV type, context, batch, thread, and offload tuning.
-- Live RAM, storage reads, thermals, prompt/decode speed, and fallback reason UI.
-- Storage-assisted mode with explicit speed estimate and opt-in.
+- Vulkan and Hexagon backends compiled for ARM64 and packaged.
+- Correctness measured against CPU output rather than benchmarked.
+- Per-backend selection and layer bisection in the app.
 
-Exit criterion: cached safe plan selection plus automatic fallback across a small Snapdragon, Tensor, and MediaTek device matrix.
+Exit criterion: an accelerator is reported as validated only when it reproduces the CPU reference.
 
-## Milestone 3 — durable agent
+Result on the S25 Ultra with `LFM2.5-2.6B-Q4_0`:
 
-- Room-backed conversations, run journal, memory provenance, and FTS retrieval.
+| Backend | Offload | Agreement with CPU | Verdict |
+|---|---|---|---|
+| Hexagon NPU (HTP v79) | 31/31 layers | 23/24 (95.8%) | validated, 1.5–1.9x CPU |
+| Vulkan (Adreno 830) | 1 layer | 18/24 (75%) | not validated |
+| Vulkan (Adreno 830) | 7+ layers | all-zero logits | not validated |
+
+Vulkan reports no error while returning garbage, which is why validation compares output rather
+than measuring speed: a speed-only check called the broken backend working.
+
+The comparison is teacher-forced — both backends are fed the same reference tokens and asked only
+for the next-token prediction at each position — because free-running generation lets one differing
+token derail everything after it, making a small numerical difference indistinguishable from a
+broken kernel.
+
+Deferred to a later milestone: OpenCL, LiteRT, automatic plan selection and probation runs, KV/batch
+tuning, storage-assisted mode, and a multi-vendor device matrix.
+
+## Milestones 3 to 6 — a usable local assistant (complete)
+
+Delivered as four smaller milestones once local CPU inference was working, on the principle that
+Bram had to be pleasant to use before it could be extended.
+
+- **Durable conversations.** One JSON file per thread with a rebuildable index, multiple threads,
+  titles derived from the first message, restored on launch. Survives the app being killed.
+- **Agentic transcript.** Messages carry ordered activity entries for reasoning and tool calls,
+  rendered as collapsed lines that expand on tap and persisted with the conversation. Reasoning is
+  a per-model setting, off by default, because a reasoning model can spend paragraphs deciding how
+  to say hello.
+- **Background runs.** Agent work belongs to an application scope and holds a foreground service,
+  so a run continues and writes its reply when the user leaves the app.
+- **Chat quality of life.** Retry, edit-and-resend, copy, Markdown rendering, auto-scroll.
+
+Also in this stretch: emulator support (an opt-in `x86_64` ABI), which exposed two robustness bugs
+a phone would also hit — a CPU load failing because an unusable GPU was merely present, and a model
+being unusable because its Jinja template could not be rendered.
+
+## Milestone 7 — durable agent (not started)
+
+- Room-backed run journal, memory provenance, and FTS retrieval.
 - Optional embeddings/vector index selected per device.
-- Permissioned built-in tools and approval UI.
+- Permissioned built-in tools beyond the single read-only `device_status`, and an approval UI.
 - Versioned skill packages with validation, drafts, activation, and rollback.
-- WorkManager automation execution and result notifications.
+- A task queue with scheduled execution and result notifications. `AgentTaskService` is the
+  foundation; there is no queue or per-task UI yet.
 
-## Milestone 4 — curated runtimes and routing
+## Milestone 8 — curated runtimes and routing (not started)
 
 - LiteRT-LM packages and device-specific compiled caches.
 - OpenAI Responses adapter where supported.
