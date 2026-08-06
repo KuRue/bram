@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,6 +35,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
@@ -147,7 +150,10 @@ fun BramApp(viewModel: MainViewModel) {
                 Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .height(TOP_FADE_HEIGHT)
+                    .height(
+                        WindowInsets.statusBars.asPaddingValues().calculateTopPadding() +
+                            TOP_FADE_HEIGHT,
+                    )
                     .background(
                         Brush.verticalGradient(
                             listOf(
@@ -557,11 +563,13 @@ private fun ChatTranscript(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         // Room for the chrome at both ends: the transcript passes behind the bars, but its first
-        // and last lines must still be reachable rather than parked underneath them.
+        // and last lines must still be reachable rather than parked underneath them. The top bar
+        // sits below the status bar, so its inset counts too — a fixed figure left the first
+        // message touching the bubbles on a phone with a taller status bar.
         contentPadding = PaddingValues(
             start = 12.dp,
             end = 12.dp,
-            top = TOP_BAR_SPACE,
+            top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + TOP_BAR_SPACE,
             bottom = COMPOSER_SPACE,
         ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
