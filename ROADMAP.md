@@ -233,6 +233,16 @@ every reply with an empty parser, so a marked tool call was unrecognisable. Load
 The conclusion recorded here before — that a small model was failing to follow its own format — was
 wrong. The model had been producing what its format asks for; Bram could not read it.
 
+The parser fix alone is not sufficient, though. Removing the retry and the bare-call fallback and
+running a clean turn put the reply back to text: `[write_note(name='clean', body='works')]`, no call,
+no approval. So a difference between Bram and `llama-server` remains, and the workarounds stay until
+it is found. The useful thing is that there is now a working reference to diff against, running the
+same model from the same pinned revision. The next things to compare are the sampler chain — the
+server builds it through `common_sampler_init`, which carries `grammar_triggers` and
+`preserved_tokens`, while Bram assembles it by hand — and the tool definitions themselves, since
+Bram hand-parses them into `common_chat_tool` rather than going through the OpenAI-shaped conversion
+the server uses.
+
 That closed the REQUIRED route for this model, so the bare-call fallback was taken, fenced as
 below. On the emulator the whole chain now runs: LFM2.5 writes a bare call, the parser declines, the
 forced retry declines, the fallback recovers it, and the approval card appears in the transcript
