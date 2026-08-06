@@ -82,6 +82,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -96,6 +97,7 @@ import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -134,6 +136,7 @@ fun BramApp(viewModel: MainViewModel) {
                     state = state,
                     onRegenerate = viewModel::regenerateLastReply,
                     onEdit = viewModel::editAndResend,
+                    onResolveApproval = viewModel::resolveApproval,
                 )
             }
 
@@ -534,6 +537,7 @@ private fun ChatTranscript(
     state: AppUiState,
     onRegenerate: () -> Unit,
     onEdit: (String, String) -> Unit,
+    onResolveApproval: (ToolApprovalDecision) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
@@ -587,6 +591,11 @@ private fun ChatTranscript(
                 onRegenerate = onRegenerate,
                 onEdit = { text -> onEdit(message.id.value, text) },
             )
+        }
+        state.pendingApproval?.let { pending ->
+            item(key = "approval") {
+                ToolApprovalCard(pending, onResolve = onResolveApproval)
+            }
         }
         state.status?.let { status ->
             item {
@@ -1507,6 +1516,74 @@ private fun MessageBody(
             renderMarkdown(message.content.ifBlank { "…" }),
             style = MaterialTheme.typography.bodyLarge,
         )
+    }
+}
+
+/**
+ * A tool call waiting to be allowed or refused.
+ *
+ * Shown in the transcript rather than as a dialog: it is part of what the run did, it stays in the
+ * record afterwards, and a dialog over a reply the user is still reading is a good way to get a
+ * reflexive tap on whichever button is nearest.
+ *
+ * The arguments are shown in full. An approval that hides what it is approving is theatre.
+ */
+@Composable
+private fun ToolApprovalCard(
+    pending: PendingToolApproval,
+    onResolve: (ToolApprovalDecision) -> Unit,
+) {
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Glass.cornerMedium),
+        alpha = Glass.BUBBLE_ALPHA,
+        tint = MaterialTheme.colorScheme.primaryContainer,
+        blur = false,
+    ) {
+        Column(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "Bram wants to use ${pending.toolName}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (pending.description.isNotBlank()) {
+                Text(pending.description, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (pending.requiredPermissions.isNotEmpty()) {
+                Text(
+                    "Needs: ${pending.requiredPermissions.sorted().joinToString(", ")}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!pending.readOnly) {
+                Text(
+                    "This changes something. Bram will report what happened, not what it intended.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                pending.argumentsJson.ifBlank { "{}" },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Button(onClick = { onResolve(ToolApprovalDecision.ALLOW_ONCE) }) { Text("Allow once") }
+                TextButton(onClick = { onResolve(ToolApprovalDecision.DENY) }) { Text("Refuse") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(
+                    onClick = { onResolve(ToolApprovalDecision.ALLOW_FOR_RUN) },
+                ) { Text("Allow for this run") }
+                TextButton(
+                    onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
+                ) { Text("Always allow") }
+            }
+        }
     }
 }
 

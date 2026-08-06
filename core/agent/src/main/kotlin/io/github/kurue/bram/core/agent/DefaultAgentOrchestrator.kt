@@ -135,7 +135,10 @@ class DefaultAgentOrchestrator(
 
         when (decision) {
             ToolApprovalDecision.DENY -> return errorJson("permission_denied", "The user or policy denied this tool call")
-            ToolApprovalDecision.ALLOW_FOR_RUN -> allowedForRun += call.name
+            // Remembering past the run is the gate's business, not the loop's; here both mean the
+            // same thing — do not ask again before this run ends.
+            ToolApprovalDecision.ALLOW_FOR_RUN, ToolApprovalDecision.ALLOW_ALWAYS ->
+                allowedForRun += call.name
             ToolApprovalDecision.ALLOW_ONCE -> Unit
         }
 

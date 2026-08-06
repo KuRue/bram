@@ -51,9 +51,19 @@ data class AgentIdentity(
 enum class ToolApprovalDecision {
     ALLOW_ONCE,
     ALLOW_FOR_RUN,
+    /** Remembered past the end of the run, until the user withdraws it. */
+    ALLOW_ALWAYS,
     DENY,
 }
 
+/**
+ * Decides whether a tool call may proceed.
+ *
+ * Denial is an ordinary answer, not an error: it comes back to the model as a tool result so the
+ * run can respond to it — say what it wanted and why — rather than ending. That matters for
+ * unattended runs, where nobody is present to answer and the honest outcome is a recorded refusal
+ * rather than a hang.
+ */
 fun interface ToolApprovalGate {
     suspend fun decide(tool: ToolDefinition, argumentsJson: String): ToolApprovalDecision
 }

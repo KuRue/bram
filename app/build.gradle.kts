@@ -68,6 +68,7 @@ dependencies {
     implementation(composeBom)
     androidTestImplementation(composeBom)
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     implementation(libs.compose.ui)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)

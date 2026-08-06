@@ -18,6 +18,7 @@ import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.SamplerSettings
+import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.RemoteApiKind
 import io.github.kurue.bram.core.domain.RemoteEndpoint
@@ -200,6 +201,8 @@ data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
     val profiles: List<ModelProfile> = emptyList(),
+    /** A tool call waiting on the user. The run is blocked until this is answered. */
+    val pendingApproval: PendingToolApproval? = null,
     /** The profile a load uses. Every model has at least a default one. */
     val activeProfileId: String? = null,
     val endpoints: List<RemoteEndpoint> = emptyList(),
@@ -285,6 +288,11 @@ class MainViewModel(
                 )
             }
             refreshDeviceProfile()
+        }
+        viewModelScope.launch {
+            container.approvalGate.pending.collect { pending ->
+                mutableState.update { it.copy(pendingApproval = pending) }
+            }
         }
         refreshDeviceProfile()
         reloadCatalogs()
@@ -495,6 +503,10 @@ class MainViewModel(
 
     fun selectBackend(modelId: String, backend: RuntimeBackend) =
         editProfileFor(modelId) { it.copy(backendId = backend.name) }
+
+    fun resolveApproval(decision: ToolApprovalDecision) {
+        mutableState.value.pendingApproval?.resolve(decision)
+    }
 
     /** Switches which profile a model runs under, without loading it. */
     fun selectProfile(profileId: String) {
