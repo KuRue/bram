@@ -58,4 +58,50 @@ class StreamingReplyTest {
         assertEquals(listOf("one", "two"), split.closedReasoning)
         assertEquals("three", split.openReasoning)
     }
+
+    // The reasoning chat formats Bram targets (Qwen3, DeepSeek-R1) open the <think> block in the
+    // assistant prompt, so the model's stream has no opening marker — only reasoning and a closing
+    // </think>. The stream must fold reasoning as it arrives, not only once the whole reply ends.
+
+    @Test
+    fun `an injected block folds reasoning as it streams, with no opening marker`() {
+        val split = streamingReply("weighing the option", reasoningStartsOpen = true)
+        assertEquals("", split.visibleText)
+        assertEquals(emptyList<String>(), split.closedReasoning)
+        assertEquals("weighing the option", split.openReasoning)
+    }
+
+    @Test
+    fun `an injected block closes when the think marker arrives`() {
+        val split = streamingReply("weighed it</think>The answer is four.", reasoningStartsOpen = true)
+        assertEquals("The answer is four.", split.visibleText)
+        assertEquals(listOf("weighed it"), split.closedReasoning)
+        assertNull(split.openReasoning)
+    }
+
+    @Test
+    fun `an explicit think marker overrides an injected open`() {
+        // A model that emits its own <think> is read content-first even when an open was injected.
+        val split = streamingReply("<think>real</think>answer", reasoningStartsOpen = true)
+        assertEquals("answer", split.visibleText)
+        assertEquals(listOf("real"), split.closedReasoning)
+        assertNull(split.openReasoning)
+    }
+
+    @Test
+    fun `a partial closing marker in an injected block stays open`() {
+        val split = streamingReply("still going</thi", reasoningStartsOpen = true)
+        assertEquals("", split.visibleText)
+        assertEquals(emptyList<String>(), split.closedReasoning)
+        assertEquals("still going</thi", split.openReasoning)
+    }
+
+    @Test
+    fun `an injected open with no marker is plain text when reasoning is off`() {
+        // reasoningStartsOpen is only set when the model is asked to reason; otherwise unmarked
+        // prose is an answer, not reasoning.
+        val split = streamingReply("Just an answer, no reasoning.")
+        assertEquals("Just an answer, no reasoning.", split.visibleText)
+        assertNull(split.openReasoning)
+    }
 }
