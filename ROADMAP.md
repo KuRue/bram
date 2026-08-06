@@ -133,6 +133,42 @@ the GGUF record; this makes them a named record instead, many profiles to one fi
 Ordering note: Milestone 7 lands first so profiles have the KV and attention settings to expose,
 rather than needing a second pass to add them.
 
+## Milestone 8b — profile-first, and provisioned for the user (not started)
+
+Profiles exist and drive loading, but the screen is still a list of files with profile controls
+nested inside each one. The asked-for shape is the other way round: a list of profiles, each naming
+the GGUF it runs, because the profile is what a person picks and the file is an attribute of it.
+
+Making it profile-first is the small half. The larger half is that creating one should not require
+knowing anything:
+
+- **Name it and pick a GGUF.** That is the whole of what the user supplies.
+- **Defaults come from the file.** Context sized from the trained maximum and what the device can
+  actually hold rather than a fixed 8K; reasoning off unless the template supports it; sampling from
+  the format's own conventions where it has them.
+- **On save, measure it.** Run the existing teacher-forced comparison against every backend the
+  build and device offer, and record agreement and speed for each.
+- **Choose the fastest backend that agrees with CPU.** Correctness gates speed, never the reverse —
+  the whole reason that harness exists is that a broken Vulkan backend once reported success while
+  returning garbage, and a "fastest" choice made without it would have picked exactly that.
+- **Say why.** "Hexagon: 96% agreement, 1.9x CPU" beside the choice, with the date it was measured.
+  A silent automatic decision the user cannot inspect is worse than a manual one.
+- **Let it be redone and overridden.** Thermal state, free RAM, and a new build all change the
+  answer, so the measurement is a fact with an expiry rather than a property of the file.
+
+Two constraints this has to respect. A comparison takes on the order of a minute per backend, so
+provisioning belongs on the foreground-service path with visible progress, not behind a modal wait —
+which ties it to the task queue in Milestone 13. And it must degrade quietly: no accelerator present
+means CPU, every accelerator failing validation means CPU, and neither is an error.
+
+## Milestone 8c — OpenCL for Adreno (not started)
+
+Vulkan on the Adreno 830 fails validation in an operation every layer uses, and nothing has been
+done about it. ggml also has an OpenCL backend tuned specifically for Adreno, which is the path
+Qualcomm and llama.cpp generally point to on Snapdragon, and it is plausibly why the Vulkan bug has
+gone unchased upstream. It is listed as deferred above; on this hardware it is probably the better
+GPU bet, and the harness needed to prove or reject it already exists.
+
 ## The agent milestones
 
 Milestones 9 to 17 turn Bram from a chat app with one tool into an agent harness. They are ordered
