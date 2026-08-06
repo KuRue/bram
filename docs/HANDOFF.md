@@ -91,6 +91,11 @@ unanswered it was refused after two minutes and nothing ran. A recovered call al
 never matches a remembered allowance — because it is text read as an intent rather than the format
 saying so.
 
+**The UI cannot be read by automation while a turn is running.** `uiautomator dump` needs an idle
+window and the send button animates continuously during generation, so the accessibility tree is
+never dumpable mid-turn. Screenshots still work. This is why the approval card's accept branch is
+still unverified: the card only exists mid-turn.
+
 **Tools need the model's own template to render.** Tool definitions are passed to
 `common_chat_templates_apply`, which produces the grammar that constrains a tool call. When a
 template fails to render, Bram falls back to a built-in one, and that path has no tool support: the

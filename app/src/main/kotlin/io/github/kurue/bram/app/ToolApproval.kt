@@ -80,8 +80,13 @@ class InteractiveApprovalGate(
      * How long to wait for an answer before treating silence as refusal. An unattended run — a
      * scheduled task, or the app in the background — has nobody to answer it, and hanging forever
      * holds the foreground service open with nothing happening.
+     *
+     * Ten minutes rather than two: a local model on a phone generates at a few tokens a second, so
+     * a turn that calls a tool routinely takes minutes, and a window shorter than the work makes
+     * silent refusal the usual outcome rather than the exceptional one. This was found by a turn
+     * timing out before it could be answered.
      */
-    private val timeoutMillis: Long = 2 * 60 * 1_000,
+    private val timeoutMillis: Long = 10 * 60 * 1_000,
 ) : ToolApprovalGate {
 
     private val mutablePending = MutableStateFlow<PendingToolApproval?>(null)
