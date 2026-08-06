@@ -482,6 +482,41 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_formatCha
     });
 }
 
+/**
+ * The reasoning tags of the format the last prompt was built with.
+ *
+ * llama.cpp computes these per format — `[THINK]`, `<|channel|>analysis<|message|>` and `<mm:think>`
+ * are all in use, and some formats close with more than one tag — and the app was hardcoding
+ * `<think>`. `forcedOpen` answers the question the app was inferring from the reasoning setting:
+ * whether the prompt already opened the block, leaving the model's stream to contain only its close.
+ *
+ * Valid only after a prompt has been built, since that is when the template is applied.
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_chatFormat(
+    JNIEnv * env, jobject) {
+    return guarded_string(env, [] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const common_chat_params & params = g_state.last_chat_params;
+        const std::string & start = params.thinking_start_tag;
+        const bool forced_open = !start.empty() && params.prompt.size() >= start.size() &&
+            params.prompt.compare(params.prompt.size() - start.size(), start.size(), start) == 0;
+        std::ostringstream result;
+        result << "{\"supportsThinking\":" << (params.supports_thinking ? "true" : "false")
+               << ",\"forcedOpen\":" << (forced_open ? "true" : "false")
+               << ",\"startTag\":\"" << json_escape(start) << "\""
+               << ",\"endTags\":[";
+        bool first = true;
+        for (const std::string & tag : params.thinking_end_tags) {
+            if (!first) result << ",";
+            result << '"' << json_escape(tag) << '"';
+            first = false;
+        }
+        result << "]}";
+        return result.str();
+    });
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_countTokens(
     JNIEnv * env, jobject, jstring prompt) {
@@ -496,7 +531,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_countToke
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
-    JNIEnv * env, jobject, jstring prompt_value, jint max_output_tokens, jfloat temperature, jobject sink) {
+    JNIEnv * env, jobject, jstring prompt_value, jint max_output_tokens, jfloat temperature,
+    jfloat top_p, jint top_k, jfloat repeat_penalty, jint repeat_last_tokens, jobject sink) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cancelled.store(false, std::memory_order_relaxed);
@@ -560,11 +596,25 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         sampler_params.no_perf = false;
         llama_sampler * sampler = llama_sampler_chain_init(sampler_params);
         const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
+        // Repetition is penalised before truncation, so the penalty applies to the full
+        // distribution rather than to whatever top-k happened to leave behind.
+        if (repeat_penalty > 1.0f && repeat_last_tokens > 0) {
+            llama_sampler_chain_add(
+                sampler,
+                llama_sampler_init_penalties(
+                    llama_vocab_n_tokens(llama_model_get_vocab(g_state.model)),
+                    repeat_last_tokens,
+                    repeat_penalty,
+                    0.0f,
+                    0.0f));
+        }
         if (temperature <= 0.0f) {
+            // Greedy. The accelerator comparison depends on this being reachable, though it builds
+            // its own sampler rather than coming through here.
             llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
         } else {
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95f, 1));
+            if (top_k > 0) llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
+            if (top_p < 1.0f) llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));
             llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
         }

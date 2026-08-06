@@ -74,18 +74,27 @@ class InferenceProcessService : Service() {
                     check(loadedModelId != null) { "Load a local model before generating" }
                     val request = JSONObject(requestJson)
                     val prompt = formatPrompt(request.getJSONArray("messages"))
+                    // Read after the prompt is built, since applying the template is what decides
+                    // the format, and reported with the start event so the caller has the tags
+                    // before the first token arrives.
+                    val chatFormat = runCatching { JSONObject(bridge.chatFormat()) }.getOrNull()
                     emit(
                         callback,
                         requestId,
                         JSONObject()
                             .put("type", "started")
-                            .put("runtimeDescription", "Local CPU · ${loadedContextTokens} token context"),
+                            .put("runtimeDescription", "Local CPU · ${loadedContextTokens} token context")
+                            .put("chatFormat", chatFormat),
                     )
                     val result = JSONObject(
                         bridge.generate(
                             prompt = prompt,
                             maxOutputTokens = request.optInt("maxOutputTokens", 1_024).coerceIn(1, 16_384),
                             temperature = request.optDouble("temperature", 0.7).toFloat(),
+                            topP = request.optDouble("topP", 0.95).toFloat(),
+                            topK = request.optInt("topK", 40),
+                            repeatPenalty = request.optDouble("repeatPenalty", 1.1).toFloat(),
+                            repeatLastTokens = request.optInt("repeatLastTokens", 64),
                             sink = NativeTokenSink { token ->
                                 emit(
                                     callback,
