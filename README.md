@@ -8,8 +8,8 @@ The model is only one component. Bram is designed from the start for tool use, d
 > conversations, background runs, and a transcript that collapses reasoning and tool calls to a
 > line. Validated on a Snapdragon 8 Elite phone and an x86_64 emulator.
 >
-> The **Hexagon NPU is validated** on that phone at 95.8% agreement with CPU output and roughly
-> 1.5x the speed. **Vulkan is not**: on the same device it disagrees with CPU on a quarter of
+> The **Hexagon NPU is validated** on that phone at 95.8% agreement with CPU output and 1.5–1.9x
+> the speed, depending on the run. **Vulkan is not**: on the same device it disagrees with CPU on a quarter of
 > predictions with one offloaded layer and collapses entirely past about seven, while reporting no
 > error. It compiles and can be selected, but Bram does not call it validated.
 >

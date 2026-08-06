@@ -51,7 +51,7 @@ Result on the S25 Ultra with `LFM2.5-2.6B-Q4_0`:
 
 | Backend | Offload | Agreement with CPU | Verdict |
 |---|---|---|---|
-| Hexagon NPU (HTP v79) | 31/31 layers | 23/24 (95.8%) | validated, ~1.5x CPU |
+| Hexagon NPU (HTP v79) | 31/31 layers | 23/24 (95.8%) | validated, 1.5–1.9x CPU |
 | Vulkan (Adreno 830) | 1 layer | 18/24 (75%) | not validated |
 | Vulkan (Adreno 830) | 7+ layers | all-zero logits | not validated |
 

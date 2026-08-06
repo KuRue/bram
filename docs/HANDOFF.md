@@ -9,6 +9,7 @@ Last updated: 2026-08-05
 | Repository | Private `KuRue/bram` |
 | Branch | `main` at [`dbc8271`](https://github.com/KuRue/bram/commit/dbc82716906da45d31513204223c5e81f41a5baa) |
 | Open pull requests | None |
+| In flight | `milestone-9-glass-ui`, not yet opened as a PR |
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
 | Test emulator | AVD `Pixel_9a`, x86_64, resized to 16 GB storage and 6 GB RAM |
 | Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
@@ -22,7 +23,9 @@ in the isolated `:inference` process, and chat with streaming, cancellation, unl
 from a killed inference process. Validated on the S25 Ultra.
 
 **Accelerators.** The Hexagon NPU passes correctness validation on the S25 Ultra at 23/24 (95.8%)
-teacher-forced agreement with CPU and runs roughly 1.5x faster. Vulkan on the same device fails:
+teacher-forced agreement with CPU. Measured speed against the CPU reference has ranged from about
+1.5x to 1.9x across runs on the same phone and model; the 1.9x reading is the most recent. Vulkan on
+the same device fails:
 75% agreement with a single offloaded layer, collapsing to all-zero logits past about seven, with
 no error reported by the driver. Vulkan compiles and is offered, but is not validated.
 
@@ -37,6 +40,23 @@ a run continues and writes its reply when the user leaves the app.
 
 **Chat quality of life.** Retry, edit-and-resend, copy, Markdown rendering, and auto-scroll that
 follows a streaming reply.
+
+
+## In flight on `milestone-9-glass-ui`
+
+Not on `main` yet, and not opened as a pull request. Verified on the S25 Ultra:
+
+- A translucent interface built on the Haze library for real backdrop blur, a bubble top bar with a
+  burger menu and status pill, and a dark field with a fine dot lattice behind it.
+- The last loaded model is reopened on launch. Auto-load had never worked: the startup path built
+  the catalog itself and never called the restore, so every launch after the first landed in a chat
+  whose send button silently did nothing.
+- Reasoning is split from the answer on every token rather than once the reply finishes, so a closed
+  `<think>` block folds into its collapsed row immediately instead of sitting in the transcript as
+  raw markup.
+- An accelerator run restores whatever model was loaded when it started. It used to leave the
+  runtime unloaded, stranding the chat in the same silent dead end as the auto-load bug.
+- A GGUF's `general.name` is ignored when it looks like a commit hash, which is what LFM2.5 ships.
 
 ## What is not implemented
 
@@ -62,8 +82,9 @@ and is the default.
 **Reasoning is expensive.** A reasoning model asked to say hello can spend paragraphs deliberating.
 Reasoning is off by default, per model.
 
-**The Hexagon path has not been re-exercised since the UI restructure.** It validated before
-several rounds of UI and load-path changes that were verified only on an emulator with no NPU.
+**Vulkan's failure is in a shared operation, not a layer.** Bisection on the Adreno 830 shows even
+a single offloaded layer disagreeing, so the fault is in something every layer uses. Nothing has
+been attempted to fix it; the backend is offered and reported as unvalidated.
 
 ## Build
 
@@ -104,5 +125,7 @@ codebase compiled cleanly, passed CI, and were only visible when the app actuall
 
 ## Next
 
-UI work: bring the interface closer to Claude or ChatGPT in feel, with Liquid Glass elements. Model
-download is explicitly not wanted right now.
+Open a pull request for `milestone-9-glass-ui`, then continue on stability and on the accelerators.
+Hexagon is validated but nothing yet routes chat to it by default; Vulkan needs its shared broken
+operation identified before it is worth offering. Model download is explicitly not wanted right
+now.
