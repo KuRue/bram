@@ -704,6 +704,31 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Splits a partial reply into visible text and an in-flight reasoning entry.
+     *
+     * Only handles the marked case: when a model emits an unclosed `<think>` block, everything
+     * inside it is reasoning and nothing after it exists yet. A model that reasons in unmarked
+     * prose is indistinguishable from one that is answering, so nothing is claimed about it.
+     */
+    private fun streamingActivity(
+        text: String,
+        activity: List<AgentActivity>,
+        startedAt: Long,
+    ): Pair<String, AgentActivity.Thinking?> {
+        val open = text.indexOf("<think>")
+        if (open < 0) return text to null
+        val close = text.indexOf("</think>", startIndex = open)
+        if (close >= 0) return text to null
+        val reasoning = text.substring(open + "<think>".length)
+        val elapsed = if (startedAt > 0) System.currentTimeMillis() - startedAt else 0L
+        return text.take(open) to AgentActivity.Thinking(
+            text = reasoning,
+            durationMillis = elapsed,
+            inProgress = true,
+        )
+    }
+
     /** The assistant bubble as it stands mid-turn, so tool steps appear as they happen. */
     private fun inFlightMessage(text: String, activity: List<AgentActivity>) = ConversationMessage(
         role = MessageRole.ASSISTANT,
@@ -783,6 +808,7 @@ class MainViewModel(
             var assistantText = ""
             var completedMessage: ConversationMessage? = null
             val activity = mutableListOf<AgentActivity>()
+            var thinkingStartedAt = 0L
             try {
                 agent.run(
                     request = AgentRunRequest(
@@ -807,8 +833,22 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
+                            // Say "Thinking…" while the block is still open rather than waiting for
+                            // it to close. On a slow device that wait is long, and a blank reply
+                            // with no explanation looks like a stall.
+                            val streaming = streamingActivity(assistantText, activity, thinkingStartedAt)
+                            if (streaming.second != null && thinkingStartedAt == 0L) {
+                                thinkingStartedAt = System.currentTimeMillis()
+                            }
                             mutableState.update {
-                                it.copy(messages = requestMessages + inFlightMessage(assistantText, activity))
+                                it.copy(
+                                    messages = requestMessages + ConversationMessage(
+                                        role = MessageRole.ASSISTANT,
+                                        content = streaming.first,
+                                        activity = streaming.second?.let { thinking -> activity + thinking }
+                                            ?: activity.toList(),
+                                    ),
+                                )
                             }
                         }
                         is AgentEvent.ToolStarted -> {
@@ -869,8 +909,15 @@ class MainViewModel(
                         parsed.optString("content").ifBlank { rawReply } to parsed.optString("reasoning")
                     }.getOrDefault(rawReply to "")
                 }
+                val thinkingMillis = if (thinkingStartedAt > 0) {
+                    System.currentTimeMillis() - thinkingStartedAt
+                } else {
+                    0L
+                }
                 val finalActivity = buildList {
-                    reply.second.takeIf(String::isNotBlank)?.let { add(AgentActivity.Thinking(it)) }
+                    reply.second.takeIf(String::isNotBlank)?.let {
+                        add(AgentActivity.Thinking(it, durationMillis = thinkingMillis))
+                    }
                     addAll(activity)
                 }
                 val settled = when {

@@ -1,11 +1,13 @@
 package io.github.kurue.bram.app
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -75,9 +77,15 @@ private val BramTypography = Typography().let { base ->
 
 @Composable
 fun BramTheme(content: @Composable () -> Unit) {
+    val colors = if (isSystemInDarkTheme()) DarkColors else LightColors
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+        colorScheme = colors,
         typography = BramTypography,
-        content = content,
-    )
+    ) {
+        // Text outside an explicit Surface inherits LocalContentColor, which defaults to black.
+        // The shell deliberately has no Surface behind the transcript so the background shows
+        // through, so the colour is provided here rather than by whatever container happens to
+        // wrap it — that coupling is what made replies render dim grey twice.
+        CompositionLocalProvider(LocalContentColor provides colors.onBackground, content = content)
+    }
 }

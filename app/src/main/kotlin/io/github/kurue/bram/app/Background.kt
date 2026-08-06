@@ -1,6 +1,5 @@
 package io.github.kurue.bram.app
 
-import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -8,28 +7,25 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.ShaderBrush
-import androidx.compose.ui.graphics.TileMode
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.ImageShader
-import kotlin.random.Random
+import androidx.compose.ui.graphics.PointMode
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.unit.dp
 
 /**
- * The surface everything else floats on.
+ * The field everything else floats on.
  *
- * Translucent panels only look like glass when there is something behind them to reveal. Against a
- * flat near-black background there is nothing, so the panels read as slightly lighter rectangles
- * regardless of how carefully their edges are lit. This draws a quiet gradient field and a faint
- * grain so the material has something to work against — enough to give the panels depth, not enough
- * to compete with a long reply.
+ * A dark ramp with a fine lattice of dots over it. The dots carry the *inverse* of the ramp — bright
+ * where the ground is darkest, fading as the ground lifts — so the texture stays visible across the
+ * whole screen instead of disappearing into whichever end is closest to its own colour. Rows are
+ * offset by half a step, which reads as a diagonal weave rather than as graph paper.
+ *
+ * Translucent panels need something behind them to reveal; this is that something, and it is kept
+ * quiet enough not to compete with a long reply sitting on top of it.
  */
 @Composable
 fun BramBackground(
@@ -38,58 +34,57 @@ fun BramBackground(
 ) {
     val dark = isSystemInDarkTheme()
     val base = MaterialTheme.colorScheme.background
-    val grain = rememberGrain()
 
-    // Two soft off-screen-centred washes rather than a single linear ramp: a linear gradient reads
-    // as a backdrop, while overlapping radial ones read as light in a room.
-    val warm = if (dark) Color(0xFF3A2A1E).copy(alpha = 0.55f) else Color(0xFFE8D9C7).copy(alpha = 0.75f)
-    val cool = if (dark) Color(0xFF1A2230).copy(alpha = 0.45f) else Color(0xFFDCE3EC).copy(alpha = 0.60f)
+    // Near-black at the top lifting to a soft grey, so the ramp has somewhere to go.
+    val ramp = if (dark) {
+        listOf(Color(0xFF07070A), Color(0xFF141419), Color(0xFF1E1E25))
+    } else {
+        listOf(Color(0xFFFFFFFF), Color(0xFFF4F1EC), Color(0xFFE8E3DA))
+    }
+    val dotBright = if (dark) Color.White else Color(0xFF2A2A31)
 
     Box(
         modifier
             .fillMaxSize()
             .background(base)
             .drawBehind {
-                drawRect(
-                    Brush.radialGradient(
-                        colors = listOf(warm, Color.Transparent),
-                        center = Offset(size.width * 0.12f, size.height * 0.08f),
-                        radius = size.maxDimension * 0.85f,
-                    ),
-                )
-                drawRect(
-                    Brush.radialGradient(
-                        colors = listOf(cool, Color.Transparent),
-                        center = Offset(size.width * 0.92f, size.height * 0.78f),
-                        radius = size.maxDimension * 0.75f,
-                    ),
-                )
-                // Grain last, and very faint: it breaks up the banding a large gradient shows on
-                // an OLED panel more than it adds visible texture.
-                drawIntoCanvas {
-                    drawRect(
-                        ShaderBrush(ImageShader(grain, TileMode.Repeated, TileMode.Repeated)),
-                        alpha = if (dark) 0.035f else 0.05f,
-                    )
+                drawRect(Brush.verticalGradient(ramp))
+
+                val step = 22.dp.toPx()
+                val radius = 1.1.dp.toPx()
+                if (step <= 0f) return@drawBehind
+
+                // One pass, batched: a per-dot draw call across a phone screen is thousands of
+                // calls a frame, while drawPoints hands the whole lattice over at once.
+                val points = ArrayList<Offset>()
+                var row = 0
+                var y = 0f
+                while (y <= size.height + step) {
+                    val shift = if (row % 2 == 0) 0f else step / 2f
+                    var x = -step + shift
+                    while (x <= size.width + step) {
+                        points += Offset(x, y)
+                        x += step
+                    }
+                    y += step
+                    row++
                 }
+
+                drawPoints(
+                    points = points,
+                    pointMode = PointMode.Points,
+                    // Inverse of the ramp: strongest where the ground is darkest.
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            dotBright.copy(alpha = if (dark) 0.20f else 0.10f),
+                            dotBright.copy(alpha = if (dark) 0.09f else 0.05f),
+                            dotBright.copy(alpha = if (dark) 0.03f else 0.02f),
+                        ),
+                    ),
+                    strokeWidth = radius * 2f,
+                    cap = StrokeCap.Round,
+                )
             },
         content = content,
     )
-}
-
-/**
- * A small tile of monochrome noise, generated once and repeated.
- *
- * Built in code rather than shipped as an asset so it costs nothing to download and can be resized
- * freely; 128px keeps the repeat invisible at typical densities.
- */
-@Composable
-private fun rememberGrain(): ImageBitmap = remember {
-    val size = 128
-    val random = Random(0x8A5A3B)
-    val pixels = IntArray(size * size) {
-        val value = random.nextInt(120, 190)
-        (0xFF shl 24) or (value shl 16) or (value shl 8) or value
-    }
-    Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888).asImageBitmap()
 }

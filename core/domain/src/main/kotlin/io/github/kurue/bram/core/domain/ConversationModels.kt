@@ -38,10 +38,24 @@ data class ToolCall(
 sealed interface AgentActivity {
     val summary: String
 
-    /** Model reasoning, when the runtime can separate it from the reply. */
-    data class Thinking(val text: String, val durationMillis: Long = 0) : AgentActivity {
+    /**
+     * Model reasoning, when the runtime can separate it from the reply.
+     *
+     * [inProgress] is set while the model is still reasoning, so the transcript can say so as it
+     * happens rather than only once the block closes — which on a slow device can be a long wait
+     * with nothing on screen to explain it.
+     */
+    data class Thinking(
+        val text: String,
+        val durationMillis: Long = 0,
+        val inProgress: Boolean = false,
+    ) : AgentActivity {
         override val summary: String
-            get() = "Thinking" + if (durationMillis > 0) " for ${durationMillis / 1000}s" else ""
+            get() = when {
+                inProgress -> "Thinking…"
+                durationMillis > 0 -> "Thought for ${durationMillis / 1000}s"
+                else -> "Thought about this"
+            }
     }
 
     /** A tool invocation and, once it returns, its result. [result] is null while in flight. */

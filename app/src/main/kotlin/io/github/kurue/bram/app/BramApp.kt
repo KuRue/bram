@@ -4,11 +4,20 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,17 +25,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -34,9 +48,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -47,13 +65,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurue.bram.core.domain.AcceleratorCapability
@@ -64,6 +87,7 @@ import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 /** Larger than any message can be tall, so scrolling clamps to the end of the transcript. */
@@ -75,82 +99,73 @@ private enum class AppSection(val label: String, val glyph: String) {
     SETTINGS("Settings", "⚙"),
 }
 
+/** Panels reachable from the menu, each shown as a sheet over the conversation. */
+private enum class AppPanel { MODELS, SETTINGS }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BramApp(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    var section by rememberSaveable { mutableStateOf(AppSection.CHAT) }
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    var panel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha),
-                    scrolledContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha),
-                ),
-                title = {
-                    Column {
-                        Text(BramDefaults.IDENTITY.displayName, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            when (section) {
-                                AppSection.CHAT -> "Private, local-first chat"
-                                AppSection.MODELS -> "GGUF models on this device"
-                                AppSection.SETTINGS -> "Providers and diagnostics"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            BramDrawer(
+                state = state,
+                onOpenConversation = {
+                    viewModel.openConversation(it)
+                    scope.launch { drawerState.close() }
+                },
+                onDeleteConversation = viewModel::deleteConversation,
+                onNewConversation = {
+                    viewModel.startNewConversation()
+                    scope.launch { drawerState.close() }
+                },
+                onOpenPanel = {
+                    panel = it
+                    scope.launch { drawerState.close() }
                 },
             )
         },
-        bottomBar = {
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha),
-                tonalElevation = 0.dp,
-            ) {
-                AppSection.entries.forEach { item ->
-                    NavigationBarItem(
-                        selected = section == item,
-                        onClick = { section = item },
-                        icon = { Text(item.glyph) },
-                        label = { Text(item.label) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-                        ),
-                    )
-                }
-            }
-        },
-        // A transparent container lets the gradient field show through, but Scaffold derives its
-        // content colour from the container, and there is no sensible content colour for
-        // "transparent" — leaving text outside an explicit surface to render nearly unreadable.
-        containerColor = Color.Transparent,
-        contentColor = MaterialTheme.colorScheme.onBackground,
-    ) { padding ->
+    ) {
         BramBackground(Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().padding(padding)) {
-            when (section) {
-                AppSection.CHAT -> ChatScreen(
+            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+                // The chrome is three bubbles rather than a title bar: the app's name is not news
+                // after the first launch, while what is loaded and how fast it is running are.
+                TopBubbleBar(
+                    state = state,
+                    onMenu = { scope.launch { drawerState.open() } },
+                    onNewConversation = viewModel::startNewConversation,
+                )
+                ChatScreen(
                     state = state,
                     onSelectLocal = viewModel::selectLocalModel,
                     onSelectEndpoint = viewModel::selectEndpoint,
                     onSend = viewModel::send,
                     onStop = viewModel::stopGeneration,
-                    onNewConversation = viewModel::startNewConversation,
-                    onOpenConversation = viewModel::openConversation,
-                    onDeleteConversation = viewModel::deleteConversation,
                     onLoad = viewModel::loadModel,
-                    onOpenModels = { section = AppSection.MODELS },
+                    onOpenModels = { panel = AppPanel.MODELS },
                     onRegenerate = viewModel::regenerateLastReply,
                     onEdit = viewModel::editAndResend,
                 )
-                AppSection.MODELS -> ModelsScreen(
+            }
+        }
+    }
+
+    if (panel != null) {
+        ModalBottomSheet(
+            onDismissRequest = { panel = null },
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = Glass.chromeAlpha),
+            dragHandle = { BottomSheetDefaults.DragHandle() },
+        ) {
+            when (panel) {
+                AppPanel.MODELS -> ModelsScreen(
                     state = state,
                     onImport = { modelPicker.launch(arrayOf("*/*")) },
                     onSelect = viewModel::selectLocalModel,
@@ -164,15 +179,273 @@ fun BramApp(viewModel: MainViewModel) {
                     onSelectBackend = viewModel::selectBackend,
                     onThinkingEnabled = viewModel::setThinkingEnabled,
                 )
-                AppSection.SETTINGS -> SettingsScreen(
+                AppPanel.SETTINGS -> SettingsScreen(
                     state = state,
                     onSaveEndpoint = viewModel::saveEndpoint,
                     onRemoveEndpoint = viewModel::removeEndpoint,
                     onRefreshDiagnostics = viewModel::refreshDeviceProfile,
                 )
+                null -> Unit
             }
         }
+    }
+}
+
+/** Menu, live model state, and a fresh conversation — the three things wanted from any screen. */
+@Composable
+private fun TopBubbleBar(
+    state: AppUiState,
+    onMenu: () -> Unit,
+    onNewConversation: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BubbleButton(onClick = onMenu) {
+            MenuIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(22.dp))
         }
+        Spacer(Modifier.width(10.dp))
+
+        GlassSurface(
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(50),
+            alpha = Glass.chromeAlpha,
+        ) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 7.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    state.selectedLocalModel?.displayName
+                        ?: state.selectedEndpoint?.displayName
+                        ?: "No model",
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                )
+                Text(
+                    modelStatusLine(state),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+        }
+
+        Spacer(Modifier.width(10.dp))
+        BubbleButton(onClick = onNewConversation) {
+            NewChatIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(22.dp))
+        }
+    }
+}
+
+/** Live state belongs here: throughput while generating, otherwise what is loaded and where. */
+@Composable
+private fun modelStatusLine(state: AppUiState): String = when {
+    state.isGenerating -> state.lastMetrics?.decodeTokensPerSecond
+        ?.let { "${formatRate(it)} · generating" }
+        ?: "generating…"
+    state.selectedLocalModelIsLoaded -> buildString {
+        append(state.loadedBackend?.label ?: "loaded")
+        state.selectedLocalModel?.let { append(" · ${formatTokens(it.preferredContextTokens)}") }
+        state.lastMetrics?.decodeTokensPerSecond?.let { append(" · ${formatRate(it)}") }
+    }
+    state.selectedEndpoint != null -> "Remote provider"
+    state.selectedLocalModel != null -> "Not loaded"
+    else -> "Import a model to begin"
+}
+
+/** Conversations, plus a way into the model and provider panels. */
+@Composable
+private fun BramDrawer(
+    state: AppUiState,
+    onOpenConversation: (String) -> Unit,
+    onDeleteConversation: (String) -> Unit,
+    onNewConversation: () -> Unit,
+    onOpenPanel: (AppPanel) -> Unit,
+) {
+    ModalDrawerSheet(
+        drawerContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        modifier = Modifier.widthIn(max = 320.dp),
+    ) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                BramDefaults.IDENTITY.displayName,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+            )
+
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onNewConversation),
+                shape = RoundedCornerShape(Glass.cornerMedium),
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    NewChatIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("New conversation", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+
+            Text(
+                "Conversations",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+            )
+            LazyColumn(
+                Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (state.conversations.isEmpty()) {
+                    item {
+                        Text(
+                            "Nothing yet. Ask Bram something.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(4.dp),
+                        )
+                    }
+                }
+                items(state.conversations, key = { it.id.value }) { summary ->
+                    GlassSurface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(Glass.cornerMedium),
+                        alpha = if (summary.id.value == state.activeConversationId) {
+                            Glass.BUBBLE_ALPHA
+                        } else {
+                            Glass.DETAIL_ALPHA
+                        },
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(
+                                Modifier.weight(1f).clickable { onOpenConversation(summary.id.value) },
+                            ) {
+                                Text(
+                                    summary.title.ifBlank { "Untitled" },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                )
+                                Text(
+                                    "${summary.messageCount} messages",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(onClick = { onDeleteConversation(summary.id.value) }) {
+                                Text("Delete")
+                            }
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider()
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    "Models" to AppPanel.MODELS,
+                    "Settings" to AppPanel.SETTINGS,
+                ).forEach { (label, target) ->
+                    GlassSurface(
+                        modifier = Modifier.weight(1f).clickable { onOpenPanel(target) },
+                        shape = RoundedCornerShape(Glass.cornerMedium),
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Send while idle, stop while running.
+ *
+ * The ring is not decoration: local generation can stall for seconds between tokens on a phone, and
+ * a static control gives no way to tell "still working" from "wedged". A slow continuous sweep says
+ * the run is alive without implying progress towards a known end, which a determinate bar would.
+ */
+@Composable
+private fun SendButton(
+    generating: Boolean,
+    enabled: Boolean,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val transition = rememberInfiniteTransition(label = "send")
+    val sweep by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1400, easing = LinearEasing),
+        ),
+        label = "sweep",
+    )
+    val container = when {
+        generating -> MaterialTheme.colorScheme.surfaceContainerHighest
+        enabled -> MaterialTheme.colorScheme.primary
+        // Still a filled circle when disabled, only quieter: a control that dissolves into the
+        // composer gives no hint that it is the thing to press once there is something to send.
+        else -> MaterialTheme.colorScheme.surfaceContainerHighest
+    }
+    val ring = MaterialTheme.colorScheme.primary
+
+    Box(
+        Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(container)
+            .clickable(enabled = generating || enabled) { if (generating) onStop() else onSend() },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (generating) {
+            Canvas(Modifier.fillMaxSize().padding(3.dp)) {
+                drawArc(
+                    color = ring,
+                    startAngle = sweep,
+                    sweepAngle = 90f,
+                    useCenter = false,
+                    style = Stroke(width = size.minDimension * 0.07f, cap = StrokeCap.Round),
+                )
+            }
+            StopIcon(ring, Modifier.size(20.dp))
+        } else {
+            ArrowUpIcon(
+                if (enabled) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                Modifier.size(24.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun BubbleButton(onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+    GlassSurface(
+        modifier = Modifier.size(44.dp).clickable(onClick = onClick),
+        shape = CircleShape,
+        alpha = Glass.chromeAlpha,
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center, content = content)
     }
 }
 
@@ -183,9 +456,6 @@ private fun ChatScreen(
     onSelectEndpoint: (String) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
-    onNewConversation: () -> Unit,
-    onOpenConversation: (String) -> Unit,
-    onDeleteConversation: (String) -> Unit,
     onLoad: (String) -> Unit,
     onOpenModels: () -> Unit,
     onRegenerate: () -> Unit,
@@ -219,15 +489,6 @@ private fun ChatScreen(
                     )
                 }
             }
-        } else {
-            RuntimeSelector(
-                state = state,
-                onSelectLocal = onSelectLocal,
-                onSelectEndpoint = onSelectEndpoint,
-                onNewConversation = onNewConversation,
-                onOpenConversation = onOpenConversation,
-                onDeleteConversation = onDeleteConversation,
-            )
         }
 
         state.selectedLocalModel?.takeIf { !state.selectedLocalModelIsLoaded }?.let { model ->
@@ -338,20 +599,17 @@ private fun ChatScreen(
                     ),
                 )
                 Spacer(Modifier.width(4.dp))
-                if (state.isGenerating) {
-                    OutlinedButton(onClick = onStop, modifier = Modifier.height(56.dp)) { Text("Stop") }
-                } else {
-                    Button(
-                        onClick = {
-                            onSend(input)
-                            input = ""
-                        },
-                        enabled = input.isNotBlank() && (
-                            state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
-                        ),
-                        modifier = Modifier.height(56.dp),
-                    ) { Text("Send") }
-                }
+                SendButton(
+                    generating = state.isGenerating,
+                    enabled = input.isNotBlank() && (
+                        state.selectedEndpoint != null || state.selectedLocalModelIsLoaded
+                    ),
+                    onSend = {
+                        onSend(input)
+                        input = ""
+                    },
+                    onStop = onStop,
+                )
             }
         }
     }
