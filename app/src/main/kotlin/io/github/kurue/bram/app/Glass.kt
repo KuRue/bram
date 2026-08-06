@@ -15,14 +15,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /**
- * The translucent material the interface is built from.
- *
- * Compose has no backdrop blur: `Modifier.blur` blurs a composable's own content, not what sits
- * behind it, and true backdrop sampling needs either a third-party library or render-node plumbing
- * that is not worth its cost on a device that may be decoding tokens at the same time. What sells
- * glass visually is mostly not the blur anyway — it is translucency over moving content plus a lit
- * edge, so that is what this draws: a tinted translucent fill, a brighter rim along the top-left
- * where light would catch, and a dimmer one along the bottom-right.
+ * The translucent material the interface is built from: a frosted panel that blurs whatever sits
+ * behind it. The blur is drawn by [GlassSurface] through the Haze-backed [BackdropBlur]; what lives
+ * here is the shared tuning — how opaque each layer is, how soft the blur is, and the corner radii
+ * the panels share.
  */
 object Glass {
     /** Chrome floats over content and needs more opacity to stay legible while scrolling. */
@@ -50,11 +46,11 @@ object Glass {
 /**
  * A frosted panel.
  *
- * Plain translucency showed the lattice behind it pin-sharp, which reads as a tinted hole rather
- * than as glass — what makes glass legible as glass is that detail behind it goes soft. The panel
- * therefore redraws the backdrop at its own position with the lattice diffused, then lays its tint
- * therefore blurs the recorded backdrop behind itself, then lays its tint over that. See
- * [Backdrop] for how the recording is made.
+ * Plain translucency showed the dot lattice behind it pin-sharp, which reads as a tinted hole
+ * rather than as glass — what makes glass legible as glass is that detail behind it goes soft. The
+ * panel therefore blurs the recorded backdrop behind itself and lays its tint over that in a single
+ * layer, rather than a blur with a separate film over it. See [BackdropBlur] for how the recording
+ * is made.
  */
 @Composable
 fun GlassSurface(
