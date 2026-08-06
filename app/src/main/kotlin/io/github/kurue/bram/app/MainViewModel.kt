@@ -128,18 +128,29 @@ internal data class StreamingReply(
  * thing. Until it arrives this does the same job on the stream, so reasoning folds into a collapsed
  * row as it is produced rather than sitting in the transcript as raw markup until the turn ends.
  *
- * Most reasoning chat formats inject the opening `<think>` as part of the assistant prompt, so the
- * model's own output begins inside a reasoning block and contains only its closing `</think>`. When
- * [reasoningStartsOpen] is set the text is read that way: everything up to the first `</think>` is
- * reasoning, folding as it streams. A model that emits its own `<think>` markers is handled by the
- * marker path regardless. A model that reasons in unmarked prose is indistinguishable from one that
- * is answering, so nothing is claimed about it.
+ * Some chat formats open the reasoning block in the assistant prompt, so the model's own output
+ * begins inside it and contains only the closing tag. Others have the model write both tags, and
+ * which happens depends on the format and can invert with whether reasoning is enabled. When
+ * [reasoningStartsOpen] is set the text is read as already inside a block: everything up to the
+ * first `</think>` is reasoning, folding as it streams. A model that writes its own `<think>` is
+ * read marker-first either way, so guessing wrong costs a flicker rather than a wrong transcript.
+ *
+ * Two limits worth knowing. The tags here are `<think>`/`</think>`, which covers the Qwen and
+ * DeepSeek families and no others: llama.cpp also emits `[THINK]`, `<|channel|>analysis<|message|>`,
+ * and `<mm:think>`, and some formats have more than one closing tag. And whether the block starts
+ * open is inferred from the model's reasoning setting rather than known. Both are guesses standing
+ * in for something the runtime already computes — `common_chat_params` carries `thinking_start_tag`,
+ * `thinking_end_tags`, and the generation prompt — and Milestone 8 carries those across the process
+ * boundary so this can stop guessing.
+ *
+ * A model that reasons in unmarked prose is indistinguishable from one that is answering, so
+ * nothing is claimed about it.
  */
 internal fun streamingReply(text: String, reasoningStartsOpen: Boolean = false): StreamingReply {
-    // If the model emits its own <think>, the markers are authoritative and the text is read
-    // content-first; otherwise an injected opener means the text starts inside a reasoning block.
+    // A model that writes its own <think> is authoritative: read from the marker. Only when there
+    // is none does an assumed-open block apply.
     val startsInReasoning = reasoningStartsOpen && !text.contains(OPEN_THINK)
-    if (!startsInReasoning && !text.contains(OPEN_THINK)) {
+    if (!reasoningStartsOpen && !text.contains(OPEN_THINK)) {
         return StreamingReply(text, emptyList(), null)
     }
     val visible = StringBuilder()
@@ -853,9 +864,12 @@ class MainViewModel(
         AgentTaskService.start(container.appContext, "Answering: ${prompt.take(40)}")
         generationJob = container.appScope.launch {
             val agent = container.agent()
-            // A reasoning chat format opens the <think> block in the assistant prompt, so the
-            // model's output stream has no opening marker — only reasoning, then </think>. When the
-            // model is asked to reason, read the stream as starting inside that block.
+            // Some chat formats open the <think> block in the assistant prompt, leaving the output
+            // stream with no opening marker — only reasoning, then </think>. Whether this one does
+            // is not known here, so it is assumed whenever the model is asked to reason: a model
+            // that writes its own marker is read marker-first anyway, which makes a wrong guess
+            // cost a flicker rather than a mangled transcript. Milestone 8 replaces the guess with
+            // the tags the runtime already computes.
             val reasoningStartsOpen = selection.localModel?.thinkingEnabled == true
             var assistantText = ""
             var completedMessage: ConversationMessage? = null

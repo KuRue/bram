@@ -59,9 +59,9 @@ class StreamingReplyTest {
         assertEquals("three", split.openReasoning)
     }
 
-    // The reasoning chat formats Bram targets (Qwen3, DeepSeek-R1) open the <think> block in the
-    // assistant prompt, so the model's stream has no opening marker — only reasoning and a closing
-    // </think>. The stream must fold reasoning as it arrives, not only once the whole reply ends.
+    // Some chat formats open the <think> block in the assistant prompt, so the model's stream has
+    // no opening marker — only reasoning and a closing </think>. The stream must fold reasoning as
+    // it arrives, not only once the whole reply ends.
 
     @Test
     fun `an injected block folds reasoning as it streams, with no opening marker`() {

@@ -519,9 +519,17 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         // to the conversation, so in the common case everything up to the previous reply matches
         // and only the new user message has to be decoded.
         const size_t matched = reusable_prefix(prompt_tokens);
-        if (!llama_memory_seq_rm(llama_get_memory(context), 0, static_cast<llama_pos>(matched), -1)) {
+        // Only ask for a trim when there is something to remove. A turn that purely extends the
+        // cache needs none, and asking anyway fails on architectures that cannot erase part of a
+        // sequence — which would throw away a cache that was already correct.
+        const bool trimmed = matched == g_state.cached_tokens.size() ||
+            llama_memory_seq_rm(llama_get_memory(context), 0, static_cast<llama_pos>(matched), -1);
+        if (!trimmed) {
             // A cache that cannot be partially trimmed has to go entirely, or the positions of what
-            // follows would no longer line up with what the model is told it has seen.
+            // follows would no longer line up with what the model is told it has seen. Recurrent
+            // and hybrid architectures — Mamba, RWKV, and LFM2 among them — refuse partial removal
+            // because their state is not kept per token, so they land here on every turn that does
+            // not purely extend the cache.
             llama_memory_clear(llama_get_memory(context), true);
             g_state.cached_tokens.clear();
         } else {
@@ -529,6 +537,9 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         }
         // What was kept, after a trim that may have had to discard everything.
         const size_t reused = g_state.cached_tokens.size();
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+                            "kv cache: prompt %zu tokens, matched %zu, reused %zu",
+                            prompt_tokens.size(), matched, reused);
 
         const std::vector<llama_token> pending(
             prompt_tokens.begin() + static_cast<std::ptrdiff_t>(g_state.cached_tokens.size()),
