@@ -115,8 +115,9 @@ class InferenceProcessService : Service() {
                     // Parsed here rather than by the caller: this process owns the chat format the
                     // reply has to be read against, and a tool call has to reach the agent loop
                     // before the turn is reported finished.
+                    val parsedReply = runCatching { bridge.parseReply(reply.toString()) }.getOrNull()
                     val toolCalls = runCatching {
-                        JSONObject(bridge.parseReply(reply.toString())).optJSONArray("toolCalls")
+                        JSONObject(parsedReply.orEmpty()).optJSONArray("toolCalls")
                     }.getOrNull()
                     if (toolCalls != null && toolCalls.length() > 0) {
                         emit(

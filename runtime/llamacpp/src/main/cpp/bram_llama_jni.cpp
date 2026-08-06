@@ -677,10 +677,48 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         // rather than being asked to fix a choice already made. Without it a small model produces
         // something that looks like a tool call but does not parse.
         if (!g_state.last_chat_params.grammar.empty()) {
-            llama_sampler * grammar = llama_sampler_init_grammar(
-                llama_model_get_vocab(g_state.model),
-                g_state.last_chat_params.grammar.c_str(),
-                "root");
+            const common_chat_params & chat = g_state.last_chat_params;
+            const llama_vocab * grammar_vocab = llama_model_get_vocab(g_state.model);
+            llama_sampler * grammar = nullptr;
+            if (chat.grammar_lazy) {
+                // A lazy grammar must be given its triggers, or it never engages: the model writes
+                // the call in whatever shape it likes and the parser, which expects the format's
+                // own opening marker, finds nothing. Applying it eagerly instead is worse — that
+                // forces every reply to be a tool call.
+                std::vector<std::string> pattern_storage;
+                std::vector<llama_token> trigger_tokens;
+                for (const common_grammar_trigger & trigger : chat.grammar_triggers) {
+                    switch (trigger.type) {
+                        case COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN:
+                            trigger_tokens.push_back(trigger.token);
+                            break;
+                        case COMMON_GRAMMAR_TRIGGER_TYPE_WORD:
+                            // A word trigger is a literal; the sampler takes patterns, so it is
+                            // escaped into one that matches the literal and nothing else.
+                            pattern_storage.push_back(::regex_escape(trigger.value));
+                            break;
+                        case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN:
+                            pattern_storage.push_back("(" + trigger.value + ")[\\s\\S]*");
+                            break;
+                        case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL:
+                            pattern_storage.push_back(trigger.value);
+                            break;
+                    }
+                }
+                std::vector<const char *> patterns;
+                patterns.reserve(pattern_storage.size());
+                for (const std::string & pattern : pattern_storage) patterns.push_back(pattern.c_str());
+                grammar = llama_sampler_init_grammar_lazy_patterns(
+                    grammar_vocab,
+                    chat.grammar.c_str(),
+                    "root",
+                    patterns.empty() ? nullptr : patterns.data(),
+                    patterns.size(),
+                    trigger_tokens.empty() ? nullptr : trigger_tokens.data(),
+                    trigger_tokens.size());
+            } else {
+                grammar = llama_sampler_init_grammar(grammar_vocab, chat.grammar.c_str(), "root");
+            }
             if (grammar != nullptr) llama_sampler_chain_add(sampler, grammar);
         }
         const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);

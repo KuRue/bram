@@ -195,13 +195,24 @@ saying in the UI rather than discovered.
 With `LFM2.5-2.6B`, whose template does render, the model was told about the tool and asked for it:
 it replied `<think>[write_note(name='shopping', body='milk')]` — the right tool with the right
 arguments. The call is still not executed, because it arrives as text rather than as a parsed tool
-call. Two things to establish before this milestone closes:
+call. Both questions have since been answered by measurement.
 
-- Whether the grammar was applied at all. The call is wrapped in an unclosed `<think>`, which is
-  what a model does when nothing is constraining it.
-- Whether `common_chat_parse` recognises LFM2's call syntax. A call emitted inside a reasoning
-  block may be read as reasoning content, in which case it will never surface however well formed
-  it is.
+**The grammar was being applied wrongly.** LFM2.5 returns `grammar=956 lazy=1`: a *lazy* grammar,
+which only engages once a trigger appears, and Bram was installing it with the eager constructor and
+no triggers. It now uses `llama_sampler_init_grammar_lazy_patterns` with the triggers the template
+supplies. That fixed the reasoning split — content and reasoning now separate correctly instead of
+the reply arriving as one `<think>`-prefixed blob.
+
+**The parse still yields nothing, and the reason is the model.** LFM2.5's format expects
+`<|tool_call_start|>` before the call, and `common_chat_parse` requires that literal. The model
+writes a bare `[write_note(name='x', body='y')]` — the right tool and arguments, without the marker.
+A lazy grammar constrains what follows a trigger; it cannot make a model emit the trigger. So the
+remaining gap is a 2.6B model not following its own format's convention, not a wiring fault.
+
+Where that leaves the milestone: forcing the grammar eagerly would make every reply a tool call and
+is not an option. The honest routes are a model that emits the marker reliably, or accepting bare
+calls as a fallback parse — which trades correctness for compatibility and should be a decision
+taken deliberately rather than by default.
 
 ## Milestone 11 — Android tool surface (not started)
 
