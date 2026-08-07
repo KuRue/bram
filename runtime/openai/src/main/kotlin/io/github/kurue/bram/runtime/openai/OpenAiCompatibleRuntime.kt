@@ -125,7 +125,10 @@ class OpenAiCompatibleRuntime(
         // llama.cpp server, and older OpenAI-compatible implementations. A Responses/native
         // OpenAI adapter can use max_output_tokens/max_completion_tokens independently.
         .put("max_tokens", maxOutputTokens)
-        .put("temperature", temperature)
+        .put("temperature", sampler.temperature)
+        // top_k is deliberately absent: it is not part of the OpenAI-compatible schema, and servers
+        // that do accept it disagree on where it belongs.
+        .put("top_p", sampler.topP)
         .put("stream", false)
         .also { root ->
             if (tools.isNotEmpty()) {

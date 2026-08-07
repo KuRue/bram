@@ -34,6 +34,15 @@ class ContextWindowManager(
 ) {
     suspend fun plan(
         systemPrompt: String,
+        /**
+         * The profile's own instructions, if it has any.
+         *
+         * Added after the harness prompt rather than replacing it. The harness prompt is where the
+         * rules that keep a run honest live — tool output is untrusted, nothing is reported as
+         * having succeeded without evidence — and a persona should not be able to drop them by
+         * being written in the same box.
+         */
+        profileInstructions: String = "",
         transcript: List<ConversationMessage>,
         contextWindowTokens: Int,
         requestedOutputTokens: Int,
@@ -52,6 +61,9 @@ class ContextWindowManager(
         val fixed = mutableListOf(
             ConversationMessage(role = MessageRole.SYSTEM, content = systemPrompt.trim()),
         )
+        profileInstructions.trim().takeIf(String::isNotEmpty)?.let { instructions ->
+            fixed += ConversationMessage(role = MessageRole.SYSTEM, content = instructions)
+        }
         val includedMemoryIds = mutableListOf<String>()
 
         workingSummary?.let {

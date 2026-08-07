@@ -21,6 +21,7 @@ import io.github.kurue.bram.platform.android.SecureEndpointStore
 import io.github.kurue.bram.runtime.openai.OpenAiCompatibleRuntime
 import io.github.kurue.bram.runtime.llamacpp.LlamaCppRuntime
 import io.github.kurue.bram.runtime.llamacpp.LocalModelStore
+import io.github.kurue.bram.runtime.llamacpp.ModelProfileStore
 import io.github.kurue.bram.runtime.llamacpp.inference.LlamaCppServiceClient
 import org.json.JSONArray
 import org.json.JSONObject
@@ -46,6 +47,7 @@ class AppContainer(application: Application) {
 
     val endpointStore = SecureEndpointStore(application)
     val localModelStore = LocalModelStore(application)
+    val modelProfileStore = ModelProfileStore(application)
     val llamaCppClient = LlamaCppServiceClient(application)
     val deviceProfiler = AndroidDeviceProfiler(application)
     val conversationStore = ConversationStore(application)

@@ -161,29 +161,9 @@ class LocalModelStore(
         record
     }
 
-    suspend fun updatePreferredBackend(modelId: ModelId, backendId: String) = withContext(Dispatchers.IO) {
-        val models = decode(preferences.getString(KEY_MODELS, null)).map { model ->
-            if (model.id == modelId) model.copy(preferredBackendId = backendId) else model
-        }
-        persist(models)
-    }
-
-    suspend fun updateThinkingEnabled(modelId: ModelId, enabled: Boolean) = withContext(Dispatchers.IO) {
-        val models = decode(preferences.getString(KEY_MODELS, null)).map { model ->
-            if (model.id == modelId) model.copy(thinkingEnabled = enabled) else model
-        }
-        persist(models)
-    }
-
-    suspend fun updatePreferredContext(modelId: ModelId, tokens: Int) = withContext(Dispatchers.IO) {
-        val models = decode(preferences.getString(KEY_MODELS, null)).map { model ->
-            if (model.id != modelId) return@map model
-            val upper = model.trainedContextTokens.takeIf { it > 0 } ?: 1_000_000
-            model.copy(preferredContextTokens = tokens.coerceIn(256, upper))
-        }
-        persist(models)
-    }
-
+    // The per-model backend, context, and reasoning settings are no longer written here: they are
+    // profile settings now. The fields remain on the record because a catalog written before
+    // profiles existed is migrated from them the first time its default profile is created.
     suspend fun remove(modelId: ModelId) = withContext(Dispatchers.IO) {
         val models = decode(preferences.getString(KEY_MODELS, null)).toMutableList()
         val removed = models.firstOrNull { it.id == modelId } ?: return@withContext

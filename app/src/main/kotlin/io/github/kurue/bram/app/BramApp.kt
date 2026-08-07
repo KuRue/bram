@@ -58,6 +58,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
@@ -92,6 +93,7 @@ import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.LocalModelRecord
+import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import kotlinx.coroutines.launch
@@ -228,6 +230,10 @@ fun BramApp(viewModel: MainViewModel) {
                                 onReclaimStorage = viewModel::reclaimModelStorage,
                                 onSelectBackend = viewModel::selectBackend,
                                 onThinkingEnabled = viewModel::setThinkingEnabled,
+                                onSelectProfile = viewModel::selectProfile,
+                                onCreateProfile = viewModel::createProfile,
+                                onUpdateProfile = viewModel::updateProfile,
+                                onDeleteProfile = viewModel::deleteProfile,
                             )
                             AppPanel.SETTINGS -> SettingsScreen(
                                 state = state,
@@ -289,7 +295,7 @@ private fun TopBubbleBar(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
-                    state.selectedLocalModel?.displayName
+                    state.selectedLocalModel?.let { model -> state.profileFor(model).name }
                         ?: state.selectedEndpoint?.displayName
                         ?: "No model",
                     style = MaterialTheme.typography.labelLarge,
@@ -722,6 +728,10 @@ private fun ModelsScreen(
     onReclaimStorage: () -> Unit,
     onSelectBackend: (String, RuntimeBackend) -> Unit,
     onThinkingEnabled: (String, Boolean) -> Unit,
+    onSelectProfile: (String) -> Unit,
+    onCreateProfile: (LocalModelRecord) -> Unit,
+    onUpdateProfile: (ModelProfile) -> Unit,
+    onDeleteProfile: (String) -> Unit,
 ) {
     var expandedModelId by rememberSaveable { mutableStateOf<String?>(null) }
     LazyColumn(
@@ -778,6 +788,12 @@ private fun ModelsScreen(
                 generationActive = state.isGenerating,
                 availableBackends = state.availableBackends,
                 backend = state.backendFor(model),
+                profiles = state.profiles.filter { it.modelId == model.id },
+                activeProfile = state.profileFor(model),
+                onSelectProfile = onSelectProfile,
+                onCreateProfile = { onCreateProfile(model) },
+                onUpdateProfile = onUpdateProfile,
+                onDeleteProfile = onDeleteProfile,
                 onToggleExpanded = {
                     expandedModelId = if (expandedModelId == model.id.value) null else model.id.value
                 },
@@ -953,6 +969,12 @@ private fun LocalModelCard(
     generationActive: Boolean,
     availableBackends: List<RuntimeBackend>,
     backend: RuntimeBackend,
+    profiles: List<ModelProfile>,
+    activeProfile: ModelProfile,
+    onSelectProfile: (String) -> Unit,
+    onCreateProfile: () -> Unit,
+    onUpdateProfile: (ModelProfile) -> Unit,
+    onDeleteProfile: (String) -> Unit,
     onToggleExpanded: () -> Unit,
     onSelectBackend: (RuntimeBackend) -> Unit,
     onSelect: () -> Unit,
@@ -1067,6 +1089,18 @@ private fun LocalModelCard(
                     )
                 }
 
+                ProfilePicker(
+                    profiles = profiles,
+                    activeProfile = activeProfile,
+                    // Not `locked`: naming a profile changes nothing the runtime is using, and
+                    // switching to another deliberately unloads rather than being forbidden.
+                    locked = generationActive,
+                    onSelectProfile = onSelectProfile,
+                    onCreateProfile = onCreateProfile,
+                    onUpdateProfile = onUpdateProfile,
+                    onDeleteProfile = onDeleteProfile,
+                )
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Reasoning", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
@@ -1078,7 +1112,7 @@ private fun LocalModelCard(
                         )
                     }
                     Checkbox(
-                        checked = model.thinkingEnabled,
+                        checked = activeProfile.thinkingEnabled,
                         onCheckedChange = { onThinking(it) },
                         enabled = !generationActive,
                     )
@@ -1091,13 +1125,19 @@ private fun LocalModelCard(
                 ) {
                     contextOptions(model).forEach { tokens ->
                         FilterChip(
-                            selected = tokens == model.preferredContextTokens,
+                            selected = tokens == activeProfile.contextTokens,
                             onClick = { onContext(tokens) },
                             enabled = !locked,
                             label = { Text(formatTokens(tokens)) },
                         )
                     }
                 }
+
+                SamplerControls(
+                    profile = activeProfile,
+                    enabled = !generationActive,
+                    onUpdateProfile = onUpdateProfile,
+                )
 
                 Text(
                     "${model.layerCount.takeIf { it > 0 } ?: "?"} layers · trained context " +
@@ -1109,6 +1149,175 @@ private fun LocalModelCard(
             }
         }
     }
+}
+
+/**
+ * Chooses which saved configuration a model runs under, and names it.
+ *
+ * Profiles are how one GGUF becomes several usable things — a long-context one, a fast one, a
+ * reasoning one — so the picker sits above the settings it decides the owner of. There is always at
+ * least one, created on import, which is why deleting the last is not offered.
+ */
+@Composable
+private fun ProfilePicker(
+    profiles: List<ModelProfile>,
+    activeProfile: ModelProfile,
+    locked: Boolean,
+    onSelectProfile: (String) -> Unit,
+    onCreateProfile: () -> Unit,
+    onUpdateProfile: (ModelProfile) -> Unit,
+    onDeleteProfile: (String) -> Unit,
+) {
+    var renaming by rememberSaveable(activeProfile.id) { mutableStateOf(false) }
+    var draftName by rememberSaveable(activeProfile.id) { mutableStateOf(activeProfile.name) }
+
+    Text("Profile", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        profiles.forEach { profile ->
+            FilterChip(
+                selected = profile.id == activeProfile.id,
+                onClick = { onSelectProfile(profile.id) },
+                enabled = !locked,
+                label = { Text(profile.name) },
+            )
+        }
+        FilterChip(
+            selected = false,
+            onClick = onCreateProfile,
+            enabled = !locked,
+            label = { Text("+ New") },
+        )
+    }
+
+    var editingPrompt by rememberSaveable(activeProfile.id) { mutableStateOf(false) }
+    var draftPrompt by rememberSaveable(activeProfile.id) { mutableStateOf(activeProfile.systemPrompt) }
+
+    // Renaming is safe at any time; it is the only edit here that the runtime never reads.
+    if (renaming) {
+        OutlinedTextField(
+            value = draftName,
+            onValueChange = { draftName = it },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Profile name") },
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    // A profile with no name is unpickable in the chip row, so an empty field keeps
+                    // the old one rather than producing a blank chip.
+                    draftName.trim().takeIf(String::isNotEmpty)?.let { name ->
+                        onUpdateProfile(activeProfile.copy(name = name))
+                    }
+                    renaming = false
+                },
+            ) { Text("Save") }
+            TextButton(onClick = { renaming = false }) { Text("Cancel") }
+        }
+    } else {
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            TextButton(onClick = { renaming = true }) { Text("Rename") }
+            TextButton(onClick = { editingPrompt = !editingPrompt }) {
+                Text(if (activeProfile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
+            }
+            if (profiles.size > 1) {
+                TextButton(
+                    onClick = { onDeleteProfile(activeProfile.id) },
+                    enabled = !locked,
+                ) { Text("Delete profile") }
+            }
+        }
+    }
+
+    if (editingPrompt) {
+        OutlinedTextField(
+            value = draftPrompt,
+            onValueChange = { draftPrompt = it },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3,
+            maxLines = 8,
+            label = { Text("Instructions for this profile") },
+        )
+        Text(
+            "Added to Bram's own instructions rather than replacing them, so a profile can change " +
+                "how Bram answers without dropping the rules that keep a run honest.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    onUpdateProfile(activeProfile.copy(systemPrompt = draftPrompt.trim()))
+                    editingPrompt = false
+                },
+            ) { Text("Save") }
+            TextButton(onClick = {
+                draftPrompt = activeProfile.systemPrompt
+                editingPrompt = false
+            }) { Text("Cancel") }
+        }
+    }
+}
+
+/**
+ * The sampling settings, which until now were fixed in the runtime.
+ *
+ * Temperature reads as "how much it wanders" rather than by name, because the number means nothing
+ * to most people and zero means something specific: the same answer every time.
+ */
+@Composable
+private fun SamplerControls(
+    profile: ModelProfile,
+    enabled: Boolean,
+    onUpdateProfile: (ModelProfile) -> Unit,
+) {
+    val sampler = profile.sampler
+    Text("Sampling", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+    Text(
+        if (sampler.isGreedy) {
+            "Temperature 0 — always picks the likeliest word, so the same question gives the " +
+                "same answer."
+        } else {
+            "Temperature ${"%.2f".format(sampler.temperature)} — higher wanders further from the " +
+                "likeliest word."
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Slider(
+        value = sampler.temperature,
+        onValueChange = { onUpdateProfile(profile.copy(sampler = sampler.copy(temperature = it))) },
+        valueRange = 0f..2f,
+        enabled = enabled,
+    )
+
+    Text(
+        "Repetition penalty ${"%.2f".format(sampler.repeatPenalty)} — higher discourages the model " +
+            "from repeating itself, which a small model on a short context tends to do.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Slider(
+        value = sampler.repeatPenalty,
+        onValueChange = { onUpdateProfile(profile.copy(sampler = sampler.copy(repeatPenalty = it))) },
+        valueRange = 1f..2f,
+        enabled = enabled,
+    )
+
+    Text(
+        "Top-p ${"%.2f".format(sampler.topP)} · top-k ${sampler.topK}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Slider(
+        value = sampler.topP,
+        onValueChange = { onUpdateProfile(profile.copy(sampler = sampler.copy(topP = it))) },
+        valueRange = 0.05f..1f,
+        enabled = enabled,
+    )
 }
 
 @Composable

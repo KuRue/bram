@@ -7,6 +7,7 @@ import android.content.ServiceConnection
 import android.os.IBinder
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.GenerationEvent
+import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.GenerationRequest
 import io.github.kurue.bram.core.domain.LocalModelRecord
@@ -54,6 +55,17 @@ class LlamaCppServiceClient(context: Context) : Closeable {
 
     suspend fun teacherForced(forcedTokens: IntArray): JSONObject = withContext(Dispatchers.IO) {
         JSONObject(requireService().teacherForced(forcedTokens))
+    }
+
+    private fun JSONObject.toReasoningFormat(): ReasoningFormat {
+        val tags = optJSONArray("endTags")
+        return ReasoningFormat(
+            supportsThinking = optBoolean("supportsThinking"),
+            startsOpen = optBoolean("forcedOpen"),
+            startTag = optString("startTag"),
+            endTags = (0 until (tags?.length() ?: 0)).mapNotNull { tags?.optString(it) }
+                .filter(String::isNotEmpty),
+        )
     }
 
     /** Splits a finished reply into its answer and any reasoning the format exposes. */
@@ -104,7 +116,10 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                 }
                 when (event.optString("type")) {
                     "started" -> trySend(
-                        GenerationEvent.Started(event.optString("runtimeDescription", "Local CPU")),
+                        GenerationEvent.Started(
+                            runtimeDescription = event.optString("runtimeDescription", "Local CPU"),
+                            reasoningFormat = event.optJSONObject("chatFormat")?.toReasoningFormat(),
+                        ),
                     )
                     "textDelta" -> trySend(GenerationEvent.TextDelta(event.optString("text")))
                     "usage" -> trySend(
@@ -149,7 +164,11 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                 request.requestId,
                 messagesRequest(request.messages)
                     .put("maxOutputTokens", request.maxOutputTokens)
-                    .put("temperature", request.temperature)
+                    .put("temperature", request.sampler.temperature)
+                    .put("topP", request.sampler.topP)
+                    .put("topK", request.sampler.topK)
+                    .put("repeatPenalty", request.sampler.repeatPenalty)
+                    .put("repeatLastTokens", request.sampler.repeatLastTokens)
                     .toString(),
                 callback,
             )

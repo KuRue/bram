@@ -43,6 +43,7 @@ class DefaultAgentOrchestrator(
         repeat(request.maxToolTurns + 1) { turn ->
             val context = contextWindowManager.plan(
                 systemPrompt = request.identity.systemPrompt,
+                profileInstructions = request.profileInstructions,
                 transcript = workingMessages,
                 contextWindowTokens = runtime.model.contextWindowTokens,
                 requestedOutputTokens = request.maxOutputTokens,
@@ -66,11 +67,15 @@ class DefaultAgentOrchestrator(
                     messages = context.messages,
                     tools = toolRegistry.definitions(),
                     maxOutputTokens = request.maxOutputTokens,
+                    sampler = request.sampler,
                     requestId = UUID.randomUUID().toString(),
                 ),
             ).collect { event ->
                 when (event) {
-                    is GenerationEvent.Started -> emit(AgentEvent.Status(event.runtimeDescription))
+                    is GenerationEvent.Started -> {
+                        emit(AgentEvent.Status(event.runtimeDescription))
+                        event.reasoningFormat?.let { emit(AgentEvent.Reasoning(it)) }
+                    }
                     is GenerationEvent.TextDelta -> {
                         responseText.append(event.text)
                         emit(AgentEvent.TextDelta(event.text))

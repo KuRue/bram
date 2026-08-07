@@ -63,6 +63,10 @@ data class AgentRunRequest(
     val messages: List<ConversationMessage>,
     val identity: AgentIdentity,
     val maxOutputTokens: Int = 1_024,
+    /** Taken from the profile the run is using, so sampling is part of the saved configuration. */
+    val sampler: SamplerSettings = SamplerSettings(),
+    /** The profile's own instructions. Layered after [identity], never in place of it. */
+    val profileInstructions: String = "",
     val maxToolTurns: Int = 6,
     val memoryQuery: String = messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
 )
@@ -73,6 +77,11 @@ sealed interface AgentEvent {
         val estimatedInputTokens: Int,
         val omittedMessageCount: Int,
     ) : AgentEvent
+    /**
+     * The reasoning markers the runtime is using, reported before any text arrives so a partial
+     * reply can be split with the loaded format's own tags rather than an assumed `<think>`.
+     */
+    data class Reasoning(val format: ReasoningFormat) : AgentEvent
     data class TextDelta(val text: String) : AgentEvent
     data class ToolStarted(val call: ToolCall) : AgentEvent
     data class ToolFinished(val call: ToolCall, val result: String) : AgentEvent

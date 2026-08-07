@@ -15,6 +15,9 @@ import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.ReasoningFormat
+import io.github.kurue.bram.core.domain.ModelProfile
+import io.github.kurue.bram.core.domain.SamplerSettings
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.RemoteApiKind
 import io.github.kurue.bram.core.domain.RemoteEndpoint
@@ -124,35 +127,33 @@ internal data class StreamingReply(
 /**
  * Splits a partial reply into visible text and reasoning.
  *
- * The finished reply is split by the runtime's own structured parser, which needs the whole
- * thing. Until it arrives this does the same job on the stream, so reasoning folds into a collapsed
- * row as it is produced rather than sitting in the transcript as raw markup until the turn ends.
+ * The finished reply is split by the runtime's own structured parser, which needs the whole thing.
+ * Until it arrives this does the same job on the stream, so reasoning folds into a collapsed row as
+ * it is produced rather than sitting in the transcript as raw markup until the turn ends.
  *
- * Some chat formats open the reasoning block in the assistant prompt, so the model's own output
- * begins inside it and contains only the closing tag. Others have the model write both tags, and
- * which happens depends on the format and can invert with whether reasoning is enabled. When
- * [reasoningStartsOpen] is set the text is read as already inside a block: everything up to the
- * first `</think>` is reasoning, folding as it streams. A model that writes its own `<think>` is
- * read marker-first either way, so guessing wrong costs a flicker rather than a wrong transcript.
- *
- * Two limits worth knowing. The tags here are `<think>`/`</think>`, which covers the Qwen and
- * DeepSeek families and no others: llama.cpp also emits `[THINK]`, `<|channel|>analysis<|message|>`,
- * and `<mm:think>`, and some formats have more than one closing tag. And whether the block starts
- * open is inferred from the model's reasoning setting rather than known. Both are guesses standing
- * in for something the runtime already computes — `common_chat_params` carries `thinking_start_tag`,
- * `thinking_end_tags`, and the generation prompt — and Milestone 8 carries those across the process
- * boundary so this can stop guessing.
+ * [format] comes from the runtime, which knows what the loaded chat template actually uses. The
+ * tags vary — `<think>`, `[THINK]`, `<|channel|>analysis<|message|>` and `<mm:think>` are all in
+ * use, and some formats close with more than one — and whether the prompt already opened the block
+ * varies with the format too. Both were previously assumed, which was right for the Qwen and
+ * DeepSeek families and wrong for the rest.
  *
  * A model that reasons in unmarked prose is indistinguishable from one that is answering, so
- * nothing is claimed about it.
+ * nothing is claimed about it. So is a format that reports no tags, which is why an unusable
+ * [format] leaves the text alone rather than guessing.
  */
-internal fun streamingReply(text: String, reasoningStartsOpen: Boolean = false): StreamingReply {
-    // A model that writes its own <think> is authoritative: read from the marker. Only when there
-    // is none does an assumed-open block apply.
-    val startsInReasoning = reasoningStartsOpen && !text.contains(OPEN_THINK)
-    if (!reasoningStartsOpen && !text.contains(OPEN_THINK)) {
+internal fun streamingReply(
+    text: String,
+    format: ReasoningFormat = ReasoningFormat(),
+): StreamingReply {
+    if (!format.isUsable) return StreamingReply(text, emptyList(), null)
+    val startTag = format.startTag
+    // A model that writes the opening tag itself is authoritative: read from the marker wherever it
+    // is. Only when there is none does the prompt's own opening apply.
+    val startsInReasoning = format.startsOpen && !text.contains(startTag)
+    if (!startsInReasoning && !text.contains(startTag)) {
         return StreamingReply(text, emptyList(), null)
     }
+
     val visible = StringBuilder()
     val closed = mutableListOf<String>()
     var open: String? = null
@@ -160,36 +161,47 @@ internal fun streamingReply(text: String, reasoningStartsOpen: Boolean = false):
     var inReasoning = startsInReasoning
     while (cursor < text.length) {
         if (inReasoning) {
-            val end = text.indexOf(CLOSE_THINK, cursor)
-            if (end < 0) {
-                // The block is still being written: everything that follows is reasoning, and
-                // there is no answer yet.
+            val end = format.firstEndTagFrom(text, cursor)
+            if (end == null) {
+                // The block is still being written: everything that follows is reasoning, and there
+                // is no answer yet.
                 open = text.substring(cursor)
                 break
             }
-            closed += text.substring(cursor, end)
-            cursor = end + CLOSE_THINK.length
+            closed += text.substring(cursor, end.first)
+            cursor = end.first + end.second.length
             inReasoning = false
         } else {
-            val start = text.indexOf(OPEN_THINK, cursor)
-            if (start < 0) {
+            val next = text.indexOf(startTag, cursor)
+            if (next < 0) {
                 visible.append(text, cursor, text.length)
                 break
             }
-            visible.append(text, cursor, start)
-            cursor = start + OPEN_THINK.length
+            visible.append(text, cursor, next)
+            cursor = next + startTag.length
             inReasoning = true
         }
     }
     return StreamingReply(visible.toString(), closed, open)
 }
 
-private const val OPEN_THINK = "<think>"
-private const val CLOSE_THINK = "</think>"
+/**
+ * The earliest closing tag at or after [from], with the tag that matched.
+ *
+ * A format can close a reasoning block several ways — one lists `</think>` and `<tool_call>`
+ * together — so the block ends at whichever comes first, not at whichever was listed first.
+ */
+private fun ReasoningFormat.firstEndTagFrom(text: String, from: Int): Pair<Int, String>? =
+    endTags.mapNotNull { tag ->
+        text.indexOf(tag, from).takeIf { it >= 0 }?.let { it to tag }
+    }.minByOrNull { it.first }
 
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
+    val profiles: List<ModelProfile> = emptyList(),
+    /** The profile a load uses. Every model has at least a default one. */
+    val activeProfileId: String? = null,
     val endpoints: List<RemoteEndpoint> = emptyList(),
     val selectedRuntimeId: String? = null,
     val loadedModelId: String? = null,
@@ -226,8 +238,23 @@ data class AppUiState(
 
     /** The backend a given model will load onto, falling back to CPU when unavailable. */
     fun backendFor(model: LocalModelRecord): RuntimeBackend =
-        RuntimeBackend.fromId(model.preferredBackendId).takeIf { it in availableBackends }
+        RuntimeBackend.fromId(profileFor(model).backendId).takeIf { it in availableBackends }
             ?: RuntimeBackend.CPU
+
+    /**
+     * The profile a model runs under: the one explicitly active, otherwise its first.
+     *
+     * Falls back to a profile derived from the record so a model is never unusable because its
+     * profile has not been written yet — the store creates one on import, but a caller reading
+     * state mid-load should not have to care.
+     */
+    fun profileFor(model: LocalModelRecord): ModelProfile =
+        profiles.firstOrNull { it.id == activeProfileId && it.modelId == model.id }
+            ?: profiles.firstOrNull { it.modelId == model.id }
+            ?: ModelProfile.defaultFor(model)
+
+    val activeProfile: ModelProfile?
+        get() = profiles.firstOrNull { it.id == activeProfileId }
 }
 
 data class EndpointDraft(
@@ -460,49 +487,150 @@ class MainViewModel(
         }
     }
 
-    fun setPreferredContext(modelId: String, tokens: Int) {
+    fun setPreferredContext(modelId: String, tokens: Int) =
+        editProfileFor(modelId) { it.copy(contextTokens = tokens) }
+
+    fun setThinkingEnabled(modelId: String, enabled: Boolean) =
+        editProfileFor(modelId) { it.copy(thinkingEnabled = enabled) }
+
+    fun selectBackend(modelId: String, backend: RuntimeBackend) =
+        editProfileFor(modelId) { it.copy(backendId = backend.name) }
+
+    /** Switches which profile a model runs under, without loading it. */
+    fun selectProfile(profileId: String) {
+        val profile = mutableState.value.profiles.firstOrNull { it.id == profileId } ?: return
         viewModelScope.launch {
-            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
-            container.localModelStore.updatePreferredContext(
-                io.github.kurue.bram.core.domain.ModelId(modelId),
-                tokens,
-            )
-            reloadLocalModels(selectId = modelId)
+            // Switching away from the profile the runtime was loaded with leaves the two
+            // disagreeing, so the load goes rather than quietly meaning something else.
+            if (mutableState.value.loadedModelId != null &&
+                mutableState.value.activeProfileId != profileId
+            ) {
+                unloadModelInternal(forget = false)
+            }
+            mutableState.update {
+                it.copy(activeProfileId = profileId, selectedRuntimeId = profile.modelId.value)
+            }
+            container.modelProfileStore.setLastUsedProfileId(profileId)
         }
     }
 
-    fun setThinkingEnabled(modelId: String, enabled: Boolean) {
+    /**
+     * Adds a profile for a model, copied from the one it is running under.
+     *
+     * Copying rather than starting from defaults is the useful default: a new profile is nearly
+     * always a variation on the current one — the same model with a longer context, or reasoning
+     * turned on — not a blank slate.
+     */
+    fun createProfile(model: LocalModelRecord) {
         viewModelScope.launch {
-            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
-            container.localModelStore.updateThinkingEnabled(
-                io.github.kurue.bram.core.domain.ModelId(modelId),
-                enabled,
+            val source = mutableState.value.profileFor(model)
+            val existing = mutableState.value.profiles.count { it.modelId == model.id }
+            val created = source.copy(
+                id = "profile:${model.id.value}:${System.currentTimeMillis()}",
+                name = "${model.displayName} ${existing + 1}",
+                isDefault = false,
+                createdAtEpochMillis = System.currentTimeMillis(),
             )
-            reloadLocalModels(selectId = modelId)
+            container.modelProfileStore.save(created)
+            reloadProfiles(selectId = created.id)
         }
     }
 
-    fun selectBackend(modelId: String, backend: RuntimeBackend) {
+    fun deleteProfile(profileId: String) {
         viewModelScope.launch {
-            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
-            container.localModelStore.updatePreferredBackend(
-                io.github.kurue.bram.core.domain.ModelId(modelId),
-                backend.name,
-            )
-            reloadLocalModels(selectId = modelId)
+            val state = mutableState.value
+            val profile = state.profiles.firstOrNull { it.id == profileId } ?: return@launch
+            // A model with no profile cannot be loaded, and the store would just recreate a default
+            // on the next sync, so the last one stays.
+            if (state.profiles.count { it.modelId == profile.modelId } <= 1) return@launch
+            if (state.activeProfileId == profileId && state.loadedModelId != null) {
+                unloadModelInternal(forget = false)
+            }
+            container.modelProfileStore.delete(profileId)
+            reloadProfiles()
         }
     }
 
+    fun updateProfile(profile: ModelProfile) {
+        viewModelScope.launch {
+            val state = mutableState.value
+            val previous = state.profiles.firstOrNull { it.id == profile.id }
+            // Only settings the runtime reads at load time need it torn down. Sampling travels with
+            // each request, so a temperature change takes effect on the next reply — unloading for
+            // that would throw away a loaded model for nothing, and it is the setting most likely
+            // to be nudged repeatedly.
+            val needsReload = previous != null && (
+                previous.contextTokens != profile.contextTokens ||
+                    previous.backendId != profile.backendId ||
+                    previous.thinkingEnabled != profile.thinkingEnabled
+                )
+            if (needsReload && state.activeProfileId == profile.id && state.loadedModelId != null) {
+                unloadModelInternal(forget = false)
+            }
+            container.modelProfileStore.save(profile)
+            reloadProfiles(selectId = profile.id)
+        }
+    }
+
+    /** Edits whichever profile the model currently runs under. */
+    private fun editProfileFor(modelId: String, edit: (ModelProfile) -> ModelProfile) {
+        val state = mutableState.value
+        val model = state.localModels.firstOrNull { it.id.value == modelId } ?: return
+        updateProfile(edit(state.profileFor(model)))
+    }
+
+    private fun reloadProfiles(selectId: String? = null) {
+        viewModelScope.launch { syncProfiles(mutableState.value.localModels, selectId) }
+    }
+
+    /**
+     * Brings the profile list into state, creating any a model is missing and dropping any whose
+     * model is gone. Suspends rather than launching, so a caller that needs profiles present
+     * before its next step can wait for it.
+     */
+    private suspend fun syncProfiles(
+        models: List<LocalModelRecord>,
+        selectId: String? = null,
+    ) {
+        runCatching { container.modelProfileStore.removeOrphans(models) }
+        val profiles = runCatching { container.modelProfileStore.ensureDefaults(models) }
+            .getOrDefault(emptyList())
+        mutableState.update { current ->
+            current.copy(
+                profiles = profiles,
+                activeProfileId = selectId
+                    ?: current.activeProfileId?.takeIf { id -> profiles.any { it.id == id } },
+            )
+        }
+    }
+
+    /** Loads a model under whichever profile is active for it. */
     fun loadModel(modelId: String) {
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
-        if (mutableState.value.isLoadingModel || mutableState.value.isGenerating) return
-        val backend = mutableState.value.backendFor(model)
+        loadProfile(mutableState.value.profileFor(model).id)
+    }
+
+    /**
+     * Loads the model a profile names, configured the way the profile says.
+     *
+     * Context size, processor, and reasoning come from the profile rather than the file, which is
+     * what lets one GGUF be run several ways.
+     */
+    fun loadProfile(profileId: String) {
+        val state = mutableState.value
+        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
+        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        val modelId = model.id.value
+        if (state.isLoadingModel || state.isGenerating) return
+        val backend = RuntimeBackend.fromId(profile.backendId)
+            .takeIf { it in state.availableBackends } ?: RuntimeBackend.CPU
         viewModelScope.launch {
             mutableState.update {
                 it.copy(
                     selectedRuntimeId = modelId,
+                    activeProfileId = profile.id,
                     isLoadingModel = true,
-                    status = "Loading ${model.displayName} on ${backend.label}…",
+                    status = "Loading ${profile.name} on ${backend.label}…",
                     error = null,
                     modelLoadDetail = null,
                 )
@@ -511,14 +639,19 @@ class MainViewModel(
                 val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
                 val threads = (visibleCores - 2).coerceIn(1, 4)
                 container.llamaCppClient.load(
-                    model = model,
+                    // The profile's context size, not the file's: the same GGUF may be configured
+                    // for a long context in one profile and a cheap one in another.
+                    model = model.copy(preferredContextTokens = profile.contextTokens),
                     threads = threads,
                     gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0,
                     deviceFilter = backend.devicePrefix,
-                    enableThinking = model.thinkingEnabled,
+                    enableThinking = profile.thinkingEnabled,
                 )
             }.onSuccess { result ->
-                viewModelScope.launch { container.localModelStore.setLastLoadedModelId(modelId) }
+                viewModelScope.launch {
+                    container.localModelStore.setLastLoadedModelId(modelId)
+                    container.modelProfileStore.setLastUsedProfileId(profile.id)
+                }
                 mutableState.update {
                     it.copy(
                         loadedModelId = modelId,
@@ -864,13 +997,10 @@ class MainViewModel(
         AgentTaskService.start(container.appContext, "Answering: ${prompt.take(40)}")
         generationJob = container.appScope.launch {
             val agent = container.agent()
-            // Some chat formats open the <think> block in the assistant prompt, leaving the output
-            // stream with no opening marker — only reasoning, then </think>. Whether this one does
-            // is not known here, so it is assumed whenever the model is asked to reason: a model
-            // that writes its own marker is read marker-first anyway, which makes a wrong guess
-            // cost a flicker rather than a mangled transcript. Milestone 8 replaces the guess with
-            // the tags the runtime already computes.
-            val reasoningStartsOpen = selection.localModel?.thinkingEnabled == true
+            // Reported by the runtime before any text arrives, since only it knows what the loaded
+            // chat template uses. Until it does, an empty format leaves the stream alone rather
+            // than splitting it on tags that may not be this model's.
+            var reasoningFormat = ReasoningFormat()
             var assistantText = ""
             var completedMessage: ConversationMessage? = null
             val activity = mutableListOf<AgentActivity>()
@@ -884,11 +1014,14 @@ class MainViewModel(
                         messages = requestMessages,
                         identity = BramDefaults.IDENTITY,
                         maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
+                        sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
+                        profileInstructions = snapshot.activeProfile?.systemPrompt.orEmpty(),
                     ),
                     runtime = selection.runtime,
                 ).collect { event ->
                     when (event) {
                         is AgentEvent.Status -> mutableState.update { it.copy(status = event.text) }
+                        is AgentEvent.Reasoning -> reasoningFormat = event.format
                         is AgentEvent.ContextPrepared -> mutableState.update {
                             it.copy(
                                 status = buildString {
@@ -901,7 +1034,7 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
-                            val streaming = streamingReply(assistantText, reasoningStartsOpen)
+                            val streaming = streamingReply(assistantText, reasoningFormat)
                             val now = System.currentTimeMillis()
                             // A block that has just closed keeps the time it actually took; leaving
                             // it on the running clock would have every finished block claim the
@@ -947,7 +1080,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = "Running ${event.call.name}…",
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningStartsOpen).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningFormat).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -962,7 +1095,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = null,
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningStartsOpen).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningFormat).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -1066,6 +1199,9 @@ class MainViewModel(
                     error = null,
                 )
             }
+            // Profiles first: the restore below reads them, and a model imported before profiles
+            // existed needs its default written before it can be loaded through one.
+            syncProfiles(models)
             // This is the startup path. Without this the last model was only reopened after an
             // import, so every launch after the first one landed on an empty chat that silently
             // refused to send.
@@ -1084,6 +1220,16 @@ class MainViewModel(
         viewModelScope.launch {
             val current = mutableState.value
             if (current.loadedModelId != null || current.isLoadingModel) return@launch
+            // Prefer the profile: it restores the context size, processor, and sampling as well as
+            // the file. The model id remains the fallback for a catalog written before profiles.
+            val lastProfileId = runCatching { container.modelProfileStore.lastUsedProfileId() }
+                .getOrNull()
+            val profile = current.profiles.firstOrNull { it.id == lastProfileId }
+            if (profile != null) {
+                selectLocalModel(profile.modelId.value)
+                loadProfile(profile.id)
+                return@launch
+            }
             val lastId = runCatching { container.localModelStore.lastLoadedModelId() }.getOrNull()
                 ?: return@launch
             val model = current.localModels.firstOrNull { it.id.value == lastId } ?: return@launch
@@ -1103,6 +1249,7 @@ class MainViewModel(
                 current.copy(localModels = models, selectedRuntimeId = selected, error = null)
             }
             refreshModelStorage()
+            syncProfiles(models)
             restoreLastModel()
         }
     }
