@@ -7,6 +7,14 @@ val bramIncludeEmulatorAbi: Boolean =
         ?: providers.gradleProperty("bram.emulatorAbi").orNull)
         ?.toBooleanStrictOrNull() ?: false
 
+// Where AGP stages the CMake build tree. The default (module/.cxx) nests deeply enough that the
+// llama.cpp Vulkan shader generator's try-compiles exceed MSVC's 250-character object path limit on
+// machines with a long project root. A short absolute path (e.g. C:\Users\<you>\bramcxx) sidesteps
+// that; unset means the AGP default.
+val bramNativeStaging: String? =
+    providers.environmentVariable("BRAM_NATIVE_STAGING").orNull
+        ?: providers.gradleProperty("bram.nativeStaging").orNull
+
 android {
     namespace = "io.github.kurue.bram.runtime.llamacpp"
     compileSdk = 36
@@ -70,6 +78,9 @@ android {
             // 3.24+ is required so FetchContent auto-generates the find_package redirect for the
             // vendored SPIRV-Headers that ggml-vulkan resolves with find_package(... CONFIG).
             version = "3.30.5"
+            if (bramNativeStaging != null) {
+                buildStagingDirectory = file(bramNativeStaging)
+            }
         }
     }
 

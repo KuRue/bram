@@ -9,6 +9,7 @@ import io.github.kurue.bram.core.domain.AgentEvent
 import io.github.kurue.bram.core.domain.AgentRunRequest
 import io.github.kurue.bram.core.domain.ConversationId
 import io.github.kurue.bram.core.domain.findOffloadBoundary
+import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.ConversationSummary
 import io.github.kurue.bram.core.domain.DeviceProfile
@@ -40,6 +41,27 @@ import kotlinx.coroutines.launch
  * signal: the accelerator must agree with the CPU on nearly every teacher-forced prediction before
  * it counts as computing correctly. Exact equality is deliberately not required.
  */
+/**
+ * Auto-configure as it happens.
+ *
+ * Measuring three backends takes minutes, so the run has to be watchable rather than a frozen
+ * screen: [step] of [total] says how far in, and [results] fills in as each one finishes so the
+ * comparison is readable before the last one lands.
+ */
+data class AutoConfigureProgress(
+    val profileId: String,
+    val modelName: String,
+    val step: Int,
+    val total: Int,
+    val current: String,
+    /** Every accelerator candidate, in measurement order, so the dialog can show all of them. */
+    val candidates: List<String> = emptyList(),
+    val results: List<BackendMeasurement> = emptyList(),
+    val finished: Boolean = false,
+) {
+    val fraction: Float get() = if (total <= 0) 0f else (step.toFloat() / total).coerceIn(0f, 1f)
+}
+
 data class AcceleratorReport(
     val deviceName: String,
     val matchesCpu: Boolean,
@@ -92,10 +114,10 @@ data class AcceleratorProbe(
 
 /** Accelerator families Bram can validate against the CPU reference. */
 enum class AcceleratorTarget(val label: String, val devicePrefix: String) {
-    VULKAN("Adreno (Vulkan)", "Vulkan"),
+    VULKAN("Vulkan", "Vulkan"),
     // ggml names the OpenCL device GPUOpenCL, which is what the runtime reports back.
-    OPENCL("Adreno (OpenCL)", "GPUOpenCL"),
-    HEXAGON("Hexagon NPU", "HTP"),
+    OPENCL("OpenCL", "GPUOpenCL"),
+    HEXAGON("NPU", "HTP"),
 }
 
 /**
@@ -104,9 +126,9 @@ enum class AcceleratorTarget(val label: String, val devicePrefix: String) {
  */
 enum class RuntimeBackend(val label: String, val devicePrefix: String) {
     CPU("CPU", ""),
-    VULKAN("Adreno GPU", "Vulkan"),
-    OPENCL("Adreno OpenCL", "GPUOpenCL"),
-    HEXAGON("Hexagon NPU", "HTP"),
+    VULKAN("Vulkan", "Vulkan"),
+    OPENCL("OpenCL", "GPUOpenCL"),
+    HEXAGON("NPU", "HTP"),
     ;
 
     val offloadsToAccelerator: Boolean get() = this != CPU
@@ -259,6 +281,8 @@ data class AppUiState(
     /** What the currently loaded model is actually running on. */
     val loadedBackend: RuntimeBackend? = null,
     val isValidatingAccelerator: Boolean = false,
+    /** Present while auto-configure runs. The dialog is shown for exactly as long as this is. */
+    val autoConfigure: AutoConfigureProgress? = null,
     val acceleratorReport: AcceleratorReport? = null,
     val acceleratorBisection: AcceleratorBisection? = null,
 ) {
@@ -423,20 +447,26 @@ class MainViewModel(
      * that cannot load. CPU is always present; the rest depend on build flags and hardware.
      */
     private fun detectBackends() {
-        viewModelScope.launch {
-            val detected = runCatching {
-                val devices = container.llamaCppClient.devices()
-                val names = (0 until devices.optJSONArray("devices")?.length().orZero())
-                    .map { index -> devices.getJSONArray("devices").getJSONObject(index).optString("name") }
-                listOf(RuntimeBackend.CPU) + RuntimeBackend.entries.filter { backend ->
-                    backend.offloadsToAccelerator && names.any { it.startsWith(backend.devicePrefix) }
-                }
-            }.getOrDefault(listOf(RuntimeBackend.CPU))
-            mutableState.update { current ->
-                current.copy(availableBackends = detected)
+        viewModelScope.launch { mutableState.update { it.copy(availableBackends = detectBackendsNow()) } }
+    }
+
+    /**
+     * What the runtime can actually see right now.
+     *
+     * Suspends rather than launching, because a caller about to choose a backend needs the answer
+     * before it chooses, not shortly afterwards.
+     */
+    private suspend fun detectBackendsNow(): List<RuntimeBackend> {
+        // The CPU is always there, so a runtime that cannot be asked still yields a usable answer
+        // rather than an empty list that would make every profile look unloadable.
+        return runCatching {
+            val devices = container.llamaCppClient.devices()
+            val names = (0 until devices.optJSONArray("devices")?.length().orZero())
+                .map { index -> devices.getJSONArray("devices").getJSONObject(index).optString("name") }
+            listOf(RuntimeBackend.CPU) + RuntimeBackend.entries.filter { backend ->
+                backend.offloadsToAccelerator && names.any { it.startsWith(backend.devicePrefix) }
             }
-            refreshDeviceProfile()
-        }
+        }.getOrDefault(listOf(RuntimeBackend.CPU))
     }
 
     /** Removes model copies nothing in the catalog references and reports what was reclaimed. */
@@ -557,13 +587,12 @@ class MainViewModel(
         val restoreLoaded = snapshot.loadedModelId
 
         viewModelScope.launch {
-            mutableState.update {
-                it.copy(isValidatingAccelerator = true, error = null, status = "Measuring backends…")
-            }
-            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-            val threads = (visibleCores - 2).coerceIn(1, 4)
+            // Ask the runtime what it can see now rather than trusting what was detected at start.
+            // The inference process restarts across loads, and a backend that registered late was
+            // missing from the list, so a profile configured for it silently loaded on the CPU.
+            val backends = detectBackendsNow()
 
-            val candidates = snapshot.availableBackends
+            val candidates = backends
                 .filter(RuntimeBackend::offloadsToAccelerator)
                 .mapNotNull { backend ->
                     AcceleratorTarget.entries
@@ -571,16 +600,67 @@ class MainViewModel(
                         ?.let { backend to it }
                 }
 
+            // The CPU is the reference every other result is expressed against, so it is in the
+            // list from the start at exactly 1.0x rather than being implied by the others.
+            val reference = BackendMeasurement(
+                backendId = "",
+                label = RuntimeBackend.CPU.label,
+                agrees = true,
+                agreement = 1.0,
+                speedup = 1.0,
+            )
+            mutableState.update {
+                it.copy(
+                    isValidatingAccelerator = true,
+                    error = null,
+                    availableBackends = backends,
+                    autoConfigure = AutoConfigureProgress(
+                        profileId = profile.id,
+                        modelName = profile.name,
+                        step = 0,
+                        total = candidates.size,
+                        current = RuntimeBackend.CPU.label,
+                        candidates = candidates.map { it.second.label },
+                        results = listOf(reference),
+                    ),
+                )
+            }
+
+            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            val threads = (visibleCores - 2).coerceIn(1, 4)
             val measured = mutableListOf<Pair<RuntimeBackend, AcceleratorReport>>()
-            for ((backend, target) in candidates) {
-                mutableState.update { it.copy(status = "Measuring ${backend.label}…") }
-                // One backend failing is a result, not an error: it means do not use that one.
+
+            for ((index, candidate) in candidates.withIndex()) {
+                val (backend, target) = candidate
+                mutableState.update {
+                    it.copy(
+                        autoConfigure = it.autoConfigure?.copy(step = index, current = backend.label),
+                    )
+                }
+                // A backend failing is a result, not an error: it means do not use that one. It is
+                // recorded as a failure so the card can say so rather than leaving it unexplained.
                 val report = runCatching {
                     measureBackend(model, target, threads) { message ->
-                        mutableState.update { it.copy(status = message) }
+                        mutableState.update {
+                            it.copy(autoConfigure = it.autoConfigure?.copy(current = message))
+                        }
                     }
                 }.getOrNull()
                 if (report != null) measured += backend to report
+                val result = BackendMeasurement(
+                    backendId = backend.name,
+                    label = backend.label,
+                    agrees = report?.matchesCpu == true,
+                    agreement = report?.agreement ?: 0.0,
+                    speedup = report?.speedup ?: 0.0,
+                )
+                mutableState.update {
+                    it.copy(
+                        autoConfigure = it.autoConfigure?.let { progress ->
+                            progress.copy(step = index + 1, results = progress.results + result)
+                        },
+                    )
+                }
             }
 
             val best = measured
@@ -598,19 +678,36 @@ class MainViewModel(
                 else -> "No accelerator agreed with the CPU, so this runs on the CPU."
             }
 
+            val results = mutableState.value.autoConfigure?.results.orEmpty()
             container.modelProfileStore.save(
                 profile.copy(
                     backendId = best?.first?.takeIf { it != RuntimeBackend.CPU }?.name.orEmpty(),
+                    measurements = results.sortedWith(
+                        // Winner first, failures last: the order a person reads it in.
+                        compareByDescending<BackendMeasurement> { it.agrees }
+                            .thenByDescending { it.speedup },
+                    ),
                     autoConfiguredNote = note,
                     autoConfiguredAtEpochMillis = System.currentTimeMillis(),
                 ),
             )
             runCatching { unloadModelInternal(forget = false) }
-            mutableState.update { it.copy(isValidatingAccelerator = false, status = note) }
+            mutableState.update {
+                it.copy(
+                    isValidatingAccelerator = false,
+                    status = null,
+                    autoConfigure = it.autoConfigure?.copy(finished = true, current = note),
+                )
+            }
             refreshDeviceProfile()
             reloadProfiles(selectId = profile.id)
             restoreLoaded?.let { loadModel(it) }
         }
+    }
+
+    /** Closes the auto-configure dialog. The run itself has already finished by then. */
+    fun dismissAutoConfigure() {
+        mutableState.update { it.copy(autoConfigure = null) }
     }
 
     private fun today(): String = java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault())

@@ -2,6 +2,7 @@ package io.github.kurue.bram.app
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -50,10 +52,10 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -79,6 +81,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
@@ -97,6 +100,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kurue.bram.core.domain.AcceleratorCapability
 import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.CapabilityState
+import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.LocalModelRecord
@@ -104,6 +108,7 @@ import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
+import io.github.kurue.bram.core.domain.displayName
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -188,6 +193,10 @@ fun BramApp(viewModel: MainViewModel) {
             // The drawer and panels are drawn in this tree rather than in their own windows.
             // A separate window has nothing of the app behind it to sample, which is why the
             // Material sheet could not be frosted however it was configured.
+            state.autoConfigure?.let { progress ->
+                AutoConfigureOverlay(progress, onDismiss = viewModel::dismissAutoConfigure)
+            }
+
             if (drawerOpen) {
                 Scrim(onDismiss = { drawerOpen = false })
                 BramDrawer(
@@ -1041,9 +1050,10 @@ private fun ProfileCard(
     var draftName by rememberSaveable(profile.id) { mutableStateOf(profile.name) }
     var editingPrompt by rememberSaveable(profile.id) { mutableStateOf(false) }
     var draftPrompt by rememberSaveable(profile.id) { mutableStateOf(profile.systemPrompt) }
+    var showAdvanced by rememberSaveable(profile.id) { mutableStateOf(false) }
 
     GlassSurface(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
                 Modifier.fillMaxWidth().clickable(onClick = onToggleExpanded),
                 verticalAlignment = Alignment.Top,
@@ -1098,32 +1108,32 @@ private fun ProfileCard(
             }
 
             Row(
+                Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (loaded) {
-                    FilledTonalIconButton(onClick = onUnload, enabled = !busy) {
-                        StopIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(16.dp))
+                    OutlinedButton(onClick = onUnload, enabled = !busy, modifier = Modifier.weight(1f)) {
+                        Text("Unload")
                     }
-                    Text("Unload", style = MaterialTheme.typography.labelMedium)
                 } else {
-                    FilledTonalIconButton(onClick = onLoad, enabled = !locked) {
-                        PlayIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(16.dp))
+                    Button(onClick = onLoad, enabled = !locked, modifier = Modifier.weight(1f)) {
+                        Text(if (loading) "Loading…" else "Load")
                     }
-                    Text(
-                        if (loading) "Loading…" else "Load",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
                 }
             }
 
-            // What an automatic choice was based on, so it can be read rather than believed.
-            profile.autoConfiguredNote.takeIf(String::isNotBlank)?.let { note ->
-                Text(
-                    note,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            // What each processor scored, so the choice can be read rather than believed. The
+            // pills replace the sentence that used to describe only the winner.
+            if (profile.measurements.isNotEmpty()) {
+                MeasurementPills(profile.measurements, Modifier.fillMaxWidth())
+            } else {
+                profile.autoConfiguredNote.takeIf(String::isNotBlank)?.let { note ->
+                    Text(
+                        note,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
 
             if (expanded) {
@@ -1150,17 +1160,94 @@ private fun ProfileCard(
                         ) { Text("Save name") }
                         TextButton(onClick = { renaming = false }) { Text("Cancel") }
                     }
-                } else {
-                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                        TextButton(onClick = { editingPrompt = !editingPrompt }) {
-                            Text(if (profile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
+                }
+
+                // The pills above are the argument for this button: re-measuring is how the choice
+                // of backend changes, and the manual controls sit behind an expander so the card
+                // stays short until someone actually wants to turn a dial.
+                Button(onClick = onAutoConfigure, enabled = !locked, modifier = Modifier.fillMaxWidth()) {
+                    Text("Auto-configure")
+                }
+
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { showAdvanced = !showAdvanced }
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SectionLabel("Advanced settings", Modifier.weight(1f))
+                    Text(
+                        if (showAdvanced) "▲" else "▼",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (showAdvanced) {
+                    SectionLabel("Backend")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        availableBackends.forEach { candidate ->
+                            FilterChip(
+                                selected = candidate == backend,
+                                onClick = {
+                                    onUpdateProfile(
+                                        profile.copy(
+                                            backendId = if (candidate == RuntimeBackend.CPU) "" else candidate.name,
+                                        ),
+                                    )
+                                },
+                                enabled = !locked,
+                                label = { Text(candidate.label) },
+                            )
                         }
-                        // The only way left to get a second profile for one file, now that the
-                        // separate creation row is gone.
-                        TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
-                        if (canDelete) {
-                            TextButton(onClick = onDeleteProfile, enabled = !locked) { Text("Delete") }
+                    }
+
+                    SectionLabel("Context")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        contextOptions(model).forEach { tokens ->
+                            FilterChip(
+                                selected = tokens == profile.contextTokens,
+                                onClick = { onUpdateProfile(profile.copy(contextTokens = tokens)) },
+                                enabled = !locked,
+                                label = { Text(formatTokens(tokens)) },
+                            )
                         }
+                    }
+
+                    SectionLabel("Sampling")
+                    SamplerControls(
+                        profile = profile,
+                        enabled = !busy,
+                        onUpdateProfile = onUpdateProfile,
+                    )
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionLabel("Reasoning", Modifier.weight(1f))
+                        Checkbox(
+                            checked = profile.thinkingEnabled,
+                            onCheckedChange = { onUpdateProfile(profile.copy(thinkingEnabled = it)) },
+                            enabled = !busy,
+                        )
+                    }
+                }
+
+                HorizontalDivider()
+
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    TextButton(onClick = { editingPrompt = !editingPrompt }) {
+                        Text(if (profile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
+                    }
+                    // The only way left to get a second profile for one file, now that the
+                    // separate creation row is gone.
+                    TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
+                    if (canDelete) {
+                        TextButton(onClick = onDeleteProfile, enabled = !locked) { Text("Delete") }
                     }
                 }
 
@@ -1192,67 +1279,6 @@ private fun ProfileCard(
                     }
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Reasoning",
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Checkbox(
-                        checked = profile.thinkingEnabled,
-                        onCheckedChange = { onUpdateProfile(profile.copy(thinkingEnabled = it)) },
-                        enabled = !busy,
-                    )
-                }
-
-                Text("Processor", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    availableBackends.forEach { candidate ->
-                        FilterChip(
-                            selected = candidate == backend,
-                            onClick = {
-                                onUpdateProfile(
-                                    profile.copy(
-                                        backendId = if (candidate == RuntimeBackend.CPU) "" else candidate.name,
-                                    ),
-                                )
-                            },
-                            enabled = !locked,
-                            label = { Text(candidate.label) },
-                        )
-                    }
-                }
-                OutlinedButton(onClick = onAutoConfigure, enabled = !locked) {
-                    // What it does is said once, here, rather than in a paragraph underneath: the
-                    // result it writes onto the profile explains itself afterwards.
-                    Text("Auto-configure · about a minute each")
-                }
-
-                Text("Context", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    contextOptions(model).forEach { tokens ->
-                        FilterChip(
-                            selected = tokens == profile.contextTokens,
-                            onClick = { onUpdateProfile(profile.copy(contextTokens = tokens)) },
-                            enabled = !locked,
-                            label = { Text(formatTokens(tokens)) },
-                        )
-                    }
-                }
-
-                SamplerControls(
-                    profile = profile,
-                    enabled = !busy,
-                    onUpdateProfile = onUpdateProfile,
-                )
-
                 Text(
                     "${model.layerCount.takeIf { it > 0 } ?: "?"} layers · trained context " +
                         "${formatTokens(model.trainedContextTokens)} · SHA ${model.sha256.take(12)}…",
@@ -1277,7 +1303,6 @@ private fun SamplerControls(
     onUpdateProfile: (ModelProfile) -> Unit,
 ) {
     val sampler = profile.sampler
-    Text("Sampling", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
     Text(
         if (sampler.isGreedy) {
             "Temperature 0 — same answer every time"
@@ -1329,6 +1354,150 @@ private fun SamplerControls(
         valueRange = 0f..100f,
         enabled = enabled,
     )
+}
+
+/**
+ * What the processors scored, side by side.
+ *
+ * A row of pills rather than a sentence about the winner: "NPU 1.4x" beside "Vulkan failed" says
+ * what this device can do in one glance, where prose about the winner hides everything it rejected.
+ * A failure is red because it is not a slower option, it is a wrong one. The pills wrap rather than
+ * scroll, because a result someone measured and had to read is a result, not a feed.
+ */
+@Composable
+private fun MeasurementPills(measurements: List<BackendMeasurement>, modifier: Modifier = Modifier) {
+    FlowRow(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        measurements.forEach { measurement ->
+            val failed = !measurement.agrees && !measurement.isReference
+            val container = when {
+                failed -> MaterialTheme.colorScheme.error.copy(alpha = 0.22f)
+                measurement.isReference -> MaterialTheme.colorScheme.surfaceContainerHighest
+                else -> MaterialTheme.colorScheme.primaryContainer
+            }
+            val ink = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(percent = 50))
+                    .background(container)
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Text(
+                    measurement.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = ink,
+                )
+                Text(
+                    if (failed) "FAIL" else "%.2fx".format(measurement.speedup),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ink,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Auto-configure while it runs.
+ *
+ * An overlay in the app tree rather than a Dialog window, because this takes minutes and replaces
+ * every setting underneath it — a person needs to see that something is happening to it. Each
+ * processor gets a row that moves from Waiting to Measuring to its score, so the arrival of every
+ * result is visible rather than a number appearing at the bottom.
+ *
+ * It is drawn here rather than in its own window for the same reason the panels and drawer are: a
+ * separate window has nothing of the app behind it to sample, so it can never be frosted. Inside
+ * the tree it blurs the recorded backdrop like any other panel.
+ */
+@Composable
+private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDismiss: () -> Unit) {
+    Scrim(onDismiss = { if (progress.finished) onDismiss() })
+    GlassSurface(
+        modifier = Modifier
+            .align(Alignment.Center)
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp),
+        shape = RoundedCornerShape(Glass.cornerLarge),
+        alpha = Glass.chromeAlpha,
+        tint = Glass.panelTint,
+    ) {
+            Column(
+                Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    if (progress.finished) "Configured" else "Auto-configure",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    progress.modelName,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                HorizontalDivider()
+
+                // The CPU is the reference the others are measured against, so it is a row like
+                // every candidate rather than a footnote to them.
+                AutoConfigureRow(
+                    label = "CPU",
+                    status = "reference",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                progress.candidates.forEachIndexed { index, label ->
+                    val result = progress.results.getOrNull(index + 1)
+                    val measuring = !progress.finished && progress.current == label
+                    val (status, color) = when {
+                        result != null && result.agrees ->
+                            "%.2fx".format(result.speedup) to MaterialTheme.colorScheme.primary
+                        result != null -> "FAIL" to MaterialTheme.colorScheme.error
+                        measuring -> "Measuring…" to MaterialTheme.colorScheme.primary
+                        else -> "Waiting" to MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    AutoConfigureRow(label = label, status = status, color = color)
+                }
+
+                if (!progress.finished) {
+                    LinearProgressIndicator(
+                        progress = { progress.fraction },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "Step ${progress.step} of ${progress.total}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Button(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                        Text("Done")
+                    }
+            }
+        }
+    }
+}
+
+/** One processor in the auto-configure overlay: name on the left, live status on the right. */
+@Composable
+private fun AutoConfigureRow(label: String, status: String, color: Color) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            status,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = color,
+        )
+    }
 }
 
 @Composable
@@ -1752,7 +1921,7 @@ private fun AcceleratorRow(capability: AcceleratorCapability) {
             }
             Text(marker, modifier = Modifier.width(28.dp), fontWeight = FontWeight.Bold)
             Column {
-                Text(capability.kind.name.replace('_', ' '), fontWeight = FontWeight.Medium)
+                Text(capability.kind.displayName, fontWeight = FontWeight.Medium)
                 Text(capability.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -1810,6 +1979,21 @@ private fun SectionHeader(title: String, subtitle: String = "", modifier: Modifi
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/**
+ * A caption inside a card that names what the controls below it set. Quieter than a heading,
+ * because it labels a row of chips rather than opening a section of its own.
+ */
+@Composable
+private fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier,
+    )
 }
 
 @Composable

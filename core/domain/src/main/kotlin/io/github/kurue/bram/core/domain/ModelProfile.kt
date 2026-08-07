@@ -34,6 +34,24 @@ data class SamplerSettings(
 }
 
 /**
+ * What one processor scored against the CPU reference.
+ *
+ * [agrees] is the part that decides anything: a backend that disagrees is not a slower option, it
+ * is a wrong one, however fast it ran. Speed only ranks the backends that passed.
+ */
+data class BackendMeasurement(
+    /** [RuntimeBackend] name, or empty for the CPU reference itself. */
+    val backendId: String,
+    val label: String,
+    val agrees: Boolean,
+    val agreement: Double,
+    val speedup: Double,
+) {
+    /** The CPU is the yardstick, so it neither passes nor fails: it defines 1.0x. */
+    val isReference: Boolean get() = backendId.isEmpty()
+}
+
+/**
  * A saved way of running a model.
  *
  * These settings used to live on [LocalModelRecord], one set per imported file, which meant the
@@ -56,6 +74,14 @@ data class ModelProfile(
     val sampler: SamplerSettings = SamplerSettings(),
     val systemPrompt: String = "",
     val createdAtEpochMillis: Long = System.currentTimeMillis(),
+    /**
+     * What each processor scored the last time they were measured, best first.
+     *
+     * Kept as results rather than a sentence so the card can show them side by side: a person
+     * comparing "NPU 1.4x" against "Vulkan failed" reads the shape of the device in a glance, where
+     * a paragraph about the winner hides everything it rejected and why.
+     */
+    val measurements: List<BackendMeasurement> = emptyList(),
     /**
      * Why the processor is what it is, in words, from the last automatic measurement.
      *

@@ -10,6 +10,18 @@ enum class AcceleratorKind {
     LITERT_NPU,
 }
 
+/** What a capability row calls itself, short enough to sit beside the state marker. */
+val AcceleratorKind.displayName: String
+    get() = when (this) {
+        AcceleratorKind.CPU -> "CPU"
+        AcceleratorKind.VULKAN_GPU -> "Vulkan"
+        AcceleratorKind.OPENCL_GPU -> "OpenCL"
+        AcceleratorKind.HEXAGON_NPU -> "NPU"
+        AcceleratorKind.LITERT_CPU -> "LiteRT CPU"
+        AcceleratorKind.LITERT_GPU -> "LiteRT GPU"
+        AcceleratorKind.LITERT_NPU -> "LiteRT NPU"
+    }
+
 enum class CapabilityState {
     AVAILABLE,
     DETECTED_NOT_VALIDATED,

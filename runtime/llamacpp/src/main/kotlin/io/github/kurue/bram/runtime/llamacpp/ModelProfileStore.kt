@@ -1,6 +1,7 @@
 package io.github.kurue.bram.runtime.llamacpp
 
 import android.content.Context
+import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.ModelProfile
@@ -114,6 +115,21 @@ class ModelProfileStore(context: Context) {
         .put("repeatLastTokens", sampler.repeatLastTokens)
         .put("systemPrompt", systemPrompt)
         .put("createdAtEpochMillis", createdAtEpochMillis)
+        .put(
+            "measurements",
+            JSONArray().also { array ->
+                measurements.forEach { measurement ->
+                    array.put(
+                        JSONObject()
+                            .put("backendId", measurement.backendId)
+                            .put("label", measurement.label)
+                            .put("agrees", measurement.agrees)
+                            .put("agreement", measurement.agreement)
+                            .put("speedup", measurement.speedup),
+                    )
+                }
+            },
+        )
         .put("autoConfiguredNote", autoConfiguredNote)
         .put("autoConfiguredAtEpochMillis", autoConfiguredAtEpochMillis)
         .put("isDefault", isDefault)
@@ -136,6 +152,19 @@ class ModelProfileStore(context: Context) {
             ).sanitized(),
             systemPrompt = optString("systemPrompt"),
             createdAtEpochMillis = optLong("createdAtEpochMillis", System.currentTimeMillis()),
+            measurements = optJSONArray("measurements")?.let { array ->
+                (0 until array.length()).mapNotNull { index ->
+                    array.optJSONObject(index)?.let { entry ->
+                        BackendMeasurement(
+                            backendId = entry.optString("backendId"),
+                            label = entry.optString("label"),
+                            agrees = entry.optBoolean("agrees"),
+                            agreement = entry.optDouble("agreement", 0.0),
+                            speedup = entry.optDouble("speedup", 0.0),
+                        )
+                    }
+                }
+            }.orEmpty(),
             autoConfiguredNote = optString("autoConfiguredNote"),
             autoConfiguredAtEpochMillis = optLong("autoConfiguredAtEpochMillis", 0L),
             isDefault = optBoolean("isDefault"),

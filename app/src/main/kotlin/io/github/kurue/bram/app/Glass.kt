@@ -22,28 +22,28 @@ import androidx.compose.ui.unit.dp
  */
 object Glass {
     /** Chrome floats over content and needs more opacity to stay legible while scrolling. */
-    val chromeAlpha: Float = if (Build.VERSION.SDK_INT >= 31) 0.55f else 0.85f
+    val chromeAlpha: Float = if (Build.VERSION.SDK_INT >= 31) 0.22f else 0.45f
 
     /**
-     * Cards sit within content. Enough tint to read as an object on the field rather than a patch
-     * of it — at a third they dissolved into the background and the screen read as one wall.
+     * Cards sit within content. Enough tint that the field stays behind them, not through them,
+     * without the panel competing with its own content.
      */
-    const val CARD_ALPHA: Float = 0.46f
+    const val CARD_ALPHA: Float = 0.22f
 
-    /** Bubbles carry body text; too little opacity and the text behind them competes. */
-    const val BUBBLE_ALPHA: Float = 0.40f
+    /** Bubbles carry body text; a whisper of tint marks them without veiling the background. */
+    const val BUBBLE_ALPHA: Float = 0.14f
 
     /** Recessed detail (an expanded activity trace) sits behind body text and reads as inset. */
-    const val DETAIL_ALPHA: Float = 0.22f
+    const val DETAIL_ALPHA: Float = 0.10f
 
     /**
-     * Blur radius applied to whatever sits behind a panel. Enough that text passing under one is
-     * clearly soft, without erasing it — a panel should read as glass, not as a hole.
+     * Blur radius applied to whatever sits behind a panel. Enough that detail passing under one is
+     * softened, without the panel reading as a smudge.
      */
-    val blurRadius: Dp = 20.dp
+    val blurRadius: Dp = 16.dp
 
     /** The sheet a screen is drawn on. Darker than the cards, so those read as objects on it. */
-    val panelTint: Color = Color(0xFF1C1C22)
+    val panelTint: Color = Color(0xFF15151B)
 
     val cornerLarge: Dp = 22.dp
     val cornerMedium: Dp = 16.dp
@@ -76,7 +76,7 @@ fun GlassSurface(
     val dark = isSystemInDarkTheme()
     // Lighter than the panel rather than merely more opaque. A card tinted towards the panel's own
     // tone disappears into it however solid it is, which is what "too busy" looked like: no edges.
-    val base = if (tint.isSpecified()) tint else if (dark) Color(0xFF3C3C48) else Color.White
+    val base = if (tint.isSpecified()) tint else if (dark) Color(0xFF1E1E26) else Color.White
 
     Box(modifier.clip(shape)) {
         if (blur) {
