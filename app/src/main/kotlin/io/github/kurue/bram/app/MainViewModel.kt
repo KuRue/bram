@@ -93,6 +93,8 @@ data class AcceleratorProbe(
 /** Accelerator families Bram can validate against the CPU reference. */
 enum class AcceleratorTarget(val label: String, val devicePrefix: String) {
     VULKAN("Adreno (Vulkan)", "Vulkan"),
+    // ggml names the OpenCL device GPUOpenCL, which is what the runtime reports back.
+    OPENCL("Adreno (OpenCL)", "GPUOpenCL"),
     HEXAGON("Hexagon NPU", "HTP"),
 }
 
@@ -103,6 +105,7 @@ enum class AcceleratorTarget(val label: String, val devicePrefix: String) {
 enum class RuntimeBackend(val label: String, val devicePrefix: String) {
     CPU("CPU", ""),
     VULKAN("Adreno GPU", "Vulkan"),
+    OPENCL("Adreno OpenCL", "GPUOpenCL"),
     HEXAGON("Hexagon NPU", "HTP"),
     ;
 
@@ -445,6 +448,7 @@ class MainViewModel(
         val runtimeBackends = current.availableBackends.mapNotNull { backend ->
             when (backend) {
                 RuntimeBackend.VULKAN -> io.github.kurue.bram.core.domain.AcceleratorKind.VULKAN_GPU
+                RuntimeBackend.OPENCL -> io.github.kurue.bram.core.domain.AcceleratorKind.OPENCL_GPU
                 RuntimeBackend.HEXAGON -> io.github.kurue.bram.core.domain.AcceleratorKind.HEXAGON_NPU
                 RuntimeBackend.CPU -> null
             }

@@ -22,6 +22,46 @@ set(GGML_RPC OFF CACHE BOOL "" FORCE)
 # reference before its capability is reported as available; CPU remains the correctness oracle.
 set(GGML_VULKAN ON CACHE BOOL "" FORCE)
 
+# OpenCL for Adreno. ggml ships matmul kernels tuned for Adreno specifically, and Vulkan on this
+# hardware fails the correctness comparison in an operation every layer uses, so this is the more
+# promising GPU path here rather than a second-best one. Opt-in through BRAM_OPENCL because it adds
+# two vendored dependencies and a device without an OpenCL driver gains nothing from it.
+option(BRAM_OPENCL "Build the OpenCL backend for Adreno" OFF)
+if(BRAM_OPENCL)
+    set(GGML_OPENCL ON CACHE BOOL "" FORCE)
+    # Embed the kernels rather than shipping them beside the library: the runtime loads them from
+    # the binary, which avoids another set of asset files to keep in step with the .so.
+    set(GGML_OPENCL_EMBED_KERNELS ON CACHE BOOL "" FORCE)
+    set(GGML_OPENCL_USE_ADRENO_KERNELS ON CACHE BOOL "" FORCE)
+
+    # Android has no OpenCL SDK, so the headers come from Khronos.
+    FetchContent_Declare(
+        OpenCL-Headers
+        GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-Headers.git
+        # v2024.10.24
+        GIT_TAG 886dc9b7ff48366c2adca31d8587cf47169ba893
+        GIT_SHALLOW FALSE
+        GIT_PROGRESS TRUE
+    )
+    FetchContent_MakeAvailable(OpenCL-Headers)
+    FetchContent_GetProperties(OpenCL-Headers SOURCE_DIR _bram_opencl_headers_src)
+
+    # The library is linked against a copy of the vendor's own libOpenCL.so rather than the Khronos
+    # ICD loader. The loader enumerates drivers through an ICD registry, and this device has no
+    # /vendor/Khronos/OpenCL/vendors directory to enumerate — it reported "platform IDs not
+    # available" for exactly that reason. The vendor library is in the platform's public library
+    # list, so the real one is loaded from /vendor at runtime; this copy only satisfies the linker.
+    set(_bram_opencl_stub "${CMAKE_CURRENT_SOURCE_DIR}/opencl-stub/libOpenCL.so")
+    if(NOT EXISTS "${_bram_opencl_stub}")
+        message(FATAL_ERROR "BRAM_OPENCL needs opencl-stub/libOpenCL.so, pulled from a device.")
+    endif()
+
+    # find_package(OpenCL) has no config to find here. Seed the cache entries FindOpenCL checks —
+    # the singular ones — so it accepts these instead of searching a sysroot with no OpenCL in it.
+    set(OpenCL_INCLUDE_DIR "${_bram_opencl_headers_src}" CACHE PATH "Bram OpenCL headers" FORCE)
+    set(OpenCL_LIBRARY "${_bram_opencl_stub}" CACHE FILEPATH "Bram OpenCL link stub" FORCE)
+endif()
+
 # The NDK sysroot ships the C Vulkan headers but not the C++ bindings (vulkan/vulkan.hpp) that
 # ggml-vulkan.cpp includes. Vendor a pinned Vulkan-Headers (which provides vulkan.hpp) and point
 # find_package(Vulkan)'s include dir at it; libvulkan.so is still linked from the sysroot.

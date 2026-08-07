@@ -52,6 +52,12 @@ android {
             // cannot process them. They also have to exist as real files on disk because the NPU
             // loader resolves them through ADSP_LIBRARY_PATH rather than the APK.
             keepDebugSymbols += "**/libggml-htp-*.so"
+            // The OpenCL library is the platform's, loaded from /vendor at runtime through the
+            // uses-native-library declaration. Shipping the copy the linker was given would put a
+            // second one in the APK, and Android loads that in preference — it then fails on
+            // libcutils.so, which an app cannot see, and takes the whole native library down with
+            // it.
+            excludes += "**/libOpenCL.so"
             useLegacyPackaging = true
         }
     }
