@@ -57,6 +57,20 @@ data class ModelProfile(
     val systemPrompt: String = "",
     val createdAtEpochMillis: Long = System.currentTimeMillis(),
     /**
+     * Why the processor is what it is, in words, from the last automatic measurement.
+     *
+     * Kept so an automatic choice can be inspected instead of trusted. Empty when it was chosen by
+     * hand.
+     */
+    val autoConfiguredNote: String = "",
+    /**
+     * When that measurement was taken.
+     *
+     * It expires in practice rather than formally: free memory, thermal state, and a new build all
+     * change the answer, and a build once dropped a whole backend without saying so.
+     */
+    val autoConfiguredAtEpochMillis: Long = 0L,
+    /**
      * Whether Bram made this profile rather than the user. A model gets one on import so it is
      * usable immediately, and an untouched default can be renamed or reshaped without the user
      * having to first understand that profiles exist.
