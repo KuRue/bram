@@ -142,12 +142,34 @@ class StreamingReplyTest {
     }
 
     @Test
-    fun `a runtime that reports no tags leaves the text alone`() {
-        // Nothing is claimed about a format Bram cannot describe, rather than splitting it on tags
-        // that may not be this model's.
-        val split = streamingReply("<think>not really a block</think>", ReasoningFormat())
-        assertEquals("<think>not really a block</think>", split.visibleText)
+    fun `a runtime that reports no tags leaves unmarked text alone`() {
+        // Nothing is claimed about a format Bram cannot describe, and text with no reasoning markers
+        // is never split on a guess.
+        val split = streamingReply("Just an answer, no markup.", ReasoningFormat())
+        assertEquals("Just an answer, no markup.", split.visibleText)
         assertEquals(emptyList<String>(), split.closedReasoning)
+        assertNull(split.openReasoning)
+    }
+
+    // Some formats the runtime cannot describe (LFM2.5 among them) still emit the standard markers.
+    // Rather than show that reasoning raw, the stream falls back to <think></think> when the markers
+    // are plainly in the reply.
+
+    @Test
+    fun `an undescribed format still folds a standard think block present in the text`() {
+        val split = streamingReply("<think>weighed it</think>The answer is four.", ReasoningFormat())
+        assertEquals("The answer is four.", split.visibleText)
+        assertEquals(listOf("weighed it"), split.closedReasoning)
+        assertNull(split.openReasoning)
+    }
+
+    @Test
+    fun `an undescribed format folds reasoning that closes with no opening marker`() {
+        // LFM2.5: the prompt opens the block, so the stream is reasoning then </think> then the
+        // answer, with no <think> of its own.
+        val split = streamingReply("deliberating</think>The answer is four.", ReasoningFormat())
+        assertEquals("The answer is four.", split.visibleText)
+        assertEquals(listOf("deliberating"), split.closedReasoning)
         assertNull(split.openReasoning)
     }
 }

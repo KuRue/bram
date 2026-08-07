@@ -46,7 +46,7 @@ data class ReasoningFormat(
     val startTag: String = "",
     val endTags: List<String> = emptyList(),
 ) {
-    val isUsable: Boolean get() = startTag.isNotEmpty() && endTags.isNotEmpty()
+    val isUsable: Boolean get() = endTags.isNotEmpty() && (startTag.isNotEmpty() || startsOpen)
 }
 
 data class TokenUsage(
