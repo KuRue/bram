@@ -50,8 +50,10 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -242,7 +244,6 @@ fun BramApp(viewModel: MainViewModel) {
                                 onReclaimStorage = viewModel::reclaimModelStorage,
                                 onSelectBackend = viewModel::selectBackend,
                                 onThinkingEnabled = viewModel::setThinkingEnabled,
-                                onSelectProfile = viewModel::selectProfile,
                                 onCreateProfile = viewModel::createProfile,
                                 onUpdateProfile = viewModel::updateProfile,
                                 onDeleteProfile = viewModel::deleteProfile,
@@ -751,7 +752,6 @@ private fun ModelsScreen(
     onReclaimStorage: () -> Unit,
     onSelectBackend: (String, RuntimeBackend) -> Unit,
     onThinkingEnabled: (String, Boolean) -> Unit,
-    onSelectProfile: (String) -> Unit,
     onCreateProfile: (LocalModelRecord) -> Unit,
     onUpdateProfile: (ModelProfile) -> Unit,
     onDeleteProfile: (String) -> Unit,
@@ -767,50 +767,7 @@ private fun ModelsScreen(
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 SectionHeader("Profiles", modifier = Modifier.weight(1f))
-                Button(onClick = onImport, enabled = !state.isImporting && !state.isGenerating) { Text("Import GGUF") }
-            }
-        }
-        if (state.localModels.isNotEmpty()) {
-            item {
-                // A profile is made from a file, so choosing one is how a new profile starts. The
-                // list is short — these are imported GGUFs, not a filesystem.
-                GlassSurface(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("New profile", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            state.localModels.forEach { model ->
-                                FilterChip(
-                                    selected = false,
-                                    onClick = { onCreateProfile(model) },
-                                    enabled = !state.isGenerating && !state.isValidatingAccelerator,
-                                    label = { Text("+ ${model.displayName}") },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (state.isImporting) {
-            item {
-                GlassSurface(Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(state.importProgress?.stage ?: "Importing model", fontWeight = FontWeight.SemiBold)
-                            state.importProgress?.takeIf { it.totalBytes > 0 }?.let {
-                                Text(
-                                    "${formatBytes(it.bytesRead)} / ${formatBytes(it.totalBytes)}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        }
-                    }
-                }
+                Button(onClick = onImport, enabled = !state.isImporting && !state.isGenerating) { Text("New profile") }
             }
         }
         if (state.localModels.isEmpty() && !state.isImporting) {
@@ -847,11 +804,11 @@ private fun ModelsScreen(
                     onToggleExpanded = {
                         expandedProfileId = if (expandedProfileId == profile.id) null else profile.id
                     },
-                    onSelectProfile = { onSelectProfile(profile.id) },
                     onLoad = { onLoadProfile(profile.id) },
                     onUnload = onUnload,
                     onUpdateProfile = onUpdateProfile,
                     onDeleteProfile = { onDeleteProfile(profile.id) },
+                    onDuplicate = { onCreateProfile(model) },
                     onAutoConfigure = { onAutoConfigure(profile.id) },
                 )
             }
@@ -1028,11 +985,11 @@ private fun ProfileCard(
     availableBackends: List<RuntimeBackend>,
     canDelete: Boolean,
     onToggleExpanded: () -> Unit,
-    onSelectProfile: () -> Unit,
     onLoad: () -> Unit,
     onUnload: () -> Unit,
     onUpdateProfile: (ModelProfile) -> Unit,
     onDeleteProfile: () -> Unit,
+    onDuplicate: () -> Unit,
     onAutoConfigure: () -> Unit,
 ) {
     // Settings the runtime reads at load time cannot change under a loaded model.
@@ -1049,11 +1006,25 @@ private fun ProfileCard(
                 verticalAlignment = Alignment.Top,
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        profile.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            profile.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (expanded && !renaming) {
+                            Spacer(Modifier.width(6.dp))
+                            IconButton(
+                                onClick = { renaming = true },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                PencilIcon(
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                    Modifier.size(14.dp),
+                                )
+                            }
+                        }
+                    }
                     Text(
                         "${model.displayName} · ${model.quantization} · ${formatBytes(model.fileSizeBytes)}",
                         style = MaterialTheme.typography.bodySmall,
@@ -1083,16 +1054,23 @@ private fun ProfileCard(
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 if (loaded) {
-                    Button(onClick = onUnload, enabled = !busy) { Text("Unload") }
+                    FilledTonalIconButton(onClick = onUnload, enabled = !busy) {
+                        StopIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(16.dp))
+                    }
+                    Text("Unload", style = MaterialTheme.typography.labelMedium)
                 } else {
-                    Button(onClick = onLoad, enabled = !locked) {
-                        Text(if (loading) "Loading…" else "Load on ${backend.label}")
+                    FilledTonalIconButton(onClick = onLoad, enabled = !locked) {
+                        PlayIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(16.dp))
                     }
-                    if (!active) {
-                        OutlinedButton(onClick = onSelectProfile, enabled = !busy) { Text("Use in chat") }
-                    }
+                    Text(
+                        if (loading) "Loading…" else "Load",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
                 }
             }
 
@@ -1131,10 +1109,12 @@ private fun ProfileCard(
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                        TextButton(onClick = { renaming = true }) { Text("Rename") }
                         TextButton(onClick = { editingPrompt = !editingPrompt }) {
                             Text(if (profile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
                         }
+                        // The only way left to get a second profile for one file, now that the
+                        // separate creation row is gone.
+                        TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
                         if (canDelete) {
                             TextButton(onClick = onDeleteProfile, enabled = !locked) { Text("Delete") }
                         }
@@ -1170,14 +1150,12 @@ private fun ProfileCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Reasoning", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "Slower, and rarely needed for short questions.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Text(
+                        "Reasoning",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                     Checkbox(
                         checked = profile.thinkingEnabled,
                         onCheckedChange = { onUpdateProfile(profile.copy(thinkingEnabled = it)) },
@@ -1239,117 +1217,6 @@ private fun ProfileCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        }
-    }
-}
-
-/**
- * Chooses which saved configuration a model runs under, and names it.
- *
- * Profiles are how one GGUF becomes several usable things — a long-context one, a fast one, a
- * reasoning one — so the picker sits above the settings it decides the owner of. There is always at
- * least one, created on import, which is why deleting the last is not offered.
- */
-@Composable
-private fun ProfilePicker(
-    profiles: List<ModelProfile>,
-    activeProfile: ModelProfile,
-    locked: Boolean,
-    onSelectProfile: (String) -> Unit,
-    onCreateProfile: () -> Unit,
-    onUpdateProfile: (ModelProfile) -> Unit,
-    onDeleteProfile: (String) -> Unit,
-) {
-    var renaming by rememberSaveable(activeProfile.id) { mutableStateOf(false) }
-    var draftName by rememberSaveable(activeProfile.id) { mutableStateOf(activeProfile.name) }
-
-    Text("Profile", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        profiles.forEach { profile ->
-            FilterChip(
-                selected = profile.id == activeProfile.id,
-                onClick = { onSelectProfile(profile.id) },
-                enabled = !locked,
-                label = { Text(profile.name) },
-            )
-        }
-        FilterChip(
-            selected = false,
-            onClick = onCreateProfile,
-            enabled = !locked,
-            label = { Text("+ New") },
-        )
-    }
-
-    var editingPrompt by rememberSaveable(activeProfile.id) { mutableStateOf(false) }
-    var draftPrompt by rememberSaveable(activeProfile.id) { mutableStateOf(activeProfile.systemPrompt) }
-
-    // Renaming is safe at any time; it is the only edit here that the runtime never reads.
-    if (renaming) {
-        OutlinedTextField(
-            value = draftName,
-            onValueChange = { draftName = it },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            label = { Text("Profile name") },
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = {
-                    // A profile with no name is unpickable in the chip row, so an empty field keeps
-                    // the old one rather than producing a blank chip.
-                    draftName.trim().takeIf(String::isNotEmpty)?.let { name ->
-                        onUpdateProfile(activeProfile.copy(name = name))
-                    }
-                    renaming = false
-                },
-            ) { Text("Save") }
-            TextButton(onClick = { renaming = false }) { Text("Cancel") }
-        }
-    } else {
-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            TextButton(onClick = { renaming = true }) { Text("Rename") }
-            TextButton(onClick = { editingPrompt = !editingPrompt }) {
-                Text(if (activeProfile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
-            }
-            if (profiles.size > 1) {
-                TextButton(
-                    onClick = { onDeleteProfile(activeProfile.id) },
-                    enabled = !locked,
-                ) { Text("Delete profile") }
-            }
-        }
-    }
-
-    if (editingPrompt) {
-        OutlinedTextField(
-            value = draftPrompt,
-            onValueChange = { draftPrompt = it },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 3,
-            maxLines = 8,
-            label = { Text("Instructions for this profile") },
-        )
-        Text(
-            "Added to Bram's own instructions rather than replacing them, so a profile can change " +
-                "how Bram answers without dropping the rules that keep a run honest.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = {
-                    onUpdateProfile(activeProfile.copy(systemPrompt = draftPrompt.trim()))
-                    editingPrompt = false
-                },
-            ) { Text("Save") }
-            TextButton(onClick = {
-                draftPrompt = activeProfile.systemPrompt
-                editingPrompt = false
-            }) { Text("Cancel") }
         }
     }
 }

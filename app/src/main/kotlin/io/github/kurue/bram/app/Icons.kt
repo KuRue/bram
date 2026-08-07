@@ -128,3 +128,43 @@ fun StopIcon(tint: Color, modifier: Modifier = Modifier) {
         )
     }
 }
+
+/** Load: the play triangle, which everywhere else means "start this". */
+@Composable
+fun PlayIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val inset = size.minDimension * 0.28f
+        val path = Path().apply {
+            moveTo(inset, inset)
+            lineTo(size.width - inset, size.height / 2f)
+            lineTo(inset, size.height - inset)
+            close()
+        }
+        drawPath(path, tint)
+    }
+}
+
+/** Rename: a pencil, angled the way one is held. */
+@Composable
+fun PencilIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.09f
+        val inset = size.minDimension * 0.24f
+        // The shaft.
+        drawLine(
+            tint,
+            androidx.compose.ui.geometry.Offset(inset, size.height - inset),
+            androidx.compose.ui.geometry.Offset(size.width - inset, inset),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        // The tip, drawn as a short cross-stroke so the shape reads as a pencil rather than a line.
+        drawLine(
+            tint,
+            androidx.compose.ui.geometry.Offset(inset, size.height - inset),
+            androidx.compose.ui.geometry.Offset(inset + stroke * 2f, size.height - inset - stroke * 2f),
+            strokeWidth = stroke * 0.8f,
+            cap = StrokeCap.Round,
+        )
+    }
+}

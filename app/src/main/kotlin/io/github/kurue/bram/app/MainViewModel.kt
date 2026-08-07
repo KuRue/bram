@@ -602,24 +602,6 @@ class MainViewModel(
     private fun today(): String = java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault())
         .format(java.util.Date())
 
-    /** Switches which profile a model runs under, without loading it. */
-    fun selectProfile(profileId: String) {
-        val profile = mutableState.value.profiles.firstOrNull { it.id == profileId } ?: return
-        viewModelScope.launch {
-            // Switching away from the profile the runtime was loaded with leaves the two
-            // disagreeing, so the load goes rather than quietly meaning something else.
-            if (mutableState.value.loadedModelId != null &&
-                mutableState.value.activeProfileId != profileId
-            ) {
-                unloadModelInternal(forget = false)
-            }
-            mutableState.update {
-                it.copy(activeProfileId = profileId, selectedRuntimeId = profile.modelId.value)
-            }
-            container.modelProfileStore.setLastUsedProfileId(profileId)
-        }
-    }
-
     /**
      * Adds a profile for a model, copied from the one it is running under.
      *
