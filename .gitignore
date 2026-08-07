@@ -34,3 +34,7 @@ model-cache/
 # Logs and scratch output
 *.log
 tmp/
+
+# Pulled from a device to satisfy the linker for BRAM_OPENCL builds. Qualcomm's binary, and
+# device-specific, so it is not ours to redistribute; the CMake says how to obtain it.
+runtime/llamacpp/src/main/cpp/opencl-stub/

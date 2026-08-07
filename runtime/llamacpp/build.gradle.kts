@@ -41,6 +41,14 @@ android {
                         "-DHEXAGON_SDK_ROOT=$hexagonSdkRoot",
                     )
                 }
+                // OpenCL for Adreno. Opt-in like Hexagon, though for a different reason: it needs
+                // no proprietary SDK, but it fetches two Khronos repositories and is worth nothing
+                // on a device whose driver does not expose OpenCL. Off unless asked for.
+                val openCl = providers.environmentVariable("BRAM_OPENCL").orNull
+                    ?: providers.gradleProperty("bram.opencl").orNull
+                if (openCl.toBoolean() && !bramIncludeEmulatorAbi) {
+                    arguments += listOf("-DBRAM_OPENCL=ON")
+                }
             }
         }
 
