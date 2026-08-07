@@ -1525,7 +1525,7 @@ private fun MessageBody(
     onDraftChange: (String) -> Unit,
     onSubmit: () -> Unit,
 ) {
-    message.activity.forEach { entry -> ActivityRow(entry) }
+    ActivityList(message.id.value, message.activity)
     if (editing) {
         OutlinedTextField(
             value = draft,
@@ -1629,7 +1629,7 @@ private fun ToolApprovalCard(
  * they bury the answer — a small model can spend several paragraphs deciding how to say hello.
  */
 @Composable
-private fun ActivityRow(entry: AgentActivity) {
+private fun ActivityRow(entry: AgentActivity, number: Int? = null) {
     var expanded by rememberSaveable(entry.summary) { mutableStateOf(false) }
     val detail = when (entry) {
         is AgentActivity.Thinking -> entry.text
@@ -1653,7 +1653,7 @@ private fun ActivityRow(entry: AgentActivity) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "$glyph ${entry.summary}",
+                "${number?.let { "$it. " } ?: ""}$glyph ${entry.summary}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
@@ -1680,6 +1680,44 @@ private fun ActivityRow(entry: AgentActivity) {
                     modifier = Modifier.padding(10.dp),
                 )
             }
+        }
+    }
+}
+
+/**
+ * The reasoning and tool steps a turn took.
+ *
+ * A single step renders directly. Several collapse into one summary line - "Thought 8s - 3 tools" -
+ * so a turn that searches, reads a page, and writes a note does not push the answer off the screen.
+ * Each step is still there, numbered, once expanded.
+ */
+@Composable
+private fun ActivityList(messageId: String, activity: List<AgentActivity>) {
+    if (activity.isEmpty()) return
+    if (activity.size == 1) {
+        ActivityRow(activity.first())
+        return
+    }
+    var expanded by rememberSaveable("$messageId-activity") { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+        Row(
+            Modifier.fillMaxWidth().clickable { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "⌁ ${summariseActivity(activity)}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                if (expanded) "▲" else "▼",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (expanded) {
+            activity.forEachIndexed { index, entry -> ActivityRow(entry, number = index + 1) }
         }
     }
 }
