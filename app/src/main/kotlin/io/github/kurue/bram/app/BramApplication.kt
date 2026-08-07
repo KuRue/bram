@@ -59,7 +59,12 @@ class AppContainer(application: Application) {
     val conversationStore = ConversationStore(application)
     val memoryStore = InMemoryMemoryStore()
     private val toolRegistry = StaticToolRegistry(
-        listOf(DeviceStatusTool(deviceProfiler), ScratchNoteTool(application)),
+        listOf(
+            DeviceStatusTool(deviceProfiler),
+            ScratchNoteTool(application),
+            WebSearchTool(),
+            WebFetchTool(),
+        ),
     )
 
     fun runtime(endpoint: RemoteEndpoint) = OpenAiCompatibleRuntime(
