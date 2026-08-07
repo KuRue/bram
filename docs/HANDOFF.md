@@ -7,36 +7,26 @@ Last updated: 2026-08-07
 | Item | Value |
 |---|---|
 | Repository | Private `KuRue/bram` |
-| main | [`27fd7e3`](https://github.com/KuRue/bram/commit/27fd7e3) — through tool permissions and a callable tool (#16) |
+| main | [`664716f`](https://github.com/KuRue/bram/commit/664716f) — through auto-configure (#20) |
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
 | Test emulator | AVD `Pixel_9a`, x86_64, 6 GB RAM / 16 GB storage |
 | Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone, tool-capable), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
 
-main is healthy and CI-green. Everything below that is not yet on main is on a
-feature branch, verified but unmerged.
+main is healthy and CI-green. The auto-configure UI work (profile card, glass tuning, the
+auto-configure overlay) is merged as #20. The local Windows checkout is on `main` at #20; the WSL
+build tree is a synced copy of the same working tree.
 
-## In flight (feature branches, ready to merge)
+## Landed since the previous refresh
 
-- **`milestone-8b-profile-first`** — profile UI polish: a real "New profile"
-  entry (a model picker) separate from "Import model", a top-k sampler slider,
-  and six dead `ModelsScreen` callbacks removed. Compile + unit verified.
-- **`milestone-8c-opencl`** — the OpenCL backend. The earlier "cause unknown"
-  load abort is fixed: `ggml_backend_sched_new` requires the CPU backend to be
-  last, and Bram's accelerator-only device list violated that, so the CPU
-  device is now appended after the matched accelerator. Validated on the S25
-  Ultra at 96% (23/24) agreement, 1.11x vs CPU on Qwen3.5-Q4_0. OpenCL is opt-in
-  (`BRAM_OPENCL=true`), needs the uncommitted `runtime/llamacpp/src/main/cpp/
-  opencl-stub/libOpenCL.so` vendor stub (CI cannot build it), and `GGML_OPENCL`
-  is cached in `.cxx` so toggling it means deleting `.cxx`. The in-tree commit
-  message still says "cause unknown" and is outdated.
-- **`agent-tools`** — transcript and the agent surface. A multi-step turn
-  collapses to one expandable summary line ("Thought 8s · 3 tools"); new
-  `web_search` (DuckDuckGo, no key) and `web_fetch` (page to text) tools behind
-  the approval gate, scoped to the query or URL; `web_fetch` follows redirects
-  by hand with a cap and sends browser-like headers with gzip decoding; LFM2.5
-  reasoning now folds (it reported an unusable format, so the streamer falls
-  back to `<think>`/`</think>`). 60+ unit tests; the web tools were exercised on
-  the phone. Reasoning-folding is unit-tested only, not yet driven on device.
+- **`milestone-8b-profile-first` (#17)** — profile-first UI, merged.
+- **`milestone-8c-opencl` (#18)** — OpenCL for Adreno, validated: 96% (23/24) teacher-forced
+  agreement, 1.11x vs CPU on Qwen3.5-Q4_0 on the S25 Ultra. The load abort was `ggml_backend_sched_new`
+  requiring the CPU backend last in the device list.
+- **`agent-tools` (#19)** — web_search/web_fetch behind the approval gate, transcript summaries.
+- **`m8d-autoconfigure-ui` (#20)** — auto-configure: measures every backend against the CPU
+  reference, records results on the profile, picks the fastest that agreed, and shows the run live
+  in an in-tree overlay that blurs the app behind it. Also fixes a silent CPU fallback (backend
+  detection now queries the runtime synchronously before choosing) and darkens/opens up the glass.
 
 ## What works (on main)
 
@@ -46,10 +36,13 @@ streaming, cancellation, unload, and recovery from a killed inference process.
 Validated on the S25 Ultra.
 
 **Accelerators.** Hexagon NPU passes on the S25 Ultra at 23/24 (95.8%)
-teacher-forced agreement, ~1.7x CPU. Vulkan on the same device fails: 75%
+teacher-forced agreement, ~1.7x CPU. OpenCL (Adreno 830) passes at 23/24
+(96%), 1.11x CPU on Qwen3.5-Q4_0. Vulkan on the same device fails: 75%
 agreement with one offloaded layer, collapsing to all-zero logits past about
 seven, with no error reported. Vulkan compiles and is offered, but is not
-validated.
+validated. Auto-configure measures whichever backends the build and device
+offer and records the results on the profile; NPU routing was re-verified
+after the backend changes (all four htp skels packaged and loaded).
 
 **Conversations.** Persisted as one JSON file each with a rebuildable index.
 Multiple threads, New and History, titles from the first message, restored on
@@ -80,8 +73,7 @@ is the one tool a local model can call end to end. (More tools live on
 - **Tools beyond `device_status` and `write_note`.** `web_search`/`web_fetch`
   are on `agent-tools`, not main.
 - **Memory, skills, automations.** Interfaces only.
-- **OpenCL and LiteRT.** OpenCL is on `milestone-8c-opencl`, validated; LiteRT is
-  not started.
+- **LiteRT.** Not started.
 - **Remote endpoints.** Optional and non-streaming.
 
 ## Known issues
@@ -132,17 +124,27 @@ to get wrong:
 - **WSL is the recommended local environment.** Incremental native rebuilds take
   seconds there against ~12 minutes in CI, and its Linux host compiler avoids the
   MSVC requirement Windows hosts hit building `vulkan-shaders-gen`.
-- **Hexagon is opt-in** through `HEXAGON_SDK_ROOT`, since the SDK is proprietary
-  and absent on CI. The SDK is not installed on this machine; extract it via the
-  Docker image in BUILDING.md before any NPU build.
-- **OpenCL is opt-in** through `BRAM_OPENCL=true`, additionally needs the
-  uncommitted `opencl-stub/libOpenCL.so`, and toggling it means clearing `.cxx`.
-- **Emulator builds are opt-in** through `BRAM_EMULATOR_ABI=true`, which adds
-  `x86_64`. Bram is otherwise ARM64-only.
+- **Hexagon is opt-in** through `HEXAGON_SDK_ROOT`. The SDK is proprietary and
+  absent on CI, but it IS installed on this machine now: extracted to
+  `/home/s14/hexagon/6.6.0.0` in WSL (via the Docker image in BUILDING.md) and
+  `C:\Users\S14\hexagon\6.6.0.0` on Windows; `bram.hexagonSdkRoot` in
+  `~/.gradle/gradle.properties` on both hosts. Note `qaic` is a Linux binary —
+  the NPU build runs in WSL, not on Windows.
+- **WSL is the working build environment on this machine.** The tree lives at
+  `/home/s14/bram-build` (synced from the Windows checkout), with
+  `bram.hexagonSdkRoot`, `bram.opencl=true`, and `bram.nativeStaging=/home/s14/bramcxx`
+  in `~/.gradle/gradle.properties`, and `sdk.dir` in `local.properties`. A cold
+  native build is ~5 minutes; incremental Kotlin builds are seconds.
+- **Windows native builds** work too but need `vcvars64.bat` on PATH (for
+  `vulkan-shaders-gen`) and a short staging path
+  (`bram.nativeStaging=C:/Users/S14/bramcxx` in `~/.gradle/gradle.properties`)
+  to stay under MSVC's 250-character object-path limit.
 - **Debug signing across hosts.** Gradle signs with the host's debug keystore, so
   APKs from CI, Windows, and WSL differ and cannot install over each other
   (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Point builds at one shared keystore with
   `BRAM_DEBUG_KEYSTORE` (passwords default to `android` / `androiddebugkey`).
+  The WSL build currently copies the Windows `debug.keystore` into
+  `~/.android/debug.keystore` — the `BRAM_DEBUG_KEYSTORE` knob is the clean fix.
 - Keep `ninja` on `PATH`; several native sub-builds inherit the generator without
   the make program.
 
@@ -174,13 +176,18 @@ visible when the app actually ran.
 
 ## Next
 
-1. Merge the three ready branches when happy — `milestone-8b-profile-first`,
-   `milestone-8c-opencl`, `agent-tools`. Each is self-contained and verified.
-2. Verify the NPU still routes after backend changes. Needs an arm64 build with
-   `HEXAGON_SDK_ROOT`; Hexagon is validated at 95.8% / ~1.7x on main today.
-3. Vulkan correctness — fails in a shared operation on Adreno 830. Still open.
-4. A larger tool-capable model for agentic use. The web tools and approval gate
+1. Milestone 7 completion — the current focus: FlashAttention (confirm on the
+   Hexagon HTP path before enabling), KV cache quantization, batch tuning, and
+   telling the user whether a loaded model's KV cache can be reused at all
+   (LFM2.5 is hybrid and cannot trim; Qwen3.5 is a pure-attention model and
+   should finally show the KV-reuse gain on the emulator). Every step verified
+   with the teacher-forced comparison before it is called working.
+2. A larger tool-capable model for agentic use. The web tools and approval gate
    work; LFM2.5-2.6B cannot chain tools reliably.
+3. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
+   the validated GPU path, so chasing Vulkan is low priority unless OpenCL's
+   1.11x needs replacing.
+4. In-app model download — the biggest new-user gap left (deferred since M1).
 
-Reasoning-folding for LFM2.5 (`agent-tools`) is unit-tested only; confirm on
-device with a reasoning turn when convenient.
+Reasoning-folding for LFM2.5 is unit-tested only; confirm on device with a
+reasoning turn when convenient.

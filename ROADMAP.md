@@ -63,8 +63,9 @@ for the next-token prediction at each position — because free-running generati
 token derail everything after it, making a small numerical difference indistinguishable from a
 broken kernel.
 
-Deferred to a later milestone: OpenCL, LiteRT, automatic plan selection and probation runs,
-storage-assisted mode, and a multi-vendor device matrix. KV and batch tuning became Milestone 7.
+Deferred to a later milestone: LiteRT, probation runs, storage-assisted mode, and a multi-vendor
+device matrix. KV and batch tuning became Milestone 7. OpenCL landed as Milestone 8c, and automatic
+plan selection as Milestone 8d.
 
 ## Milestones 3 to 6 — a usable local assistant (complete)
 
@@ -92,6 +93,10 @@ showed it is the largest user-visible cost left. Every turn built a fresh `llama
 re-decoded the whole prompt, so at the measured 16.2 tok/s prompt speed a conversation grown to
 2,000 tokens spent about two minutes before its first token, worsening with every turn.
 
+In progress as of 8d: the remaining items are FlashAttention (CPU-supported, to be confirmed on the
+Hexagon HTP path before enabling there), KV cache quantization, batch tuning, and telling the user
+whether a loaded model can reuse its KV cache at all.
+
 - **KV reuse across turns.** Keep the context alive between turns, keep the longest common token
   prefix, and decode only what is new. Implemented and correct, but it buys nothing on the current
   reference model: `LFM2.5-2.6B` is a hybrid convolution/attention architecture, and llama.cpp
@@ -111,9 +116,9 @@ Exit criterion: each optimization reproduces the CPU reference under teacher for
 reported as working. A prefix-matching bug produces plausible wrong output rather than a crash,
 which is the failure mode that already made a broken Vulkan backend look healthy.
 
-## Milestone 8 — model profiles (not started)
+## Milestone 8 — model profiles (complete)
 
-Replaces the model card with saved configurations. Per-model preferences already exist as fields on
+Replaced the model card with saved configurations. Per-model preferences already exist as fields on
 the GGUF record; this makes them a named record instead, many profiles to one file.
 
 - A profile owns a name, a GGUF reference, sampler settings, context size, backend, reasoning
@@ -133,7 +138,7 @@ the GGUF record; this makes them a named record instead, many profiles to one fi
 Ordering note: Milestone 7 lands first so profiles have the KV and attention settings to expose,
 rather than needing a second pass to add them.
 
-## Milestone 8b — profile-first, and provisioned for the user (not started)
+## Milestone 8b — profile-first, and provisioned for the user (complete)
 
 Profiles exist and drive loading, but the screen is still a list of files with profile controls
 nested inside each one. The asked-for shape is the other way round: a list of profiles, each naming
@@ -161,7 +166,12 @@ provisioning belongs on the foreground-service path with visible progress, not b
 which ties it to the task queue in Milestone 13. And it must degrade quietly: no accelerator present
 means CPU, every accelerator failing validation means CPU, and neither is an error.
 
-## Milestone 8c — OpenCL for Adreno (builds and initialises; loading crashes)
+Result: complete. Profile-first landed as #17; the provisioning half (measure every backend, choose
+the fastest that agrees with CPU, say why, allow it to be redone) landed as Milestone 8d (#20), which
+records each measurement on the profile so the card shows the full shape of the device rather than a
+sentence about the winner.
+
+## Milestone 8c — OpenCL for Adreno (complete)
 
 The backend builds for ARM64 and the driver comes up on the S25 Ultra:
 
@@ -177,13 +187,35 @@ taking the whole native library down.
 
 **Loading a model then aborts** in `ggml_backend_dev_type` under `load_tensors`, whatever backend is
 requested — CPU included. So registering the OpenCL backend breaks loading rather than only
-offloading to it, and the cause is not yet known. Left opt-in and off; `main` is unaffected.
+offloading to it. The cause turned out to be the device list handed to `ggml_backend_sched_new`,
+which requires the CPU backend to be last: Bram's accelerator-only list violated that, and appending
+the CPU device after the matched accelerator fixed it. Validated on the S25 Ultra at 96% (23/24)
+teacher-forced agreement, 1.11x vs CPU on Qwen3.5-Q4_0 (#18). OpenCL is opt-in
+(`BRAM_OPENCL=true`) and needs the uncommitted `runtime/llamacpp/src/main/cpp/
+opencl-stub/libOpenCL.so` vendor stub, so CI cannot build this backend.
 
 Two cautions for whoever picks this up. `GGML_OPENCL` is FORCE-set into the CMake cache, so turning
-`BRAM_OPENCL` off does not remove it — the `.cxx` directory has to be deleted, exactly as the
+`BRAM_OPENCL` off does not remove it — the staging directory has to be deleted, exactly as the
 Hexagon regression required. And the linker needs a copy of the vendor `libOpenCL.so` pulled from a
 device, which is not committed: it is Qualcomm's binary and device-specific, so CI cannot build this
 backend at all.
+
+## Milestone 8d — auto-configure (complete)
+
+Auto-configure measures every accelerator the build and device offer against the CPU reference,
+records each score on the profile, and picks the fastest backend that agreed (#20). The card lists
+the results as measured — "NPU 1.4x" beside "Vulkan FAIL" — rather than a sentence about the winner,
+so what was rejected and why stays visible.
+
+- A failed backend is a recorded result, not an error; agreement gates everything, speed only ranks
+  the backends that passed.
+- Backend detection now asks the runtime synchronously before choosing. The inference process
+  restarts across loads, and a backend that registered late was missing from the start-up list, so a
+  profile configured for it silently loaded on the CPU.
+- The run is watchable: a step counter, a live status per candidate, and results that fill in as
+  each measurement lands, in an overlay that blurs the app behind it. The overlay is drawn in the
+  app tree rather than a Dialog window, for the reason the panels and drawer already learned: a
+  separate window has nothing of the app behind it to sample and cannot be frosted.
 
 ### Why it is worth trying
 
@@ -208,7 +240,7 @@ Two platform facts shape all of it, and are recorded in
 - Therefore Bram cannot host stdio MCP servers, since those are spawned as child processes, and it
   cannot ship its own shell without a Termux-sized userland.
 
-## Milestone 9 — permissions and the tool contract (not started)
+## Milestone 9 — permissions and the tool contract (complete)
 
 The seam exists: `ToolApprovalGate` sits in the tool loop, tools already carry `readOnly` and
 `requiredPermissions`, and a denial already comes back as a `permission_denied` tool result rather
@@ -227,7 +259,7 @@ has exactly one tool worth calling.
 Exit criterion: a tool cannot reach a side effect without a recorded decision, and a denied call
 leaves the run able to continue.
 
-## Milestone 10 — local tool calling (not started)
+## Milestone 10 — local tool calling (complete)
 
 Found while trying to exercise the approval gate on a device: **the local runtime never sends
 tools**. `GenerationRequest.tools` is populated and reaches `LlamaCppRuntime`, which passes the
