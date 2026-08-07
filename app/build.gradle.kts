@@ -68,6 +68,10 @@ dependencies {
     implementation(composeBom)
     androidTestImplementation(composeBom)
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    // The android.jar on the unit-test classpath stubs org.json and throws from every method, so
+    // the real implementation goes in behind it.
+    testImplementation(libs.org.json)
     implementation(libs.compose.ui)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)

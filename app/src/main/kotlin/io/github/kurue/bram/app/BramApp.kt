@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,6 +35,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
@@ -82,6 +85,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -96,6 +100,7 @@ import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -134,6 +139,7 @@ fun BramApp(viewModel: MainViewModel) {
                     state = state,
                     onRegenerate = viewModel::regenerateLastReply,
                     onEdit = viewModel::editAndResend,
+                    onResolveApproval = viewModel::resolveApproval,
                 )
             }
 
@@ -144,7 +150,10 @@ fun BramApp(viewModel: MainViewModel) {
                 Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .height(TOP_FADE_HEIGHT)
+                    .height(
+                        WindowInsets.statusBars.asPaddingValues().calculateTopPadding() +
+                            TOP_FADE_HEIGHT,
+                    )
                     .background(
                         Brush.verticalGradient(
                             listOf(
@@ -240,6 +249,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onSaveEndpoint = viewModel::saveEndpoint,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onRefreshDiagnostics = viewModel::refreshDeviceProfile,
+                                onWithdrawToolPermission = viewModel::withdrawToolPermission,
                             )
                         }
                     }
@@ -534,6 +544,7 @@ private fun ChatTranscript(
     state: AppUiState,
     onRegenerate: () -> Unit,
     onEdit: (String, String) -> Unit,
+    onResolveApproval: (ToolApprovalDecision) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
@@ -552,11 +563,13 @@ private fun ChatTranscript(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         // Room for the chrome at both ends: the transcript passes behind the bars, but its first
-        // and last lines must still be reachable rather than parked underneath them.
+        // and last lines must still be reachable rather than parked underneath them. The top bar
+        // sits below the status bar, so its inset counts too — a fixed figure left the first
+        // message touching the bubbles on a phone with a taller status bar.
         contentPadding = PaddingValues(
             start = 12.dp,
             end = 12.dp,
-            top = TOP_BAR_SPACE,
+            top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + TOP_BAR_SPACE,
             bottom = COMPOSER_SPACE,
         ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -587,6 +600,11 @@ private fun ChatTranscript(
                 onRegenerate = onRegenerate,
                 onEdit = { text -> onEdit(message.id.value, text) },
             )
+        }
+        state.pendingApproval?.let { pending ->
+            item(key = "approval") {
+                ToolApprovalCard(pending, onResolve = onResolveApproval)
+            }
         }
         state.status?.let { status ->
             item {
@@ -1326,6 +1344,7 @@ private fun SettingsScreen(
     onSaveEndpoint: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
     onRefreshDiagnostics: () -> Unit,
+    onWithdrawToolPermission: (String) -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
@@ -1409,6 +1428,31 @@ private fun SettingsScreen(
                 )
                 ReadinessRow("Durable conversation memory", "Deferred")
                 ReadinessRow("Skills and automation", "Deferred")
+            }
+        }
+        if (state.alwaysAllowedTools.isNotEmpty()) {
+            GlassSurface(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Tools you always allow", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Granted for the target shown. Anything else still asks.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    state.alwaysAllowedTools.forEach { scope ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                scope,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            TextButton(onClick = { onWithdrawToolPermission(scope) }) {
+                                Text("Withdraw")
+                            }
+                        }
+                    }
+                }
             }
         }
         state.error?.let { ErrorCard(it) }
@@ -1507,6 +1551,81 @@ private fun MessageBody(
             renderMarkdown(message.content.ifBlank { "…" }),
             style = MaterialTheme.typography.bodyLarge,
         )
+    }
+}
+
+/**
+ * A tool call waiting to be allowed or refused.
+ *
+ * Shown in the transcript rather than as a dialog: it is part of what the run did, it stays in the
+ * record afterwards, and a dialog over a reply the user is still reading is a good way to get a
+ * reflexive tap on whichever button is nearest.
+ *
+ * The arguments are shown in full. An approval that hides what it is approving is theatre.
+ */
+@Composable
+private fun ToolApprovalCard(
+    pending: PendingToolApproval,
+    onResolve: (ToolApprovalDecision) -> Unit,
+) {
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Glass.cornerMedium),
+        alpha = Glass.BUBBLE_ALPHA,
+        tint = MaterialTheme.colorScheme.primaryContainer,
+        blur = false,
+    ) {
+        Column(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "Bram wants to use ${pending.toolName}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (pending.description.isNotBlank()) {
+                Text(pending.description, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (pending.requiredPermissions.isNotEmpty()) {
+                Text(
+                    "Needs: ${pending.requiredPermissions.sorted().joinToString(", ")}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!pending.readOnly) {
+                Text(
+                    "This changes something. Bram will report what happened, not what it intended.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                pending.argumentsJson.ifBlank { "{}" },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Button(onClick = { onResolve(ToolApprovalDecision.ALLOW_ONCE) }) { Text("Allow once") }
+                TextButton(onClick = { onResolve(ToolApprovalDecision.DENY) }) { Text("Refuse") }
+            }
+            Text(
+                // Said before the button is pressed, since "always" is the one answer that is hard
+                // to take back and the scope is what makes it safe or not.
+                "\"Always\" would allow ${pending.scopeLabel}.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(
+                    onClick = { onResolve(ToolApprovalDecision.ALLOW_FOR_RUN) },
+                ) { Text("Allow for this run") }
+                TextButton(
+                    onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
+                ) { Text("Always allow this") }
+            }
+        }
     }
 }
 

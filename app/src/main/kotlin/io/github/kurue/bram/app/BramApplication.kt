@@ -5,7 +5,6 @@ import android.content.Context
 import io.github.kurue.bram.core.agent.ContextWindowManager
 import io.github.kurue.bram.core.agent.DefaultAgentOrchestrator
 import io.github.kurue.bram.core.agent.InMemoryMemoryStore
-import io.github.kurue.bram.core.agent.ReadOnlyApprovalGate
 import io.github.kurue.bram.core.agent.StaticToolRegistry
 import io.github.kurue.bram.core.domain.EndpointCredentialResolver
 import io.github.kurue.bram.core.domain.LocalModelRecord
@@ -48,11 +47,20 @@ class AppContainer(application: Application) {
     val endpointStore = SecureEndpointStore(application)
     val localModelStore = LocalModelStore(application)
     val modelProfileStore = ModelProfileStore(application)
+    val toolPermissionStore = ToolPermissionStore(application)
+
+    /**
+     * Held by the container rather than built per run, so the screen can watch what it is waiting
+     * on and a remembered allowance outlives the run that granted it.
+     */
+    val approvalGate = InteractiveApprovalGate(toolPermissionStore)
     val llamaCppClient = LlamaCppServiceClient(application)
     val deviceProfiler = AndroidDeviceProfiler(application)
     val conversationStore = ConversationStore(application)
     val memoryStore = InMemoryMemoryStore()
-    private val toolRegistry = StaticToolRegistry(listOf(DeviceStatusTool(deviceProfiler)))
+    private val toolRegistry = StaticToolRegistry(
+        listOf(DeviceStatusTool(deviceProfiler), ScratchNoteTool(application)),
+    )
 
     fun runtime(endpoint: RemoteEndpoint) = OpenAiCompatibleRuntime(
         endpoint = endpoint,
@@ -68,7 +76,7 @@ class AppContainer(application: Application) {
         contextWindowManager = ContextWindowManager(),
         memoryStore = memoryStore,
         toolRegistry = toolRegistry,
-        approvalGate = ReadOnlyApprovalGate(),
+        approvalGate = approvalGate,
     )
 }
 

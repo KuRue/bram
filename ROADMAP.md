@@ -133,9 +133,45 @@ the GGUF record; this makes them a named record instead, many profiles to one fi
 Ordering note: Milestone 7 lands first so profiles have the KV and attention settings to expose,
 rather than needing a second pass to add them.
 
+## Milestone 8b — profile-first, and provisioned for the user (not started)
+
+Profiles exist and drive loading, but the screen is still a list of files with profile controls
+nested inside each one. The asked-for shape is the other way round: a list of profiles, each naming
+the GGUF it runs, because the profile is what a person picks and the file is an attribute of it.
+
+Making it profile-first is the small half. The larger half is that creating one should not require
+knowing anything:
+
+- **Name it and pick a GGUF.** That is the whole of what the user supplies.
+- **Defaults come from the file.** Context sized from the trained maximum and what the device can
+  actually hold rather than a fixed 8K; reasoning off unless the template supports it; sampling from
+  the format's own conventions where it has them.
+- **On save, measure it.** Run the existing teacher-forced comparison against every backend the
+  build and device offer, and record agreement and speed for each.
+- **Choose the fastest backend that agrees with CPU.** Correctness gates speed, never the reverse —
+  the whole reason that harness exists is that a broken Vulkan backend once reported success while
+  returning garbage, and a "fastest" choice made without it would have picked exactly that.
+- **Say why.** "Hexagon: 96% agreement, 1.9x CPU" beside the choice, with the date it was measured.
+  A silent automatic decision the user cannot inspect is worse than a manual one.
+- **Let it be redone and overridden.** Thermal state, free RAM, and a new build all change the
+  answer, so the measurement is a fact with an expiry rather than a property of the file.
+
+Two constraints this has to respect. A comparison takes on the order of a minute per backend, so
+provisioning belongs on the foreground-service path with visible progress, not behind a modal wait —
+which ties it to the task queue in Milestone 13. And it must degrade quietly: no accelerator present
+means CPU, every accelerator failing validation means CPU, and neither is an error.
+
+## Milestone 8c — OpenCL for Adreno (not started)
+
+Vulkan on the Adreno 830 fails validation in an operation every layer uses, and nothing has been
+done about it. ggml also has an OpenCL backend tuned specifically for Adreno, which is the path
+Qualcomm and llama.cpp generally point to on Snapdragon, and it is plausibly why the Vulkan bug has
+gone unchased upstream. It is listed as deferred above; on this hardware it is probably the better
+GPU bet, and the harness needed to prove or reject it already exists.
+
 ## The agent milestones
 
-Milestones 9 to 16 turn Bram from a chat app with one tool into an agent harness. They are ordered
+Milestones 9 to 17 turn Bram from a chat app with one tool into an agent harness. They are ordered
 by dependency rather than by appeal. The permission model comes first because its current stub is
 what limits Bram to a single read-only tool: anything with an effect is denied, so every tool added
 before it is a tool that cannot run.
@@ -167,7 +203,124 @@ has exactly one tool worth calling.
 Exit criterion: a tool cannot reach a side effect without a recorded decision, and a denied call
 leaves the run able to continue.
 
-## Milestone 10 — Android tool surface (not started)
+## Milestone 10 — local tool calling (not started)
+
+Found while trying to exercise the approval gate on a device: **the local runtime never sends
+tools**. `GenerationRequest.tools` is populated and reaches `LlamaCppRuntime`, which passes the
+request to `LlamaCppServiceClient`, which builds the JSON without them. The JNI `formatChat` takes
+roles and contents only. So a local model is never told a tool exists and cannot call one, whatever
+its ability — the remote OpenAI-compatible path is the only one that offers tools at all.
+
+Everything agentic depends on this. The permission gate cannot be reached on device, and Milestones
+11 and 12 build on tool calls that a local model currently cannot make.
+
+- Pass tools through `common_chat_templates_apply`, which llama.cpp already accepts them for, and
+  carry the grammar it returns into generation so the reply is constrained to the format.
+- Parse tool calls out of the finished reply. `common_chat_parse` already returns them and Bram
+  already calls it for reasoning; the calls are discarded.
+- Report honestly when a loaded model's template has no tool support, rather than offering tools
+  that will never be called. `chatFormat` reports `supportsTools`; nothing consumes it yet.
+
+Measured on the emulator twice. With `Qwen3.5-0.8B` the tools reach the template (`tools=2`) but come
+back `supportsTools:false` with no tool definitions in the prompt. Tool support rides on the model's
+own Jinja template, and Qwen3.5's does not render under minja — Bram falls back to a built-in
+template, and the built-in path has no notion of tools. So local tool calling works only for models
+whose own template renders, which is a narrower claim than "local tool calling works" and needs
+saying in the UI rather than discovered.
+
+With `LFM2.5-2.6B`, whose template does render, the model was told about the tool and asked for it:
+it replied `<think>[write_note(name='shopping', body='milk')]` — the right tool with the right
+arguments. The call is still not executed, because it arrives as text rather than as a parsed tool
+call. Both questions have since been answered by measurement.
+
+**The grammar was being applied wrongly.** LFM2.5 returns `grammar=956 lazy=1`: a *lazy* grammar,
+which only engages once a trigger appears, and Bram was installing it with the eager constructor and
+no triggers. It now uses `llama_sampler_init_grammar_lazy_patterns` with the triggers the template
+supplies. That fixed the reasoning split — content and reasoning now separate correctly instead of
+the reply arriving as one `<think>`-prefixed blob.
+
+**The parse still yields nothing, and the reason is the model.** LFM2.5's format expects
+`<|tool_call_start|>` before the call, and `common_chat_parse` requires that literal. The model
+writes a bare `[write_note(name='x', body='y')]` — the right tool and arguments, without the marker.
+A lazy grammar constrains what follows a trigger; it cannot make a model emit the trigger. So the
+remaining gap is a 2.6B model not following its own format's convention, not a wiring fault.
+
+A required-tool retry is now implemented: when the first reply names a tool but the parser accepts
+nothing, the turn is asked again with `COMMON_CHAT_TOOL_CHOICE_REQUIRED`, which makes the grammar
+eager so the call is constrained as it is written and comes back through the real parser. The
+pattern match only decides whether to ask again — it never produces a call, so a false positive
+costs one generation rather than an unintended action.
+
+**It fires, and it does not help this model.** Measured on the emulator: the first pass reports
+`tools=3 grammar=956 lazy=1`, the retry is entered (`calls=0 wantsRetry=true`), and the retry
+template reports `require=1 grammar=2363 lazy=0` — eager, as intended. The model still replies with
+a bare `[write_note(name='x', body='y')]`, the parser still accepts nothing, and no note is written.
+
+The grammar is not the problem either: it compiles and is attached, verified by a warning that now
+fires when it does not and stayed silent on a further run.
+
+**The parse was.** Running the same model with the same tool through llama.cpp's own `llama-server`
+returned `finish_reason: tool_calls` with correct arguments in under two seconds, which ruled the
+model out and pointed back at Bram. `common_chat_parser_params(const common_chat_params &)` copies
+only the format and the generation prompt — not the `parser` the template built. Bram was parsing
+every reply with an empty parser, so a marked tool call was unrecognisable. Loading it with
+`common_peg_arena::load` is the fix, and the tool loop now runs end to end on the emulator.
+
+The conclusion recorded here before — that a small model was failing to follow its own format — was
+wrong. The model had been producing what its format asks for; Bram could not read it.
+
+**The other half was that Bram was deleting the marker before parsing.** `llama_token_to_piece` was
+called with `special = false`, which renders a special token as an empty string. The model had been
+emitting `<|tool_call_start|>` all along and Bram was erasing it, then parsing what was left and
+finding a bare call. Generation now keeps a second copy of the reply with special tokens intact —
+the transcript still gets the display form, since nobody wants to read a marker — and the parser
+reads that.
+
+With both fixes the whole loop runs on the emulator: the model calls `write_note`, the call is
+parsed, the approval card appears with the arguments shown, `Allow once` executes it, and
+`files/notes/marker` contains `found`. Milestone 9's gate is verified end to end, including the
+accept branch.
+
+The forced retry and the bare-call fallback stay. Removing them was tried again with both fixes in
+place and the reply came back as text, so the marker is emitted some turns and not others — the one
+successful marked call was a sample, not proof of reliability. At temperature 0.7 that is what a
+sampled model does, and a lazy grammar only engages once the marker appears. The workarounds are
+what make the path dependable rather than lucky.
+
+Verified on the S25 Ultra as well as the emulator: the card appears at 9.8 tok/s, `Allow once`
+executes, and `files/notes/phone` contains `works`.
+
+The earlier note about the parser fix being insufficient is kept below for the record.
+
+The parser fix alone was not sufficient. Removing the retry and the bare-call fallback and
+running a clean turn put the reply back to text: `[write_note(name='clean', body='works')]`, no call,
+no approval. So a difference between Bram and `llama-server` remains, and the workarounds stay until
+it is found. The useful thing is that there is now a working reference to diff against, running the
+same model from the same pinned revision. The next things to compare are the sampler chain — the
+server builds it through `common_sampler_init`, which carries `grammar_triggers` and
+`preserved_tokens`, while Bram assembles it by hand — and the tool definitions themselves, since
+Bram hand-parses them into `common_chat_tool` rather than going through the OpenAI-shaped conversion
+the server uses.
+
+That closed the REQUIRED route for this model, so the bare-call fallback was taken, fenced as
+below. On the emulator the whole chain now runs: LFM2.5 writes a bare call, the parser declines, the
+forced retry declines, the fallback recovers it, and the approval card appears in the transcript
+naming the tool. Left unanswered for two minutes it was refused and the tool did not run, which is
+the timeout fence behaving as designed. A granted approval writing the note has not been observed
+yet — that is the one step left to confirm.
+
+The fallback is a compatibility shim, not the intended path. What remains is a model that emits the
+marker. If the fallback is taken it should be fenced: only when
+tools were offered this turn, only when the name matches a registered tool, only at the start or end
+of a reply rather than mid-prose, and never eligible for an "always allow" match, so a recovered
+call always asks. A model echoing tool output containing a call-shaped string is the case those
+fences exist for.
+
+The alternative remains accepting bare calls as a fallback parse, which trades correctness for
+compatibility — a model echoing tool output containing a call-shaped string would then trigger one —
+and should be a decision taken deliberately rather than by default.
+
+## Milestone 11 — Android tool surface (not started)
 
 The tools worth having on a phone are the platform's own, not a filesystem.
 
@@ -176,7 +329,7 @@ The tools worth having on a phone are the platform's own, not a filesystem.
 - Calendar, contacts, and notifications behind runtime permissions.
 - Alarms and scheduling, which is what makes unattended work possible at all.
 
-## Milestone 11 — Termux integration (not started)
+## Milestone 12 — Termux integration (not started)
 
 Gives the agent a real toolchain — compilers, package managers, git — without Bram shipping a
 userland or fighting the execution restriction, because the restriction stays Termux's problem.
@@ -194,7 +347,7 @@ userland or fighting the execution restriction, because the restriction stays Te
 This is the widest capability Bram will have: arbitrary command execution as the user. It lands
 after Milestone 9 and not before.
 
-## Milestone 12 — sessions and the task queue (not started)
+## Milestone 13 — sessions and the task queue (not started)
 
 - Named sessions that outlive a turn, with scrollback the agent can page through rather than
   re-read whole.
@@ -202,7 +355,7 @@ after Milestone 9 and not before.
   and is the foundation for this, not the finished thing.
 - Per-task UI: what is running, what it has done, and how to stop it.
 
-## Milestone 13 — context compaction and memory (not started)
+## Milestone 14 — context compaction and memory (not started)
 
 - Summarise what falls out of the context window instead of dropping it. The budgeter currently
   records what it omitted but does nothing with it.
@@ -212,7 +365,7 @@ after Milestone 9 and not before.
 Depends on Milestone 7: compaction costs a model call, and on a phone that is the same
 prompt-reprocessing cost that KV reuse exists to remove.
 
-## Milestone 14 — remote MCP (not started)
+## Milestone 15 — remote MCP (not started)
 
 - Streamable HTTP transport only, with `Authorization` headers and server identity pinned per
   configured server.
@@ -221,12 +374,12 @@ prompt-reprocessing cost that KV reuse exists to remove.
 - Tool descriptions from a server are untrusted input, and are subject to Milestone 9 like any
   other tool.
 
-## Milestone 15 — skills and automations (not started)
+## Milestone 16 — skills and automations (not started)
 
 - Versioned skill packages with validation, drafts, activation, and rollback.
 - Automations built on the scheduling from Milestone 10 and the queue from Milestone 12.
 
-## Milestone 16 — curated runtimes and routing (not started)
+## Milestone 17 — curated runtimes and routing (not started)
 
 - LiteRT-LM packages and device-specific compiled caches.
 - OpenAI Responses adapter where supported.

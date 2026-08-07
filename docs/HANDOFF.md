@@ -84,6 +84,42 @@ reports the loaded format's markers, and Qwen3.5 reports `<think>` with two clos
 `</think>` and `<tool_call>`. Its own template does not render, though, so Bram falls back to a
 built-in one and the model reasons in unmarked prose — nothing marks it, so nothing can collapse it.
 
+**The tool path runs end to end on the emulator, properly.** The model calls `write_note`, the call
+is parsed from its own format, the approval card shows the arguments, `Allow once` executes it, and
+the file appears. Two defects had to go first: the parse ran without the parser the template built,
+and generation rendered special tokens away before parsing, deleting the very marker that identifies
+a call. The retry and bare-call fallback that were built to work around those are now dead weight
+and should be removed.
+
+**Superseded — the tool path used to run only through a fallback.** LFM2.5 writes a bare
+`[write_note(name='q', body='z')]` without the marker its format requires; the parser and a forced
+retry both decline it; a fenced fallback recovers it; and the approval card appears. Left
+unanswered it was refused after two minutes and nothing ran. A recovered call always asks — it
+never matches a remembered allowance — because it is text read as an intent rather than the format
+saying so.
+
+**The UI cannot be read by automation while a turn is running.** `uiautomator dump` needs an idle
+window and the send button animates continuously during generation, so the accessibility tree is
+never dumpable mid-turn. Screenshots still work. This is why the approval card's accept branch is
+still unverified: the card only exists mid-turn.
+
+**The build can silently lose Hexagon.** The packaged `libbram_llama.so` currently contains no
+`ggml-hex` symbols and no HTP skel libraries, so the phone offers only Adreno and the NPU is gone.
+Nothing failed: several builds during the tool-calling work ran without `HEXAGON_SDK_ROOT`, CMake
+cached `GGML_HEXAGON=OFF`, and later builds that did export it reused the cache. A UI observation
+caught it, not the build.
+
+Recovering it needs the CMake cache cleared — delete `runtime/llamacpp/.cxx` — and a rebuild with
+`HEXAGON_SDK_ROOT` set. Worth checking with `strings ... | grep ggml-hex` afterwards rather than
+trusting the build to say so, and worth making CI or the app report which backends the library
+actually contains, since a validated hardware capability disappeared without a single warning.
+
+**Tools need the model's own template to render.** Tool definitions are passed to
+`common_chat_templates_apply`, which produces the grammar that constrains a tool call. When a
+template fails to render, Bram falls back to a built-in one, and that path has no tool support: the
+tools are accepted and silently ignored. Qwen3.5 is in exactly that state, so it cannot call a tool
+however it is asked.
+
 **Reasoning is expensive.** A reasoning model asked to say hello can spend paragraphs deliberating.
 Reasoning is off by default, per model.
 

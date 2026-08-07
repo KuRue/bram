@@ -8,6 +8,19 @@ data class ToolDefinition(
     val inputSchemaJson: String,
     val requiredPermissions: Set<String> = emptySet(),
     val readOnly: Boolean = true,
+    /**
+     * The argument names that say what a call acts on, used to scope a remembered allowance.
+     *
+     * A permission granted for good has to be granted for something. "Always allow `run_command`"
+     * with no target is a blanket grant to run anything ever again; "always allow `run_command`
+     * with `command` = `git status`" is a decision someone can actually make. A tool names the
+     * fields that identify its target here — a path, a recipient, a package — and the allowance is
+     * remembered against those values.
+     *
+     * Empty means the tool has no meaningful target and an allowance covers every call to it,
+     * which suits a tool that only reads.
+     */
+    val approvalScopeKeys: List<String> = emptyList(),
 )
 
 data class GenerationRequest(
