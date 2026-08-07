@@ -161,7 +161,31 @@ provisioning belongs on the foreground-service path with visible progress, not b
 which ties it to the task queue in Milestone 13. And it must degrade quietly: no accelerator present
 means CPU, every accelerator failing validation means CPU, and neither is an error.
 
-## Milestone 8c — OpenCL for Adreno (not started)
+## Milestone 8c — OpenCL for Adreno (builds and initialises; loading crashes)
+
+The backend builds for ARM64 and the driver comes up on the S25 Ultra:
+
+    ggml_opencl: selected platform: 'QUALCOMM Snapdragon(TM)'
+    ggml_opencl: device: 'QUALCOMM Adreno(TM) 830 (OpenCL 3.0 Adreno(TM) 830)'
+
+Two things it needed. The Khronos ICD loader finds nothing here — it enumerates drivers through an
+ICD registry and there is no `/vendor/Khronos/OpenCL/vendors` to enumerate — so the library links
+the vendor's own `libOpenCL.so`, which the platform lists publicly, declared with
+`uses-native-library` as the Hexagon driver is. And that copy must be excluded from packaging:
+shipping it put a second one in the APK, Android preferred it, and it failed on `libcutils.so`,
+taking the whole native library down.
+
+**Loading a model then aborts** in `ggml_backend_dev_type` under `load_tensors`, whatever backend is
+requested — CPU included. So registering the OpenCL backend breaks loading rather than only
+offloading to it, and the cause is not yet known. Left opt-in and off; `main` is unaffected.
+
+Two cautions for whoever picks this up. `GGML_OPENCL` is FORCE-set into the CMake cache, so turning
+`BRAM_OPENCL` off does not remove it — the `.cxx` directory has to be deleted, exactly as the
+Hexagon regression required. And the linker needs a copy of the vendor `libOpenCL.so` pulled from a
+device, which is not committed: it is Qualcomm's binary and device-specific, so CI cannot build this
+backend at all.
+
+### Why it is worth trying
 
 Vulkan on the Adreno 830 fails validation in an operation every layer uses, and nothing has been
 done about it. ggml also has an OpenCL backend tuned specifically for Adreno, which is the path
