@@ -490,23 +490,6 @@ class MainViewModel(
         }
     }
 
-    fun removeLocalModel(modelId: String) {
-        viewModelScope.launch {
-            if (mutableState.value.loadedModelId == modelId) unloadModelInternal()
-            container.localModelStore.remove(io.github.kurue.bram.core.domain.ModelId(modelId))
-            reloadLocalModels()
-        }
-    }
-
-    fun setPreferredContext(modelId: String, tokens: Int) =
-        editProfileFor(modelId) { it.copy(contextTokens = tokens) }
-
-    fun setThinkingEnabled(modelId: String, enabled: Boolean) =
-        editProfileFor(modelId) { it.copy(thinkingEnabled = enabled) }
-
-    fun selectBackend(modelId: String, backend: RuntimeBackend) =
-        editProfileFor(modelId) { it.copy(backendId = backend.name) }
-
     fun resolveApproval(decision: ToolApprovalDecision) {
         mutableState.value.pendingApproval?.resolve(decision)
         // Granting one is the only way the list grows, so this is the only place it needs refreshing.
@@ -658,13 +641,6 @@ class MainViewModel(
             container.modelProfileStore.save(profile)
             reloadProfiles(selectId = profile.id)
         }
-    }
-
-    /** Edits whichever profile the model currently runs under. */
-    private fun editProfileFor(modelId: String, edit: (ModelProfile) -> ModelProfile) {
-        val state = mutableState.value
-        val model = state.localModels.firstOrNull { it.id.value == modelId } ?: return
-        updateProfile(edit(state.profileFor(model)))
     }
 
     private fun reloadProfiles(selectId: String? = null) {

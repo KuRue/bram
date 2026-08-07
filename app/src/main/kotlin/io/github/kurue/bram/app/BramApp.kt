@@ -63,6 +63,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Slider
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.rememberDrawerState
@@ -234,16 +235,10 @@ fun BramApp(viewModel: MainViewModel) {
                             AppPanel.MODELS -> ModelsScreen(
                                 state = state,
                                 onImport = { modelPicker.launch(arrayOf("*/*")) },
-                                onSelect = viewModel::selectLocalModel,
-                                onLoad = viewModel::loadModel,
                                 onUnload = viewModel::unloadModel,
-                                onRemove = viewModel::removeLocalModel,
-                                onContext = viewModel::setPreferredContext,
                                 onValidateAccelerator = viewModel::validateAccelerator,
                                 onBisectAccelerator = viewModel::bisectAccelerator,
                                 onReclaimStorage = viewModel::reclaimModelStorage,
-                                onSelectBackend = viewModel::selectBackend,
-                                onThinkingEnabled = viewModel::setThinkingEnabled,
                                 onCreateProfile = viewModel::createProfile,
                                 onUpdateProfile = viewModel::updateProfile,
                                 onDeleteProfile = viewModel::deleteProfile,
@@ -742,16 +737,10 @@ private fun RuntimeOption(
 private fun ModelsScreen(
     state: AppUiState,
     onImport: () -> Unit,
-    onSelect: (String) -> Unit,
-    onLoad: (String) -> Unit,
     onUnload: () -> Unit,
-    onRemove: (String) -> Unit,
-    onContext: (String, Int) -> Unit,
     onValidateAccelerator: (String, AcceleratorTarget) -> Unit,
     onBisectAccelerator: (String, AcceleratorTarget) -> Unit,
     onReclaimStorage: () -> Unit,
-    onSelectBackend: (String, RuntimeBackend) -> Unit,
-    onThinkingEnabled: (String, Boolean) -> Unit,
     onCreateProfile: (LocalModelRecord) -> Unit,
     onUpdateProfile: (ModelProfile) -> Unit,
     onDeleteProfile: (String) -> Unit,
@@ -759,6 +748,14 @@ private fun ModelsScreen(
     onAutoConfigure: (String) -> Unit,
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showNewProfilePicker by rememberSaveable { mutableStateOf(false) }
+    if (showNewProfilePicker) {
+        NewProfileDialog(
+            models = state.localModels,
+            onPick = { model -> onCreateProfile(model); showNewProfilePicker = false },
+            onDismiss = { showNewProfilePicker = false },
+        )
+    }
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -767,7 +764,13 @@ private fun ModelsScreen(
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 SectionHeader("Profiles", modifier = Modifier.weight(1f))
-                Button(onClick = onImport, enabled = !state.isImporting && !state.isGenerating) { Text("New profile") }
+                TextButton(
+                    onClick = { showNewProfilePicker = true },
+                    enabled = state.localModels.isNotEmpty() && !state.isGenerating,
+                ) { Text("New profile") }
+                Button(onClick = onImport, enabled = !state.isImporting && !state.isGenerating) {
+                    Text("Import model")
+                }
             }
         }
         if (state.localModels.isEmpty() && !state.isImporting) {
@@ -849,6 +852,46 @@ private fun ModelsScreen(
             )
         }
     }
+}
+
+/**
+ * Picks which imported model a new profile starts from.
+ *
+ * The top-level way to add a profile other than duplicating an existing one: choose the file it
+ * runs, and the profile opens with that model's defaults ready to be shaped.
+ */
+@Composable
+private fun NewProfileDialog(
+    models: List<LocalModelRecord>,
+    onPick: (LocalModelRecord) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New profile") },
+        text = {
+            Column {
+                Text(
+                    "Start a new profile from an imported model.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                models.forEach { model ->
+                    Text(
+                        model.displayName,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(model) }
+                            .padding(vertical = 10.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -1264,7 +1307,7 @@ private fun SamplerControls(
     )
 
     Text(
-        "Top-p ${"%.2f".format(sampler.topP)} · top-k ${sampler.topK}",
+        "Top-p ${"%.2f".format(sampler.topP)}",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -1272,6 +1315,18 @@ private fun SamplerControls(
         value = sampler.topP,
         onValueChange = { onUpdateProfile(profile.copy(sampler = sampler.copy(topP = it))) },
         valueRange = 0.05f..1f,
+        enabled = enabled,
+    )
+
+    Text(
+        if (sampler.topK <= 0) "Top-k off" else "Top-k ${sampler.topK}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Slider(
+        value = sampler.topK.toFloat(),
+        onValueChange = { onUpdateProfile(profile.copy(sampler = sampler.copy(topK = it.toInt()))) },
+        valueRange = 0f..100f,
         enabled = enabled,
     )
 }
