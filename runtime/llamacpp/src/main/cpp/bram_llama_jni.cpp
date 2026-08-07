@@ -502,6 +502,11 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
             if (selected.empty()) {
                 throw std::runtime_error("No backend device matches '" + filter + "' on this build");
             }
+            // ggml_backend_sched_new requires a CPU backend to be present and last, as the fallback
+            // for any op the accelerator declines. An accelerator-only device list fails that
+            // assertion and aborts at context creation, so CPU always follows the accelerator here.
+            ggml_backend_dev_t cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+            if (cpu != nullptr) selected.push_back(cpu);
             selected.push_back(nullptr);  // llama.cpp expects a null-terminated list
             params.devices = selected.data();
         }
