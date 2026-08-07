@@ -85,6 +85,22 @@ class WebToolTest {
     }
 
     @Test
+    fun `decodeBody inflates a gzip response`() {
+        val raw = "Hello, compressed world. All kinds of text that should survive a gzip round trip."
+        val baos = java.io.ByteArrayOutputStream()
+        java.util.zip.GZIPOutputStream(baos).use { it.write(raw.toByteArray(Charsets.UTF_8)) }
+        val decoded = decodeBody(java.io.ByteArrayInputStream(baos.toByteArray()), "gzip")
+        assertEquals(raw, decoded)
+    }
+
+    @Test
+    fun `decodeBody passes plain bytes through when there is no content encoding`() {
+        val raw = "plain text, no compression"
+        val decoded = decodeBody(java.io.ByteArrayInputStream(raw.toByteArray(Charsets.UTF_8)), null)
+        assertEquals(raw, decoded)
+    }
+
+    @Test
     fun `an empty query is rejected without a network call`() {
         // execute runs on Dispatchers.IO; the guard returns an error JSON before any fetch happens.
         val emptyArgs = org.json.JSONObject().put("query", "   ").toString()

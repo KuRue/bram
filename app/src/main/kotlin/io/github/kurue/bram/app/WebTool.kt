@@ -111,7 +111,11 @@ internal fun fetchRaw(url: URL, maxChars: Int): String {
             readTimeout = 12_000
             setRequestProperty("User-Agent", WEB_UA)
             setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            setRequestProperty("Accept-Encoding", "identity")
+            setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+            // A browser-style compression header reads as a real client rather than a bot, which is
+            // part of what was making some sites (developer.android.com) redirect-loop; the body is
+            // decompressed in decodeBody.
+            setRequestProperty("Accept-Encoding", "gzip, deflate")
         }
         try {
             val code = connection.responseCode
@@ -122,13 +126,28 @@ internal fun fetchRaw(url: URL, maxChars: Int): String {
                 return@repeat
             }
             if (code !in 200..299) throw java.io.IOException("HTTP $code")
-            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            val body = decodeBody(connection.inputStream, connection.contentEncoding)
             return if (body.length > maxChars) body.substring(0, maxChars) else body
         } finally {
             connection.disconnect()
         }
     }
     throw java.io.IOException("Too many redirects (more than $MAX_REDIRECTS)")
+}
+
+/**
+ * Reads a response body, transparently inflating it when the server compressed it.
+ *
+ * Pulled out so the gzip path is unit-testable without a network: a server that saw
+ * Accept-Encoding: gzip answers gzipped regardless of what the caller would prefer.
+ */
+internal fun decodeBody(stream: java.io.InputStream, encoding: String?): String {
+    val inflated = when (encoding?.lowercase()) {
+        "gzip" -> java.util.zip.GZIPInputStream(stream)
+        "deflate" -> java.util.zip.InflaterInputStream(stream)
+        else -> stream
+    }
+    return inflated.bufferedReader(Charsets.UTF_8).readText()
 }
 
 /**
