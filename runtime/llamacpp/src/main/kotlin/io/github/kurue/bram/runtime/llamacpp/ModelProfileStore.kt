@@ -114,6 +114,8 @@ class ModelProfileStore(context: Context) {
         .put("repeatLastTokens", sampler.repeatLastTokens)
         .put("systemPrompt", systemPrompt)
         .put("createdAtEpochMillis", createdAtEpochMillis)
+        .put("autoConfiguredNote", autoConfiguredNote)
+        .put("autoConfiguredAtEpochMillis", autoConfiguredAtEpochMillis)
         .put("isDefault", isDefault)
 
     private fun JSONObject.toProfile(): ModelProfile {
@@ -134,6 +136,8 @@ class ModelProfileStore(context: Context) {
             ).sanitized(),
             systemPrompt = optString("systemPrompt"),
             createdAtEpochMillis = optLong("createdAtEpochMillis", System.currentTimeMillis()),
+            autoConfiguredNote = optString("autoConfiguredNote"),
+            autoConfiguredAtEpochMillis = optLong("autoConfiguredAtEpochMillis", 0L),
             isDefault = optBoolean("isDefault"),
         )
     }

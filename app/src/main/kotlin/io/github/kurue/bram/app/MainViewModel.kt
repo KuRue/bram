@@ -524,6 +524,84 @@ class MainViewModel(
         mutableState.update { it.copy(alwaysAllowedTools = allowed.sorted()) }
     }
 
+    /**
+     * Measures every accelerator this device offers and sets the profile to the best of them.
+     *
+     * Fastest that *agrees with the CPU*, never simply fastest. The comparison exists because a
+     * backend on this hardware reports success while returning garbage, and a choice made on speed
+     * alone would pick exactly that one. CPU is the reference, so it is always a valid answer and
+     * needs no measurement of its own.
+     *
+     * The result is written to the profile in words, with the date, so the choice can be read and
+     * repeated rather than believed.
+     */
+    fun autoConfigure(profileId: String) {
+        val snapshot = mutableState.value
+        val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
+        val model = snapshot.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        if (snapshot.isLoadingModel || snapshot.isGenerating || snapshot.isValidatingAccelerator) return
+        val restoreLoaded = snapshot.loadedModelId
+
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(isValidatingAccelerator = true, error = null, status = "Measuring backends…")
+            }
+            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            val threads = (visibleCores - 2).coerceIn(1, 4)
+
+            val candidates = snapshot.availableBackends
+                .filter(RuntimeBackend::offloadsToAccelerator)
+                .mapNotNull { backend ->
+                    AcceleratorTarget.entries
+                        .firstOrNull { it.devicePrefix == backend.devicePrefix }
+                        ?.let { backend to it }
+                }
+
+            val measured = mutableListOf<Pair<RuntimeBackend, AcceleratorReport>>()
+            for ((backend, target) in candidates) {
+                mutableState.update { it.copy(status = "Measuring ${backend.label}…") }
+                // One backend failing is a result, not an error: it means do not use that one.
+                val report = runCatching {
+                    measureBackend(model, target, threads) { message ->
+                        mutableState.update { it.copy(status = message) }
+                    }
+                }.getOrNull()
+                if (report != null) measured += backend to report
+            }
+
+            val best = measured
+                .filter { (_, report) -> report.matchesCpu }
+                .maxByOrNull { (_, report) -> report.speedup }
+                ?.takeIf { (_, report) -> report.speedup > 1.0 }
+
+            val note = when {
+                best != null -> {
+                    val (backend, report) = best
+                    "${backend.label}: ${(report.agreement * 100).toInt()}% agreement with CPU, " +
+                        "%.1f× faster. Measured %s.".format(report.speedup, today())
+                }
+                measured.isEmpty() -> "No accelerator to measure, so this runs on the CPU."
+                else -> "No accelerator agreed with the CPU, so this runs on the CPU."
+            }
+
+            container.modelProfileStore.save(
+                profile.copy(
+                    backendId = best?.first?.takeIf { it != RuntimeBackend.CPU }?.name.orEmpty(),
+                    autoConfiguredNote = note,
+                    autoConfiguredAtEpochMillis = System.currentTimeMillis(),
+                ),
+            )
+            runCatching { unloadModelInternal(forget = false) }
+            mutableState.update { it.copy(isValidatingAccelerator = false, status = note) }
+            refreshDeviceProfile()
+            reloadProfiles(selectId = profile.id)
+            restoreLoaded?.let { loadModel(it) }
+        }
+    }
+
+    private fun today(): String = java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault())
+        .format(java.util.Date())
+
     /** Switches which profile a model runs under, without loading it. */
     fun selectProfile(profileId: String) {
         val profile = mutableState.value.profiles.firstOrNull { it.id == profileId } ?: return
@@ -728,6 +806,80 @@ class MainViewModel(
      * the same sequence. Loading twice in sequence (rather than side by side) keeps peak memory to
      * one model, which matters on a phone.
      */
+    /**
+     * Runs one accelerator against the CPU reference and reports what it found.
+     *
+     * Shared by the manual comparison and by automatic provisioning, so a profile is configured
+     * against exactly the evidence a user would see if they ran the comparison themselves. Leaves
+     * the runtime holding whichever model it last loaded; the caller restores it.
+     */
+    private suspend fun measureBackend(
+        model: LocalModelRecord,
+        target: AcceleratorTarget,
+        threads: Int,
+        onProgress: (String) -> Unit = {},
+    ): AcceleratorReport = run {
+            val devices = container.llamaCppClient.devices()
+            val deviceName = (0 until devices.optJSONArray("devices")?.length().orZero())
+                .map { index -> devices.getJSONArray("devices").getJSONObject(index) }
+                .firstOrNull { device -> device.optString("name").startsWith(target.devicePrefix) }
+                ?.let { device -> device.optString("description").ifBlank { device.optString("name") } }
+                ?: throw IllegalStateException(
+                    "This build found no ${target.label} device, so it cannot be validated.",
+                )
+
+            container.llamaCppClient.load(model, threads, gpuLayers = 0)
+            val cpuStarted = System.currentTimeMillis()
+            val cpuResult = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+            val cpuMillis = System.currentTimeMillis() - cpuStarted
+            val cpuTokens = cpuResult.optJSONArray("tokens").toIntList()
+
+            onProgress("Replaying the reference on $deviceName…")
+            container.llamaCppClient.load(
+                model,
+                threads,
+                gpuLayers = FULL_GPU_OFFLOAD,
+                deviceFilter = target.devicePrefix,
+            )
+            val gpuStarted = System.currentTimeMillis()
+            // Score the accelerator the same way the bisection does. Comparing free-running
+            // output token-for-token is not a correctness test: a quantized backend disagrees
+            // on near-ties, and one such difference then changes every token after it.
+            val predicted = container.llamaCppClient.teacherForced(cpuTokens.toIntArray())
+                .optJSONArray("predictions").toIntList()
+            val gpuMillis = System.currentTimeMillis() - gpuStarted
+            val agreement = AcceleratorAgreement.score(cpuTokens, predicted)
+            val usable = cpuTokens.isNotEmpty() && AcceleratorAgreement.isUsable(agreement)
+            val agreed = (agreement * minOf(cpuTokens.size, predicted.size)).toInt()
+
+            AcceleratorReport(
+                deviceName = deviceName,
+                matchesCpu = usable,
+                agreement = agreement,
+                cpuTokens = cpuTokens,
+                acceleratorTokens = predicted,
+                cpuMillis = cpuMillis,
+                acceleratorMillis = gpuMillis,
+                cpuText = cpuResult.optString("text"),
+                // Teacher forcing yields per-position predictions rather than a continuous
+                // string, so name the positions that differed instead of a second passage.
+                acceleratorText = (0 until minOf(cpuTokens.size, predicted.size))
+                    .filter { position -> cpuTokens[position] != predicted[position] }
+                    .joinToString(", ") { position ->
+                        "position $position: expected ${cpuTokens[position]}, got ${predicted[position]}"
+                    }
+                    .ifBlank { "every prediction matched" },
+                detail = if (usable) {
+                    "$deviceName agreed with the CPU reference on $agreed of ${cpuTokens.size} " +
+                        "predictions. Small differences on near-ties are expected."
+                } else {
+                    "$deviceName agreed on only $agreed of ${cpuTokens.size} predictions, which is " +
+                        "below the ${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% needed " +
+                        "to treat it as computing correctly."
+                },
+            )
+    }
+
     fun validateAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
         val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
@@ -746,65 +898,9 @@ class MainViewModel(
             val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
             val threads = (visibleCores - 2).coerceIn(1, 4)
             runCatching {
-                val devices = container.llamaCppClient.devices()
-                val deviceName = (0 until devices.optJSONArray("devices")?.length().orZero())
-                    .map { index -> devices.getJSONArray("devices").getJSONObject(index) }
-                    .firstOrNull { device -> device.optString("name").startsWith(target.devicePrefix) }
-                    ?.let { device -> device.optString("description").ifBlank { device.optString("name") } }
-                    ?: throw IllegalStateException(
-                        "This build found no ${target.label} device, so it cannot be validated.",
-                    )
-
-                container.llamaCppClient.load(model, threads, gpuLayers = 0)
-                val cpuStarted = System.currentTimeMillis()
-                val cpuResult = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
-                val cpuMillis = System.currentTimeMillis() - cpuStarted
-                val cpuTokens = cpuResult.optJSONArray("tokens").toIntList()
-
-                mutableState.update { it.copy(status = "Replaying the reference on $deviceName…") }
-                container.llamaCppClient.load(
-                    model,
-                    threads,
-                    gpuLayers = FULL_GPU_OFFLOAD,
-                    deviceFilter = target.devicePrefix,
-                )
-                val gpuStarted = System.currentTimeMillis()
-                // Score the accelerator the same way the bisection does. Comparing free-running
-                // output token-for-token is not a correctness test: a quantized backend disagrees
-                // on near-ties, and one such difference then changes every token after it.
-                val predicted = container.llamaCppClient.teacherForced(cpuTokens.toIntArray())
-                    .optJSONArray("predictions").toIntList()
-                val gpuMillis = System.currentTimeMillis() - gpuStarted
-                val agreement = AcceleratorAgreement.score(cpuTokens, predicted)
-                val usable = cpuTokens.isNotEmpty() && AcceleratorAgreement.isUsable(agreement)
-                val agreed = (agreement * minOf(cpuTokens.size, predicted.size)).toInt()
-
-                AcceleratorReport(
-                    deviceName = deviceName,
-                    matchesCpu = usable,
-                    agreement = agreement,
-                    cpuTokens = cpuTokens,
-                    acceleratorTokens = predicted,
-                    cpuMillis = cpuMillis,
-                    acceleratorMillis = gpuMillis,
-                    cpuText = cpuResult.optString("text"),
-                    // Teacher forcing yields per-position predictions rather than a continuous
-                    // string, so name the positions that differed instead of a second passage.
-                    acceleratorText = (0 until minOf(cpuTokens.size, predicted.size))
-                        .filter { position -> cpuTokens[position] != predicted[position] }
-                        .joinToString(", ") { position ->
-                            "position $position: expected ${cpuTokens[position]}, got ${predicted[position]}"
-                        }
-                        .ifBlank { "every prediction matched" },
-                    detail = if (usable) {
-                        "$deviceName agreed with the CPU reference on $agreed of ${cpuTokens.size} " +
-                            "predictions. Small differences on near-ties are expected."
-                    } else {
-                        "$deviceName agreed on only $agreed of ${cpuTokens.size} predictions, which is " +
-                            "below the ${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% needed " +
-                            "to treat it as computing correctly."
-                    },
-                )
+                measureBackend(model, target, threads) { message ->
+                    mutableState.update { it.copy(status = message) }
+                }
             }.onSuccess { report ->
                 mutableState.update { it.copy(acceleratorReport = report) }
             }.onFailure { error ->
