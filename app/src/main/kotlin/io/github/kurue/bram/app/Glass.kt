@@ -24,8 +24,11 @@ object Glass {
     /** Chrome floats over content and needs more opacity to stay legible while scrolling. */
     val chromeAlpha: Float = if (Build.VERSION.SDK_INT >= 31) 0.55f else 0.85f
 
-    /** Cards sit within content, so they can be lighter. */
-    const val CARD_ALPHA: Float = 0.34f
+    /**
+     * Cards sit within content. Enough tint to read as an object on the field rather than a patch
+     * of it — at a third they dissolved into the background and the screen read as one wall.
+     */
+    const val CARD_ALPHA: Float = 0.46f
 
     /** Bubbles carry body text; too little opacity and the text behind them competes. */
     const val BUBBLE_ALPHA: Float = 0.40f
@@ -37,7 +40,10 @@ object Glass {
      * Blur radius applied to whatever sits behind a panel. Enough that text passing under one is
      * clearly soft, without erasing it — a panel should read as glass, not as a hole.
      */
-    val blurRadius: Dp = 14.dp
+    val blurRadius: Dp = 20.dp
+
+    /** The sheet a screen is drawn on. Darker than the cards, so those read as objects on it. */
+    val panelTint: Color = Color(0xFF1C1C22)
 
     val cornerLarge: Dp = 22.dp
     val cornerMedium: Dp = 16.dp
@@ -68,7 +74,9 @@ fun GlassSurface(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val dark = isSystemInDarkTheme()
-    val base = if (tint.isSpecified()) tint else if (dark) Color(0xFF2A2A31) else Color.White
+    // Lighter than the panel rather than merely more opaque. A card tinted towards the panel's own
+    // tone disappears into it however solid it is, which is what "too busy" looked like: no edges.
+    val base = if (tint.isSpecified()) tint else if (dark) Color(0xFF3C3C48) else Color.White
 
     Box(modifier.clip(shape)) {
         if (blur) {

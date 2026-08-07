@@ -215,6 +215,9 @@ fun BramApp(viewModel: MainViewModel) {
                         .fillMaxHeight(0.88f),
                     shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
                     alpha = Glass.chromeAlpha,
+                    // Darker than the cards it holds. Both drew from the same default before, so
+                    // lightening the cards lightened their backdrop with them and nothing separated.
+                    tint = Glass.panelTint,
                 ) {
                     Column(Modifier.fillMaxSize().statusBarsPadding()) {
                         Box(
@@ -763,11 +766,7 @@ private fun ModelsScreen(
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionHeader(
-                    "Profiles",
-                    "A saved way of running a model",
-                    Modifier.weight(1f),
-                )
+                SectionHeader("Profiles", modifier = Modifier.weight(1f))
                 Button(onClick = onImport, enabled = !state.isImporting && !state.isGenerating) { Text("Import GGUF") }
             }
         }
@@ -777,7 +776,7 @@ private fun ModelsScreen(
                 // list is short — these are imported GGUFs, not a filesystem.
                 GlassSurface(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("New profile from", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                        Text("New profile", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                         Row(
                             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -864,7 +863,7 @@ private fun ModelsScreen(
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Model storage", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Imported models are copied into Bram's private storage, which currently " +
+                            "Copies live in Bram's private storage, currently " +
                                 "holds ${formatBytes(state.modelStorageBytes)}. Copies left behind by an " +
                                 "interrupted import can be removed safely.",
                             style = MaterialTheme.typography.bodySmall,
@@ -913,9 +912,7 @@ private fun AcceleratorValidationCard(
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Accelerator validation", fontWeight = FontWeight.SemiBold)
             Text(
-                "Records a deterministic CPU reference, then feeds the same tokens to the accelerator " +
-                    "and compares each next-token prediction. Teacher forcing keeps one difference " +
-                    "from cascading, so the score reflects compute accuracy rather than drift.",
+                "Compares an accelerator against a CPU reference, prediction by prediction.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1154,8 +1151,7 @@ private fun ProfileCard(
                         label = { Text("Instructions for this profile") },
                     )
                     Text(
-                        "Added to Bram's own instructions rather than replacing them, so a profile can " +
-                            "change how Bram answers without dropping the rules that keep a run honest.",
+                        "Added to Bram's own instructions, not replacing them.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1177,8 +1173,7 @@ private fun ProfileCard(
                     Column(Modifier.weight(1f)) {
                         Text("Reasoning", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Let the model think before answering. Thorough but much slower, and " +
-                                "short questions rarely need it.",
+                            "Slower, and rarely needed for short questions.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1211,14 +1206,10 @@ private fun ProfileCard(
                     }
                 }
                 OutlinedButton(onClick = onAutoConfigure, enabled = !locked) {
-                    Text("Auto-configure")
+                    // What it does is said once, here, rather than in a paragraph underneath: the
+                    // result it writes onto the profile explains itself afterwards.
+                    Text("Auto-configure · about a minute each")
                 }
-                Text(
-                    "Measures every accelerator against the CPU and picks the fastest one that still " +
-                        "agrees with it. Takes about a minute per accelerator.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
 
                 Text("Context", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 Row(
@@ -1379,11 +1370,9 @@ private fun SamplerControls(
     Text("Sampling", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
     Text(
         if (sampler.isGreedy) {
-            "Temperature 0 — always picks the likeliest word, so the same question gives the " +
-                "same answer."
+            "Temperature 0 — same answer every time"
         } else {
-            "Temperature ${"%.2f".format(sampler.temperature)} — higher wanders further from the " +
-                "likeliest word."
+            "Temperature ${"%.2f".format(sampler.temperature)}"
         },
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1396,8 +1385,7 @@ private fun SamplerControls(
     )
 
     Text(
-        "Repetition penalty ${"%.2f".format(sampler.repeatPenalty)} — higher discourages the model " +
-            "from repeating itself, which a small model on a short context tends to do.",
+        "Repetition penalty ${"%.2f".format(sampler.repeatPenalty)}",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -1440,7 +1428,7 @@ private fun SettingsScreen(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SectionHeader("Optional remote providers", "OpenAI-compatible Chat Completions endpoints")
+        SectionHeader("Remote providers")
         if (state.endpoints.isEmpty()) Text("None configured. Local GGUF chat does not require one.")
         state.endpoints.forEach { EndpointCard(it, onRemoveEndpoint) }
 
@@ -1496,7 +1484,7 @@ private fun SettingsScreen(
         } ?: CircularProgressIndicator()
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
-        SectionHeader("Agent foundation", "Kept behind the local model experience")
+        SectionHeader("Agent foundation")
         GlassSurface(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ReadinessRow("Context budgeting", "Working")
@@ -1854,10 +1842,13 @@ private fun ErrorCard(error: String) {
 }
 
 @Composable
-private fun SectionHeader(title: String, subtitle: String, modifier: Modifier = Modifier) {
+private fun SectionHeader(title: String, subtitle: String = "", modifier: Modifier = Modifier) {
     Column(modifier) {
         Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // Optional: a caption under every heading is read once and then becomes noise.
+        subtitle.takeIf(String::isNotBlank)?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
