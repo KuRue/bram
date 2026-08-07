@@ -149,14 +149,18 @@ internal fun streamingReply(
     text: String,
     format: ReasoningFormat = ReasoningFormat(),
 ): StreamingReply {
-    if (!format.isUsable) return StreamingReply(text, emptyList(), null)
-    val startTag = format.startTag
-    // A model that writes the opening tag itself is authoritative: read from the marker wherever it
-    // is. Only when there is none does the prompt's own opening apply.
-    val startsInReasoning = format.startsOpen && !text.contains(startTag)
-    if (!startsInReasoning && !text.contains(startTag)) {
-        return StreamingReply(text, emptyList(), null)
-    }
+    // The runtime usually reports the loaded format's exact tags. Some formats (LFM2.5 among them)
+    // report no opening tag while the model still emits the standard close, so a reply plainly using
+    // <think></think> is folded from those markers instead of shown raw.
+    val effective = if (format.isUsable) format else standardThinkFallback(text)
+    if (!effective.isUsable) return StreamingReply(text, emptyList(), null)
+    val startTag = effective.startTag
+    val hasStartTag = startTag.isNotEmpty()
+    // A model that writes the opening marker itself is authoritative: read from the marker wherever
+    // it is. Only when there is none does the prompt's own opening (startsOpen) apply.
+    val startsInReasoning = effective.startsOpen && (!hasStartTag || !text.contains(startTag))
+    val markerPresent = hasStartTag && text.contains(startTag)
+    if (!startsInReasoning && !markerPresent) return StreamingReply(text, emptyList(), null)
 
     val visible = StringBuilder()
     val closed = mutableListOf<String>()
@@ -165,7 +169,7 @@ internal fun streamingReply(
     var inReasoning = startsInReasoning
     while (cursor < text.length) {
         if (inReasoning) {
-            val end = format.firstEndTagFrom(text, cursor)
+            val end = effective.firstEndTagFrom(text, cursor)
             if (end == null) {
                 // The block is still being written: everything that follows is reasoning, and there
                 // is no answer yet.
@@ -176,6 +180,10 @@ internal fun streamingReply(
             cursor = end.first + end.second.length
             inReasoning = false
         } else {
+            if (!hasStartTag) {
+                visible.append(text, cursor, text.length)
+                break
+            }
             val next = text.indexOf(startTag, cursor)
             if (next < 0) {
                 visible.append(text, cursor, text.length)
@@ -187,6 +195,25 @@ internal fun streamingReply(
         }
     }
     return StreamingReply(visible.toString(), closed, open)
+}
+
+/**
+ * The fallback when the runtime did not describe the format but the reply is clearly using the
+ * de-facto reasoning markers.
+ *
+ * Returns an unusable format when neither marker is present, so ordinary text is left alone. An
+ * opening marker in the text is authoritative; without one the block is treated as opened by the
+ * prompt, which is how the reasoning formats that omit the opening tag actually behave.
+ */
+private fun standardThinkFallback(text: String): ReasoningFormat {
+    val hasOpen = text.contains("<think>")
+    val hasClose = text.contains("</think>")
+    if (!hasOpen && !hasClose) return ReasoningFormat()
+    return ReasoningFormat(
+        startTag = if (hasOpen) "<think>" else "",
+        endTags = listOf("</think>"),
+        startsOpen = !hasOpen,
+    )
 }
 
 /**
@@ -1212,7 +1239,19 @@ class MainViewModel(
                 } else {
                     runCatching {
                         val parsed = container.llamaCppClient.parseReply(rawReply)
-                        parsed.optString("content").ifBlank { rawReply } to parsed.optString("reasoning")
+                        val parsedReasoning = parsed.optString("reasoning")
+                        if (parsedReasoning.isNotBlank()) {
+                            parsed.optString("content").ifBlank { rawReply } to parsedReasoning
+                        } else {
+                            // The structured parser found no reasoning. Some formats it cannot
+                            // describe (LFM2.5 among them) still mark reasoning in the text, so fall
+                            // back to the same split the stream uses rather than leaving the markers
+                            // inline in the saved answer.
+                            val split = streamingReply(rawReply, reasoningFormat)
+                            val reasoning = (split.closedReasoning + listOfNotNull(split.openReasoning))
+                                .joinToString("\n\n").trim()
+                            split.visibleText.ifBlank { rawReply } to reasoning
+                        }
                     }.getOrDefault(rawReply to "")
                 }
                 // Every block the model opened, including one it never closed.
