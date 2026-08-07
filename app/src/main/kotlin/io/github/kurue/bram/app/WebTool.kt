@@ -90,28 +90,46 @@ class WebFetchTool : ToolHandler {
 private const val WEB_UA =
     "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
 
+/** Most redirects a fetch will follow before giving up, so a redirect loop fails fast and cleanly. */
+private const val MAX_REDIRECTS = 5
+
 /**
- * Reads up to [maxChars] of a response body as UTF-8. Asks for no compression so the body does not
- * arrive gzipped, and follows redirects, which most search and page URLs issue at least once.
+ * Reads up to [maxChars] of a response body as UTF-8.
+ *
+ * Redirects are followed by hand with a small cap rather than through HttpURLConnection's auto-follow:
+ * some pages (developer.android.com among them) issue a loop, and auto-follow runs to its hard limit
+ * of 21 and throws "Too many follow-up requests", which is noisy and looks like a rate limit to the
+ * model. A manual cap turns a loop into an ordinary tool error after five hops.
  */
 internal fun fetchRaw(url: URL, maxChars: Int): String {
-    val connection = (url.openConnection() as HttpURLConnection).apply {
-        requestMethod = "GET"
-        instanceFollowRedirects = true
-        connectTimeout = 12_000
-        readTimeout = 12_000
-        setRequestProperty("User-Agent", WEB_UA)
-        setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        setRequestProperty("Accept-Encoding", "identity")
+    var current = url
+    repeat(MAX_REDIRECTS + 1) {
+        val connection = (current.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            instanceFollowRedirects = false
+            connectTimeout = 12_000
+            readTimeout = 12_000
+            setRequestProperty("User-Agent", WEB_UA)
+            setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            setRequestProperty("Accept-Encoding", "identity")
+        }
+        try {
+            val code = connection.responseCode
+            if (code in 300..399) {
+                val location = connection.getHeaderField("Location")
+                    ?: throw java.io.IOException("Redirect had no Location")
+                current = URL(current, location)
+                return@repeat
+            }
+            if (code !in 200..299) throw java.io.IOException("HTTP $code")
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            return if (body.length > maxChars) body.substring(0, maxChars) else body
+        } finally {
+            connection.disconnect()
+        }
     }
-    return connection.use {
-        val body = it.inputStream.bufferedReader(Charsets.UTF_8).readText()
-        if (body.length > maxChars) body.substring(0, maxChars) else body
-    }
+    throw java.io.IOException("Too many redirects (more than $MAX_REDIRECTS)")
 }
-
-private fun HttpURLConnection.use(block: (HttpURLConnection) -> String): String =
-    try { block(this) } finally { disconnect() }
 
 /**
  * Pulls result links and snippets out of a DuckDuckGo HTML results page.
