@@ -125,34 +125,61 @@ internal data class StreamingReply(
  * Splits a partial reply into visible text and reasoning.
  *
  * The finished reply is split by the runtime's own structured parser, which needs the whole
- * thing. Until it arrives this does the same job on the marked case, so a closed `<think>`
- * block folds into a collapsed row the moment it closes rather than sitting in the transcript
- * as raw markup until the turn ends. A model that reasons in unmarked prose is
- * indistinguishable from one that is answering, so nothing is claimed about it.
+ * thing. Until it arrives this does the same job on the stream, so reasoning folds into a collapsed
+ * row as it is produced rather than sitting in the transcript as raw markup until the turn ends.
+ *
+ * Some chat formats open the reasoning block in the assistant prompt, so the model's own output
+ * begins inside it and contains only the closing tag. Others have the model write both tags, and
+ * which happens depends on the format and can invert with whether reasoning is enabled. When
+ * [reasoningStartsOpen] is set the text is read as already inside a block: everything up to the
+ * first `</think>` is reasoning, folding as it streams. A model that writes its own `<think>` is
+ * read marker-first either way, so guessing wrong costs a flicker rather than a wrong transcript.
+ *
+ * Two limits worth knowing. The tags here are `<think>`/`</think>`, which covers the Qwen and
+ * DeepSeek families and no others: llama.cpp also emits `[THINK]`, `<|channel|>analysis<|message|>`,
+ * and `<mm:think>`, and some formats have more than one closing tag. And whether the block starts
+ * open is inferred from the model's reasoning setting rather than known. Both are guesses standing
+ * in for something the runtime already computes — `common_chat_params` carries `thinking_start_tag`,
+ * `thinking_end_tags`, and the generation prompt — and Milestone 8 carries those across the process
+ * boundary so this can stop guessing.
+ *
+ * A model that reasons in unmarked prose is indistinguishable from one that is answering, so
+ * nothing is claimed about it.
  */
-internal fun streamingReply(text: String): StreamingReply {
-    if (!text.contains(OPEN_THINK)) return StreamingReply(text, emptyList(), null)
+internal fun streamingReply(text: String, reasoningStartsOpen: Boolean = false): StreamingReply {
+    // A model that writes its own <think> is authoritative: read from the marker. Only when there
+    // is none does an assumed-open block apply.
+    val startsInReasoning = reasoningStartsOpen && !text.contains(OPEN_THINK)
+    if (!reasoningStartsOpen && !text.contains(OPEN_THINK)) {
+        return StreamingReply(text, emptyList(), null)
+    }
     val visible = StringBuilder()
     val closed = mutableListOf<String>()
     var open: String? = null
     var cursor = 0
+    var inReasoning = startsInReasoning
     while (cursor < text.length) {
-        val start = text.indexOf(OPEN_THINK, cursor)
-        if (start < 0) {
-            visible.append(text, cursor, text.length)
-            break
+        if (inReasoning) {
+            val end = text.indexOf(CLOSE_THINK, cursor)
+            if (end < 0) {
+                // The block is still being written: everything that follows is reasoning, and
+                // there is no answer yet.
+                open = text.substring(cursor)
+                break
+            }
+            closed += text.substring(cursor, end)
+            cursor = end + CLOSE_THINK.length
+            inReasoning = false
+        } else {
+            val start = text.indexOf(OPEN_THINK, cursor)
+            if (start < 0) {
+                visible.append(text, cursor, text.length)
+                break
+            }
+            visible.append(text, cursor, start)
+            cursor = start + OPEN_THINK.length
+            inReasoning = true
         }
-        visible.append(text, cursor, start)
-        val bodyStart = start + OPEN_THINK.length
-        val end = text.indexOf(CLOSE_THINK, bodyStart)
-        if (end < 0) {
-            // Still being written: everything after the marker is reasoning, and there is no
-            // answer yet.
-            open = text.substring(bodyStart)
-            break
-        }
-        closed += text.substring(bodyStart, end)
-        cursor = end + CLOSE_THINK.length
     }
     return StreamingReply(visible.toString(), closed, open)
 }
@@ -837,6 +864,13 @@ class MainViewModel(
         AgentTaskService.start(container.appContext, "Answering: ${prompt.take(40)}")
         generationJob = container.appScope.launch {
             val agent = container.agent()
+            // Some chat formats open the <think> block in the assistant prompt, leaving the output
+            // stream with no opening marker — only reasoning, then </think>. Whether this one does
+            // is not known here, so it is assumed whenever the model is asked to reason: a model
+            // that writes its own marker is read marker-first anyway, which makes a wrong guess
+            // cost a flicker rather than a mangled transcript. Milestone 8 replaces the guess with
+            // the tags the runtime already computes.
+            val reasoningStartsOpen = selection.localModel?.thinkingEnabled == true
             var assistantText = ""
             var completedMessage: ConversationMessage? = null
             val activity = mutableListOf<AgentActivity>()
@@ -867,7 +901,7 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
-                            val streaming = streamingReply(assistantText)
+                            val streaming = streamingReply(assistantText, reasoningStartsOpen)
                             val now = System.currentTimeMillis()
                             // A block that has just closed keeps the time it actually took; leaving
                             // it on the running clock would have every finished block claim the
@@ -913,7 +947,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = "Running ${event.call.name}…",
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningStartsOpen).visibleText, activity + finishedThinking),
                                 )
                             }
                         }
@@ -928,7 +962,7 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = null,
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningStartsOpen).visibleText, activity + finishedThinking),
                                 )
                             }
                         }

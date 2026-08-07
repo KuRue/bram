@@ -31,6 +31,15 @@ struct runtime_state {
     int gpu_layers = 0;
     bool enable_thinking = false;
     std::string model_path;
+
+    // The chat context outlives a single turn so its KV cache can be reused. Rebuilding it every
+    // turn meant re-decoding the whole conversation each time, which grows without bound: at the
+    // measured prompt speed a 2,000-token thread spent about two minutes before its first token.
+    llama_context * chat_context = nullptr;
+    // Exactly the tokens the KV cache holds, in order, so the next prompt can be matched against
+    // it. Includes the tokens generated in previous turns, which the chat template will re-render
+    // as part of the next prompt.
+    std::vector<llama_token> cached_tokens;
 };
 
 // Fixed prompt for the cross-backend correctness comparison. Changing it invalidates every
@@ -246,6 +255,29 @@ llama_context * create_context(int context_tokens = 0) {
     return context;
 }
 
+/** Drops the reusable chat context, so the next turn starts from an empty cache. */
+void release_chat_context() {
+    if (g_state.chat_context != nullptr) {
+        llama_free(g_state.chat_context);
+        g_state.chat_context = nullptr;
+    }
+    g_state.cached_tokens.clear();
+}
+
+/**
+ * How much of [tokens] the cache already holds, counted from the start.
+ *
+ * Capped one short of the prompt so there is always a token left to decode: llama.cpp produces
+ * logits from decoding, so a fully cached prompt would leave nothing to sample from.
+ */
+size_t reusable_prefix(const std::vector<llama_token> & tokens) {
+    const size_t limit = std::min(g_state.cached_tokens.size(), tokens.size());
+    size_t shared = 0;
+    while (shared < limit && g_state.cached_tokens[shared] == tokens[shared]) ++shared;
+    if (shared >= tokens.size() && shared > 0) --shared;
+    return shared;
+}
+
 void decode_prompt(llama_context * context, const std::vector<llama_token> & tokens) {
     size_t offset = 0;
     while (offset < tokens.size()) {
@@ -314,6 +346,7 @@ std::string apply_chat_template(
 
 void unload_locked() {
     g_cancelled.store(true, std::memory_order_relaxed);
+    release_chat_context();
     g_state.chat_templates.reset();
     if (g_state.model != nullptr) llama_model_free(g_state.model);
     g_state = {};
@@ -476,10 +509,51 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
                 " > " + std::to_string(g_state.context_tokens) + ")");
         }
 
-        llama_context * context = create_context();
-        const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);
+        if (g_state.chat_context == nullptr) {
+            g_state.chat_context = create_context();
+            g_state.cached_tokens.clear();
+        }
+        llama_context * context = g_state.chat_context;
+
+        // Keep the part of the cache the new prompt agrees with and drop the rest. A turn appends
+        // to the conversation, so in the common case everything up to the previous reply matches
+        // and only the new user message has to be decoded.
+        const size_t matched = reusable_prefix(prompt_tokens);
+        // Only ask for a trim when there is something to remove. A turn that purely extends the
+        // cache needs none, and asking anyway fails on architectures that cannot erase part of a
+        // sequence — which would throw away a cache that was already correct.
+        const bool trimmed = matched == g_state.cached_tokens.size() ||
+            llama_memory_seq_rm(llama_get_memory(context), 0, static_cast<llama_pos>(matched), -1);
+        if (!trimmed) {
+            // A cache that cannot be partially trimmed has to go entirely, or the positions of what
+            // follows would no longer line up with what the model is told it has seen. Recurrent
+            // and hybrid architectures — Mamba, RWKV, and LFM2 among them — refuse partial removal
+            // because their state is not kept per token, so they land here on every turn that does
+            // not purely extend the cache.
+            llama_memory_clear(llama_get_memory(context), true);
+            g_state.cached_tokens.clear();
+        } else {
+            g_state.cached_tokens.resize(matched);
+        }
+        // What was kept, after a trim that may have had to discard everything.
+        const size_t reused = g_state.cached_tokens.size();
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+                            "kv cache: prompt %zu tokens, matched %zu, reused %zu",
+                            prompt_tokens.size(), matched, reused);
+
+        const std::vector<llama_token> pending(
+            prompt_tokens.begin() + static_cast<std::ptrdiff_t>(g_state.cached_tokens.size()),
+            prompt_tokens.end());
         const auto prompt_start = std::chrono::steady_clock::now();
-        decode_prompt(context, prompt_tokens);
+        try {
+            decode_prompt(context, pending);
+        } catch (...) {
+            // The cache no longer describes what the model has seen, and there is no way to tell
+            // how far it got, so it cannot be trusted for the next turn.
+            release_chat_context();
+            throw;
+        }
+        g_state.cached_tokens = prompt_tokens;
         const auto prompt_end = std::chrono::steady_clock::now();
 
         llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
@@ -530,8 +604,12 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
                     finish_reason = "cancelled";
                     break;
                 }
+                release_chat_context();
                 throw std::runtime_error("llama.cpp failed during token generation (code " + std::to_string(result) + ")");
             }
+            // Recorded only once the token is in the cache, so a failed decode does not leave the
+            // record claiming more than the cache holds.
+            g_state.cached_tokens.push_back(next);
         }
         if (!pending_utf8.empty()) {
             jstring text = to_jstring(env, pending_utf8);
@@ -545,6 +623,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         const auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start).count();
         std::ostringstream result;
         result << "{\"promptTokens\":" << prompt_tokens.size()
+               << ",\"cachedPromptTokens\":" << reused
                << ",\"outputTokens\":" << output_count
                << ",\"promptMillis\":" << prompt_ms
                << ",\"decodeMillis\":" << decode_ms

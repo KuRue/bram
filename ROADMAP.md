@@ -63,8 +63,8 @@ for the next-token prediction at each position — because free-running generati
 token derail everything after it, making a small numerical difference indistinguishable from a
 broken kernel.
 
-Deferred to a later milestone: OpenCL, LiteRT, automatic plan selection and probation runs, KV/batch
-tuning, storage-assisted mode, and a multi-vendor device matrix.
+Deferred to a later milestone: OpenCL, LiteRT, automatic plan selection and probation runs,
+storage-assisted mode, and a multi-vendor device matrix. KV and batch tuning became Milestone 7.
 
 ## Milestones 3 to 6 — a usable local assistant (complete)
 
@@ -85,16 +85,148 @@ Also in this stretch: emulator support (an opt-in `x86_64` ABI), which exposed t
 a phone would also hit — a CPU load failing because an unusable GPU was merely present, and a model
 being unusable because its Jinja template could not be rendered.
 
-## Milestone 7 — durable agent (not started)
+## Milestone 7 — runtime performance (in progress)
 
+Promotes the deferred "KV/batch tuning" line above to a milestone of its own, because measurement
+showed it is the largest user-visible cost left. Every turn built a fresh `llama_context` and
+re-decoded the whole prompt, so at the measured 16.2 tok/s prompt speed a conversation grown to
+2,000 tokens spent about two minutes before its first token, worsening with every turn.
+
+- **KV reuse across turns.** Keep the context alive between turns, keep the longest common token
+  prefix, and decode only what is new. Implemented and correct, but it buys nothing on the current
+  reference model: `LFM2.5-2.6B` is a hybrid convolution/attention architecture, and llama.cpp
+  refuses to partially erase such a sequence because the state is not kept per token — Mamba and
+  RWKV behave the same way. Measured on the phone as `prompt 909 tokens, matched 816, reused 0`:
+  the prefix matching works, the trim is declined, and the cache is correctly discarded rather
+  than trusted. Needs a pure-attention model to demonstrate the gain, and the app should say which
+  of the two a loaded model is rather than leaving it to a log line.
+- **KV cache quantization.** `type_k`/`type_v` at `q8_0` roughly halves KV memory. The payoff is
+  context length within a phone's RAM rather than speed.
+- **FlashAttention.** Per-backend rather than global: supported on CPU, and to be confirmed on the
+  Hexagon HTP path before being enabled there. Also a practical prerequisite for quantized KV.
+- **Batch tuning.** `n_ubatch` is pinned at 128; both it and `n_batch` should follow measured
+  prompt throughput instead of a fixed guess.
+
+Exit criterion: each optimization reproduces the CPU reference under teacher forcing before it is
+reported as working. A prefix-matching bug produces plausible wrong output rather than a crash,
+which is the failure mode that already made a broken Vulkan backend look healthy.
+
+## Milestone 8 — model profiles (not started)
+
+Replaces the model card with saved configurations. Per-model preferences already exist as fields on
+the GGUF record; this makes them a named record instead, many profiles to one file.
+
+- A profile owns a name, a GGUF reference, sampler settings, context size, backend, reasoning
+  on/off, and a system prompt.
+- Sampler settings become per-profile rather than fixed. Only temperature currently crosses the
+  process boundary; `top_k` is pinned at 40 and `top_p` at 0.95 in the JNI layer.
+- The status pill selects a profile rather than a model.
+- Carry the loaded format's reasoning tags across the process boundary while that boundary is open.
+  `common_chat_params` already computes `supports_thinking`, `thinking_start_tag`, and
+  `thinking_end_tags`, and the JNI layer already captures it for the end-of-turn parse. The
+  streaming split in the app hardcodes `<think>`/`</think>` instead, which covers the Qwen and
+  DeepSeek families and no others — llama.cpp also emits `[THINK]`,
+  `<|channel|>analysis<|message|>`, and `<mm:think>`, and some formats close with more than one tag.
+  Whether the block starts open is inferred from the model's reasoning setting for the same reason,
+  when the generation prompt says so outright.
+
+Ordering note: Milestone 7 lands first so profiles have the KV and attention settings to expose,
+rather than needing a second pass to add them.
+
+## The agent milestones
+
+Milestones 9 to 16 turn Bram from a chat app with one tool into an agent harness. They are ordered
+by dependency rather than by appeal. The permission model comes first because its current stub is
+what limits Bram to a single read-only tool: anything with an effect is denied, so every tool added
+before it is a tool that cannot run.
+
+Two platform facts shape all of it, and are recorded in
+[the architecture notes](ARCHITECTURE.md#running-code-on-android):
+
+- Bram cannot execute binaries it downloads. Android blocks `execve()` on files in an app's data
+  directory for apps targeting API 29 and above, which Bram does.
+- Therefore Bram cannot host stdio MCP servers, since those are spawned as child processes, and it
+  cannot ship its own shell without a Termux-sized userland.
+
+## Milestone 9 — permissions and the tool contract (not started)
+
+The seam exists: `ToolApprovalGate` sits in the tool loop, tools already carry `readOnly` and
+`requiredPermissions`, and a denial already comes back as a `permission_denied` tool result rather
+than an exception. What is missing is a decision. The only implementation, `ReadOnlyApprovalGate`,
+allows read-only tools with no required permissions and denies everything else, which is why Bram
+has exactly one tool worth calling.
+
+- A gate that asks the user, rather than one that answers on their behalf.
+- Calls that need approval appear in the transcript with a preview of what will happen, and block
+  until answered.
+- Decisions are remembered per scope — this tool, this session, this target — rather than globally
+  or once per call.
+- Timeout is an ordinary tool result like denial, so an unattended run ends in a recorded refusal
+  instead of hanging.
+
+Exit criterion: a tool cannot reach a side effect without a recorded decision, and a denied call
+leaves the run able to continue.
+
+## Milestone 10 — Android tool surface (not started)
+
+The tools worth having on a phone are the platform's own, not a filesystem.
+
+- Files, HTTP fetch, and clipboard.
+- Intents, so Bram can hand work to whatever app already does it.
+- Calendar, contacts, and notifications behind runtime permissions.
+- Alarms and scheduling, which is what makes unattended work possible at all.
+
+## Milestone 11 — Termux integration (not started)
+
+Gives the agent a real toolchain — compilers, package managers, git — without Bram shipping a
+userland or fighting the execution restriction, because the restriction stays Termux's problem.
+
+- Send commands through Termux's `RUN_COMMAND` intent to `com.termux/com.termux.app.RunCommandService`.
+- Collect stdout, stderr, and exit code back through a `PendingIntent` result bundle. Separate
+  streams are only available for background commands; a session transcript interleaves them.
+- Results are truncated to about 100 KB of combined output, with the original lengths supplied
+  alongside, so the agent must be able to tell a truncated result from a complete one.
+- Give each command its own result directory, since concurrent commands otherwise collide.
+- Degrade honestly when Termux is absent, when `allow-external-apps` is unset in
+  `~/.termux/termux.properties`, or when the `com.termux.permission.RUN_COMMAND` permission is
+  refused. All three are normal, and none should look like a crash.
+
+This is the widest capability Bram will have: arbitrary command execution as the user. It lands
+after Milestone 9 and not before.
+
+## Milestone 12 — sessions and the task queue (not started)
+
+- Named sessions that outlive a turn, with scrollback the agent can page through rather than
+  re-read whole.
+- A real queue with scheduled execution and result notifications. `AgentTaskService` tracks one run
+  and is the foundation for this, not the finished thing.
+- Per-task UI: what is running, what it has done, and how to stop it.
+
+## Milestone 13 — context compaction and memory (not started)
+
+- Summarise what falls out of the context window instead of dropping it. The budgeter currently
+  records what it omitted but does nothing with it.
 - Room-backed run journal, memory provenance, and FTS retrieval.
-- Optional embeddings/vector index selected per device.
-- Permissioned built-in tools beyond the single read-only `device_status`, and an approval UI.
-- Versioned skill packages with validation, drafts, activation, and rollback.
-- A task queue with scheduled execution and result notifications. `AgentTaskService` is the
-  foundation; there is no queue or per-task UI yet.
+- Optional embeddings and a vector index, selected per device.
 
-## Milestone 8 — curated runtimes and routing (not started)
+Depends on Milestone 7: compaction costs a model call, and on a phone that is the same
+prompt-reprocessing cost that KV reuse exists to remove.
+
+## Milestone 14 — remote MCP (not started)
+
+- Streamable HTTP transport only, with `Authorization` headers and server identity pinned per
+  configured server.
+- Documented as a limitation with its reason, since most published MCP servers are stdio and will
+  never run here.
+- Tool descriptions from a server are untrusted input, and are subject to Milestone 9 like any
+  other tool.
+
+## Milestone 15 — skills and automations (not started)
+
+- Versioned skill packages with validation, drafts, activation, and rollback.
+- Automations built on the scheduling from Milestone 10 and the queue from Milestone 12.
+
+## Milestone 16 — curated runtimes and routing (not started)
 
 - LiteRT-LM packages and device-specific compiled caches.
 - OpenAI Responses adapter where supported.
@@ -109,3 +241,6 @@ being unusable because its Jinja template could not be rendered.
 - Android tests for Keystore migration, process death, WorkManager, and storage permissions.
 - Native correctness tests before performance tests for every backend/operator path.
 - Soak tests under low memory, low battery, thermal throttling, app backgrounding, and cancellation.
+- Tool permission tests that assert a side effect cannot be reached without a recorded decision.
+- Termux integration tests for the three ordinary failure modes: not installed, external apps not
+  allowed, and permission refused.

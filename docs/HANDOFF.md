@@ -125,7 +125,9 @@ codebase compiled cleanly, passed CI, and were only visible when the app actuall
 
 ## Next
 
-Open a pull request for `milestone-9-glass-ui`, then continue on stability and on the accelerators.
-Hexagon is validated but nothing yet routes chat to it by default; Vulkan needs its shared broken
-operation identified before it is worth offering. Model download is explicitly not wanted right
-now.
+Milestone 7 is in progress: KV reuse across turns is committed but not yet verified on hardware.
+Then Milestone 8, model profiles, and the agent milestones 9 to 16, which start with turning the
+tool approval gate into something that actually asks.
+
+Hexagon is validated but nothing routes chat to it by default; Vulkan needs its shared broken
+operation identified before it is worth offering. Model download is explicitly not wanted.
