@@ -1,174 +1,186 @@
 # Session handoff
 
-Last updated: 2026-08-05
+Last updated: 2026-08-07
 
 ## Current source of truth
 
 | Item | Value |
 |---|---|
 | Repository | Private `KuRue/bram` |
-| Branch | `main` at [`dbc8271`](https://github.com/KuRue/bram/commit/dbc82716906da45d31513204223c5e81f41a5baa) |
-| Open pull requests | None |
-| In flight | `milestone-9-glass-ui`, not yet opened as a PR |
+| main | [`27fd7e3`](https://github.com/KuRue/bram/commit/27fd7e3) — through tool permissions and a callable tool (#16) |
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
-| Test emulator | AVD `Pixel_9a`, x86_64, resized to 16 GB storage and 6 GB RAM |
-| Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
+| Test emulator | AVD `Pixel_9a`, x86_64, 6 GB RAM / 16 GB storage |
+| Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone, tool-capable), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
 
-Everything below has been exercised on real hardware or the emulator, not only compiled.
+main is healthy and CI-green. Everything below that is not yet on main is on a
+feature branch, verified but unmerged.
 
-## What works
+## In flight (feature branches, ready to merge)
 
-**Local CPU inference.** Import a GGUF through the document picker, verify it with SHA-256, load it
-in the isolated `:inference` process, and chat with streaming, cancellation, unload, and recovery
-from a killed inference process. Validated on the S25 Ultra.
+- **`milestone-8b-profile-first`** — profile UI polish: a real "New profile"
+  entry (a model picker) separate from "Import model", a top-k sampler slider,
+  and six dead `ModelsScreen` callbacks removed. Compile + unit verified.
+- **`milestone-8c-opencl`** — the OpenCL backend. The earlier "cause unknown"
+  load abort is fixed: `ggml_backend_sched_new` requires the CPU backend to be
+  last, and Bram's accelerator-only device list violated that, so the CPU
+  device is now appended after the matched accelerator. Validated on the S25
+  Ultra at 96% (23/24) agreement, 1.11x vs CPU on Qwen3.5-Q4_0. OpenCL is opt-in
+  (`BRAM_OPENCL=true`), needs the uncommitted `runtime/llamacpp/src/main/cpp/
+  opencl-stub/libOpenCL.so` vendor stub (CI cannot build it), and `GGML_OPENCL`
+  is cached in `.cxx` so toggling it means deleting `.cxx`. The in-tree commit
+  message still says "cause unknown" and is outdated.
+- **`agent-tools`** — transcript and the agent surface. A multi-step turn
+  collapses to one expandable summary line ("Thought 8s · 3 tools"); new
+  `web_search` (DuckDuckGo, no key) and `web_fetch` (page to text) tools behind
+  the approval gate, scoped to the query or URL; `web_fetch` follows redirects
+  by hand with a cap and sends browser-like headers with gzip decoding; LFM2.5
+  reasoning now folds (it reported an unusable format, so the streamer falls
+  back to `<think>`/`</think>`). 60+ unit tests; the web tools were exercised on
+  the phone. Reasoning-folding is unit-tested only, not yet driven on device.
 
-**Accelerators.** The Hexagon NPU passes correctness validation on the S25 Ultra at 23/24 (95.8%)
-teacher-forced agreement with CPU. Measured speed against the CPU reference has ranged from about
-1.5x to 1.9x across runs on the same phone and model; the 1.9x reading is the most recent. Vulkan on
-the same device fails:
-75% agreement with a single offloaded layer, collapsing to all-zero logits past about seven, with
-no error reported by the driver. Vulkan compiles and is offered, but is not validated.
+## What works (on main)
 
-**Conversations.** Persisted as one JSON file each with a rebuildable index. Multiple threads, New
-and History, titles derived from the first message, restored on launch. Survives `force-stop`.
+**Local CPU inference.** Import a GGUF through the document picker, verify it
+with SHA-256, load it in the isolated `:inference` process, and chat with
+streaming, cancellation, unload, and recovery from a killed inference process.
+Validated on the S25 Ultra.
 
-**Agentic transcript.** Messages carry ordered activity entries — reasoning and tool invocations —
-rendered as collapsed single lines that expand on tap, and persisted with the conversation.
+**Accelerators.** Hexagon NPU passes on the S25 Ultra at 23/24 (95.8%)
+teacher-forced agreement, ~1.7x CPU. Vulkan on the same device fails: 75%
+agreement with one offloaded layer, collapsing to all-zero logits past about
+seven, with no error reported. Vulkan compiles and is offered, but is not
+validated.
 
-**Background runs.** Agent work belongs to an application scope and holds a foreground service, so
-a run continues and writes its reply when the user leaves the app.
+**Conversations.** Persisted as one JSON file each with a rebuildable index.
+Multiple threads, New and History, titles from the first message, restored on
+launch. Survives `force-stop`.
 
-**Chat quality of life.** Retry, edit-and-resend, copy, Markdown rendering, and auto-scroll that
-follows a streaming reply.
+**Agentic transcript.** Messages carry ordered activity entries — reasoning and
+tool invocations — rendered as collapsed lines that expand on tap and persisted
+with the conversation.
 
+**Background runs.** Agent work belongs to an application scope and holds a
+foreground service, so a run continues and writes its reply when the user leaves
+the app.
 
-## In flight on `milestone-9-glass-ui`
+**Chat quality of life.** Retry, edit-and-resend, copy, Markdown rendering, and
+auto-scroll that follows a streaming reply.
 
-Not on `main` yet, and not opened as a pull request. Verified on the S25 Ultra:
-
-- A translucent interface built on the Haze library for real backdrop blur, a bubble top bar with a
-  burger menu and status pill, and a dark field with a fine dot lattice behind it.
-- The last loaded model is reopened on launch. Auto-load had never worked: the startup path built
-  the catalog itself and never called the restore, so every launch after the first landed in a chat
-  whose send button silently did nothing.
-- Reasoning is split from the answer on every token rather than once the reply finishes, so a closed
-  `<think>` block folds into its collapsed row immediately instead of sitting in the transcript as
-  raw markup.
-- An accelerator run restores whatever model was loaded when it started. It used to leave the
-  runtime unloaded, stranding the chat in the same silent dead end as the auto-load bug.
-- A GGUF's `general.name` is ignored when it looks like a commit hash, which is what LFM2.5 ships.
+**Tools.** The approval gate asks before a side-effecting tool runs; `write_note`
+is the one tool a local model can call end to end. (More tools live on
+`agent-tools`.)
 
 ## What is not implemented
 
-- **Model download.** Getting a GGUF in still needs a browser and the file picker. Deliberately
-  deferred.
-- **Task queue and scheduling.** One run is tracked at a time. There is no queue, no scheduled work,
-  and no per-task UI. `AgentTaskService` is the foundation for it, not the finished thing.
-- **Tools.** Only the read-only `device_status` tool exists. The transcript can display tool
-  activity, but there is little for it to display.
+- **Model download.** Getting a GGUF in still needs a browser and the file
+  picker. Deliberately deferred.
+- **Task queue and scheduling.** One run is tracked at a time. There is no
+  queue, no scheduled work, and no per-task UI. `AgentTaskService` is the
+  foundation, not the finished thing.
+- **Tools beyond `device_status` and `write_note`.** `web_search`/`web_fetch`
+  are on `agent-tools`, not main.
 - **Memory, skills, automations.** Interfaces only.
-- **OpenCL and LiteRT.** Not implemented.
+- **OpenCL and LiteRT.** OpenCL is on `milestone-8c-opencl`, validated; LiteRT is
+  not started.
 - **Remote endpoints.** Optional and non-streaming.
 
 ## Known issues
 
-**Qwen3.5's chat template does not render.** It iterates `messages[::-1]`, which llama.cpp's Jinja
-engine (minja) yields nothing for, so the template raises `No user query found in messages`. Bram
-falls back to llama.cpp's built-in templates. Two consequences: the model emits its own turn header
-and empty `<think>` markers, which Bram strips after parsing; and its reasoning arrives as unmarked
-prose, so it cannot be folded into a collapsed entry. Turning reasoning off is the practical fix
-and is the default.
+**Qwen3.5's chat template does not render.** It iterates `messages[::-1]`, which
+llama.cpp's Jinja engine yields nothing for, so the template raises and Bram
+falls back to a built-in one. Turning reasoning off is the practical fix and is
+the default.
 
-**Reasoning tags come from the runtime, but unmarked prose still cannot be folded.** llama.cpp
-reports the loaded format's markers, and Qwen3.5 reports `<think>` with two closing tags,
-`</think>` and `<tool_call>`. Its own template does not render, though, so Bram falls back to a
-built-in one and the model reasons in unmarked prose — nothing marks it, so nothing can collapse it.
+**Tools need the model's own template to render.** Tool definitions go through
+`common_chat_templates_apply`. When a template falls back, that path has no tool
+support; Qwen3.5 is in that state and cannot call a tool.
 
-**The tool path runs end to end on the emulator, properly.** The model calls `write_note`, the call
-is parsed from its own format, the approval card shows the arguments, `Allow once` executes it, and
-the file appears. Two defects had to go first: the parse ran without the parser the template built,
-and generation rendered special tokens away before parsing, deleting the very marker that identifies
-a call. The retry and bare-call fallback that were built to work around those are now dead weight
-and should be removed.
+**LFM2.5-2.6B is too small for reliable tool use.** It retries failing calls,
+invents tools the gate then rejects, and exhausts the tool-turn budget. The tool
+infrastructure is ready; real agent behavior needs a larger tool-capable model.
 
-**Superseded — the tool path used to run only through a fallback.** LFM2.5 writes a bare
-`[write_note(name='q', body='z')]` without the marker its format requires; the parser and a forced
-retry both decline it; a fenced fallback recovers it; and the approval card appears. Left
-unanswered it was refused after two minutes and nothing ran. A recovered call always asks — it
-never matches a remembered allowance — because it is text read as an intent rather than the format
-saying so.
+**`web_fetch` loops on bot-hostile sites.** developer.android.com redirect-loops
+under plain HTTP regardless of headers; the model should use `web_search`
+snippets or alternate URLs. Ordinary pages (example.com, Wikipedia) fetch fine.
+(On `agent-tools`.)
 
-**The UI cannot be read by automation while a turn is running.** `uiautomator dump` needs an idle
-window and the send button animates continuously during generation, so the accessibility tree is
-never dumpable mid-turn. Screenshots still work. This is why the approval card's accept branch is
-still unverified: the card only exists mid-turn.
+**The UI cannot be read by automation while a turn is running.** `uiautomator
+dump` needs an idle window and the send button animates during generation, so the
+tree is not dumpable mid-turn. Screenshots still work; the approval card's accept
+branch is still unverified for this reason.
 
-**The build can silently lose Hexagon.** The packaged `libbram_llama.so` currently contains no
-`ggml-hex` symbols and no HTP skel libraries, so the phone offers only Adreno and the NPU is gone.
-Nothing failed: several builds during the tool-calling work ran without `HEXAGON_SDK_ROOT`, CMake
-cached `GGML_HEXAGON=OFF`, and later builds that did export it reused the cache. A UI observation
-caught it, not the build.
+**The build can silently lose Hexagon.** CMake caches `GGML_HEXAGON=OFF`, so a
+build without `HEXAGON_SDK_ROOT` poisons later builds. Clear
+`runtime/llamacpp/.cxx` to recover, and check the packaged `.so` with
+`strings | grep ggml-hex` rather than trusting the build log. The same cache trap
+applies to `GGML_OPENCL`.
 
-Recovering it needs the CMake cache cleared — delete `runtime/llamacpp/.cxx` — and a rebuild with
-`HEXAGON_SDK_ROOT` set. Worth checking with `strings ... | grep ggml-hex` afterwards rather than
-trusting the build to say so, and worth making CI or the app report which backends the library
-actually contains, since a validated hardware capability disappeared without a single warning.
+**Reasoning is expensive.** A reasoning model asked to say hello can spend
+paragraphs deliberating. Reasoning is off by default, per model.
 
-**Tools need the model's own template to render.** Tool definitions are passed to
-`common_chat_templates_apply`, which produces the grammar that constrains a tool call. When a
-template fails to render, Bram falls back to a built-in one, and that path has no tool support: the
-tools are accepted and silently ignored. Qwen3.5 is in exactly that state, so it cannot call a tool
-however it is asked.
-
-**Reasoning is expensive.** A reasoning model asked to say hello can spend paragraphs deliberating.
-Reasoning is off by default, per model.
-
-**Vulkan's failure is in a shared operation, not a layer.** Bisection on the Adreno 830 shows even
-a single offloaded layer disagreeing, so the fault is in something every layer uses. Nothing has
-been attempted to fix it; the backend is offered and reported as unvalidated.
+**Vulkan's failure is in a shared operation, not a layer.** Bisection on the
+Adreno 830 shows even one offloaded layer disagreeing. Nothing has been attempted
+to fix it; the backend is offered and reported as unvalidated.
 
 ## Build
 
-See [Building Bram](BUILDING.md) for the full toolchain. The parts that are easy to get wrong:
+See [Building Bram](BUILDING.md) for the full toolchain. The parts that are easy
+to get wrong:
 
-- **CMake 3.30.5**, not the NDK default, because the Vulkan backend needs FetchContent's
-  `find_package` redirect.
-- **WSL is the recommended local environment.** Incremental native rebuilds take about 8 seconds
-  there against roughly 12 minutes in CI, and its Linux host compiler avoids the MSVC requirement
-  Windows hosts hit when building `vulkan-shaders-gen`.
-- **Hexagon is opt-in** through `HEXAGON_SDK_ROOT`, since the SDK is proprietary and absent on CI.
-- **Emulator builds are opt-in** through `BRAM_EMULATOR_ABI=true`, which adds `x86_64`. Bram is
-  otherwise ARM64-only and its native library cannot load on a stock emulator image.
-- Keep `ninja` on `PATH`; several native sub-builds inherit the generator without the make program.
+- **CMake 3.30.5**, not the NDK default, because the Vulkan backend needs
+  FetchContent's `find_package` redirect.
+- **WSL is the recommended local environment.** Incremental native rebuilds take
+  seconds there against ~12 minutes in CI, and its Linux host compiler avoids the
+  MSVC requirement Windows hosts hit building `vulkan-shaders-gen`.
+- **Hexagon is opt-in** through `HEXAGON_SDK_ROOT`, since the SDK is proprietary
+  and absent on CI. The SDK is not installed on this machine; extract it via the
+  Docker image in BUILDING.md before any NPU build.
+- **OpenCL is opt-in** through `BRAM_OPENCL=true`, additionally needs the
+  uncommitted `opencl-stub/libOpenCL.so`, and toggling it means clearing `.cxx`.
+- **Emulator builds are opt-in** through `BRAM_EMULATOR_ABI=true`, which adds
+  `x86_64`. Bram is otherwise ARM64-only.
+- **Debug signing across hosts.** Gradle signs with the host's debug keystore, so
+  APKs from CI, Windows, and WSL differ and cannot install over each other
+  (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Point builds at one shared keystore with
+  `BRAM_DEBUG_KEYSTORE` (passwords default to `android` / `androiddebugkey`).
+- Keep `ninja` on `PATH`; several native sub-builds inherit the generator without
+  the make program.
 
 ## Testing
 
-CI runs JVM tests, Android lint, and a full native build with CPU and Vulkan. It cannot build
-Hexagon, which needs the proprietary SDK, and it cannot run any accelerator correctness test, which
-needs real hardware.
+CI runs JVM tests, Android lint, and a full native build with CPU and Vulkan. It
+cannot build Hexagon or OpenCL, and cannot run any accelerator correctness test,
+which needs real hardware.
 
-Unit tests cover accelerator agreement scoring, offload bisection, and Markdown rendering. The
-accelerator tests exist because two earlier acceptance criteria produced confidently wrong verdicts
-on device; the cases that misled us are pinned.
+Unit tests cover accelerator agreement scoring, offload bisection, Markdown
+rendering, the streaming reasoning split, the web tool HTML parsing, and the
+activity summary. The accelerator tests exist because two earlier acceptance
+criteria produced confidently wrong verdicts on device; the cases that misled us
+are pinned.
 
-For anything touching inference or the UI, run it on the emulator. Three separate defects in this
-codebase compiled cleanly, passed CI, and were only visible when the app actually ran.
+For anything touching inference or the UI, run it on the emulator or phone. Three
+separate defects in this codebase compiled cleanly, passed CI, and were only
+visible when the app actually ran.
 
 ## Working agreements
 
-- Verify accelerators against CPU output rather than benchmarking them. A speed-only comparison
-  reported a broken Vulkan backend as working.
-- Compare with teacher forcing, not free-running generation. One differing token otherwise sends
-  the rest of the reply somewhere unrelated, and a small numerical difference becomes
-  indistinguishable from a broken kernel.
-- Do not report an accelerator as validated because it compiled and produced output.
+- Verify accelerators against CPU output rather than benchmarking them. A
+  speed-only comparison reported a broken Vulkan backend as working.
+- Compare with teacher forcing, not free-running generation. One differing token
+  otherwise sends the rest of the reply somewhere unrelated.
+- Do not report an accelerator as validated because it compiled and produced
+  output.
 - Squash-merge one commit per milestone.
 
 ## Next
 
-Milestone 7 is in progress: KV reuse across turns is committed but not yet verified on hardware.
-Then Milestone 8, model profiles, and the agent milestones 9 to 16, which start with turning the
-tool approval gate into something that actually asks.
+1. Merge the three ready branches when happy — `milestone-8b-profile-first`,
+   `milestone-8c-opencl`, `agent-tools`. Each is self-contained and verified.
+2. Verify the NPU still routes after backend changes. Needs an arm64 build with
+   `HEXAGON_SDK_ROOT`; Hexagon is validated at 95.8% / ~1.7x on main today.
+3. Vulkan correctness — fails in a shared operation on Adreno 830. Still open.
+4. A larger tool-capable model for agentic use. The web tools and approval gate
+   work; LFM2.5-2.6B cannot chain tools reliably.
 
-Hexagon is validated but nothing routes chat to it by default; Vulkan needs its shared broken
-operation identified before it is worth offering. Model download is explicitly not wanted.
+Reasoning-folding for LFM2.5 (`agent-tools`) is unit-tested only; confirm on
+device with a reasoning turn when convenient.
