@@ -443,6 +443,34 @@ prompt-reprocessing cost that KV reuse exists to remove.
 - Per-conversation privacy and remote-fallback policies.
 - Optional speculative decoding and task-specific worker models.
 
+## Milestone 18 — a live status notification for the loaded model (not started)
+
+A loaded model today is invisible once the app is backgrounded: the foreground service runs only
+for the length of a turn, so the only way to know a reply has finished is to come back and look.
+This makes the model's lifetime the unit instead of the turn's.
+
+- The foreground service moves from per-turn to per-load. It starts when a model loads and stops
+  when the last one unloads, so the process and its KV cache stay warm between turns — the way a
+  server holds a model, not the way a chat app runs one request — and a turn completes whether or
+  not the app is foregrounded.
+- The notification is status at a glance: the loaded model and backend, and the current phase
+  (idle, preparing context, thinking, calling a tool, generating), updated from the same events
+  the transcript already consumes. A long run can be watched without the app open.
+- A completion alert is opt-in. A separate, dismissible notification that a turn finished, gated
+  by a setting, because a chime on every reply is noise for a quick chat and the whole point for a
+  slow one left to run.
+- `AgentTaskService` is the foundation, not the finished thing: it already holds a foreground
+  service for one run; this widens its lifetime and surfaces its state.
+
+The cost is the always-present notification Android requires of a foreground service, accepted in
+return for the model staying warm and visible. This is the visible half of the background-run line
+that Milestone 13 is the queue half of, and the completion alert is the same result notification
+M13 names, surfaced through the system rather than the app.
+
+Exit criterion: a model loaded with the app backgrounded reports its phase in a persistent
+notification, completes a turn started while backgrounded, and — when the setting is on — posts a
+completion notification the user can act on without opening Bram.
+
 ## Testing matrix
 
 - Pure JVM tests for context selection, routing, planning, and tool loops.
