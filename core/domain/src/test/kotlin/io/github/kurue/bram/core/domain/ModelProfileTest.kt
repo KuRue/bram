@@ -56,6 +56,23 @@ class ModelProfileTest {
     }
 
     @Test
+    fun `a default profile runs the original attention and kv defaults`() {
+        // AUTO/F16 is exactly what Bram ran before the settings existed, so an untouched profile
+        // cannot change behavior on upgrade.
+        val profile = ModelProfile.defaultFor(model())
+        assertEquals(FlashAttentionMode.AUTO, profile.flashAttention)
+        assertEquals(KvCacheType.F16, profile.kvCacheType)
+    }
+
+    @Test
+    fun `unknown wire values fall back to the safe defaults`() {
+        assertEquals(FlashAttentionMode.AUTO, FlashAttentionMode.fromWire("banana"))
+        assertEquals(FlashAttentionMode.ON, FlashAttentionMode.fromWire("on"))
+        assertEquals(KvCacheType.F16, KvCacheType.fromWire("banana"))
+        assertEquals(KvCacheType.Q8_0, KvCacheType.fromWire("q8_0"))
+    }
+
+    @Test
     fun `sanitizing clamps values a stored profile could otherwise load with`() {
         val wild = SamplerSettings(
             temperature = 12f,

@@ -640,7 +640,7 @@ class MainViewModel(
                 // A backend failing is a result, not an error: it means do not use that one. It is
                 // recorded as a failure so the card can say so rather than leaving it unexplained.
                 val report = runCatching {
-                    measureBackend(model, target, threads) { message ->
+                    measureBackend(model, profile, target, threads) { message ->
                         mutableState.update {
                             it.copy(autoConfigure = it.autoConfigure?.copy(current = message))
                         }
@@ -761,7 +761,9 @@ class MainViewModel(
             val needsReload = previous != null && (
                 previous.contextTokens != profile.contextTokens ||
                     previous.backendId != profile.backendId ||
-                    previous.thinkingEnabled != profile.thinkingEnabled
+                    previous.thinkingEnabled != profile.thinkingEnabled ||
+                    previous.flashAttention != profile.flashAttention ||
+                    previous.kvCacheType != profile.kvCacheType
                 )
             if (needsReload && state.activeProfileId == profile.id && state.loadedModelId != null) {
                 unloadModelInternal(forget = false)
@@ -838,6 +840,8 @@ class MainViewModel(
                     gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0,
                     deviceFilter = backend.devicePrefix,
                     enableThinking = profile.thinkingEnabled,
+                    flashAttention = profile.flashAttention,
+                    kvCacheType = profile.kvCacheType,
                 )
             }.onSuccess { result ->
                 viewModelScope.launch {
@@ -901,6 +905,7 @@ class MainViewModel(
      */
     private suspend fun measureBackend(
         model: LocalModelRecord,
+        profile: ModelProfile,
         target: AcceleratorTarget,
         threads: Int,
         onProgress: (String) -> Unit = {},
@@ -914,7 +919,13 @@ class MainViewModel(
                     "This build found no ${target.label} device, so it cannot be validated.",
                 )
 
-            container.llamaCppClient.load(model, threads, gpuLayers = 0)
+            container.llamaCppClient.load(
+                model,
+                threads,
+                gpuLayers = 0,
+                flashAttention = profile.flashAttention,
+                kvCacheType = profile.kvCacheType,
+            )
             val cpuStarted = System.currentTimeMillis()
             val cpuResult = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
             val cpuMillis = System.currentTimeMillis() - cpuStarted
@@ -926,6 +937,8 @@ class MainViewModel(
                 threads,
                 gpuLayers = FULL_GPU_OFFLOAD,
                 deviceFilter = target.devicePrefix,
+                flashAttention = profile.flashAttention,
+                kvCacheType = profile.kvCacheType,
             )
             val gpuStarted = System.currentTimeMillis()
             // Score the accelerator the same way the bisection does. Comparing free-running
@@ -967,9 +980,15 @@ class MainViewModel(
     }
 
     fun validateAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
-        val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
+        val model = state.localModels.firstOrNull { it.id.value == modelId } ?: return
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        // The comparison must run under the profile's attention and KV settings: those are context
+        // parameters, and scoring the accelerator under different ones would validate a mix the
+        // profile can never reproduce.
+        val profile = state.profiles.firstOrNull { it.modelId == model.id && it.id == state.activeProfileId }
+            ?: state.profiles.firstOrNull { it.modelId == model.id }
+            ?: ModelProfile.defaultFor(model)
         // Put the chat back the way it was found: the run needs the runtime to itself.
         val restoreLoaded = state.loadedModelId
         viewModelScope.launch {
@@ -984,7 +1003,7 @@ class MainViewModel(
             val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
             val threads = (visibleCores - 2).coerceIn(1, 4)
             runCatching {
-                measureBackend(model, target, threads) { message ->
+                measureBackend(model, profile, target, threads) { message ->
                     mutableState.update { it.copy(status = message) }
                 }
             }.onSuccess { report ->
@@ -1011,9 +1030,12 @@ class MainViewModel(
      * "one layer's operation is broken".
      */
     fun bisectAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
-        val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
         val state = mutableState.value
+        val model = state.localModels.firstOrNull { it.id.value == modelId } ?: return
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
+        val profile = state.profiles.firstOrNull { it.modelId == model.id && it.id == state.activeProfileId }
+            ?: state.profiles.firstOrNull { it.modelId == model.id }
+            ?: ModelProfile.defaultFor(model)
         // Put the chat back the way it was found: the run needs the runtime to itself.
         val restoreLoaded = state.loadedModelId
         viewModelScope.launch {
@@ -1039,7 +1061,13 @@ class MainViewModel(
                         "This build found no ${target.label} device to bisect.",
                     )
 
-                container.llamaCppClient.load(model, threads, gpuLayers = 0)
+                container.llamaCppClient.load(
+                    model,
+                    threads,
+                    gpuLayers = 0,
+                    flashAttention = profile.flashAttention,
+                    kvCacheType = profile.kvCacheType,
+                )
                 val reference = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
                     .optJSONArray("tokens").toIntList()
                 check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
@@ -1057,6 +1085,8 @@ class MainViewModel(
                         threads,
                         gpuLayers = layers,
                         deviceFilter = target.devicePrefix,
+                        flashAttention = profile.flashAttention,
+                        kvCacheType = profile.kvCacheType,
                     )
                     val started = System.currentTimeMillis()
                     val predicted = container.llamaCppClient.teacherForced(forced)

@@ -103,6 +103,8 @@ import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
+import io.github.kurue.bram.core.domain.FlashAttentionMode
+import io.github.kurue.bram.core.domain.KvCacheType
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.MessageRole
@@ -1226,6 +1228,50 @@ private fun ProfileCard(
                         enabled = !busy,
                         onUpdateProfile = onUpdateProfile,
                     )
+
+                    // These two are context parameters rather than sampling ones: they change how
+                    // the load builds the attention cache, so the accelerator comparison measures
+                    // them together with the backend choice rather than in isolation.
+                    SectionLabel("Flash attention")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        FlashAttentionMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = mode == profile.flashAttention,
+                                onClick = {
+                                    // A quantized V cache needs flash attention, so turning it off
+                                    // also returns the cache to F16 rather than saving an unusable
+                                    // combination.
+                                    val kv = if (mode == FlashAttentionMode.OFF) KvCacheType.F16 else profile.kvCacheType
+                                    onUpdateProfile(
+                                        profile.copy(flashAttention = mode, kvCacheType = kv),
+                                    )
+                                },
+                                enabled = !busy,
+                                label = { Text(mode.label) },
+                            )
+                        }
+                    }
+
+                    SectionLabel("KV cache")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        KvCacheType.entries.forEach { type ->
+                            // llama.cpp refuses a quantized V cache without flash attention on,
+                            // so the combination is simply not offered.
+                            val allowed = type == KvCacheType.F16 || profile.flashAttention != FlashAttentionMode.OFF
+                            FilterChip(
+                                selected = type == profile.kvCacheType,
+                                onClick = { onUpdateProfile(profile.copy(kvCacheType = type)) },
+                                enabled = !busy && allowed,
+                                label = { Text(type.label) },
+                            )
+                        }
+                    }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         SectionLabel("Reasoning", Modifier.weight(1f))

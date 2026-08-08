@@ -32,6 +32,8 @@ class InferenceProcessService : Service() {
     private var loadedGpuLayers: Int = 0
     private var loadedDeviceFilter: String = ""
     private var loadedThinking: Boolean = false
+    private var loadedFlashAttention: String = "auto"
+    private var loadedKvCacheType: String = "f16"
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
@@ -263,13 +265,19 @@ class InferenceProcessService : Service() {
         val gpuLayers = request.optInt("gpuLayers", 0).coerceAtLeast(0)
         val deviceFilter = request.optString("deviceFilter")
         val enableThinking = request.optBoolean("enableThinking", false)
+        val flashAttention = request.optString("flashAttention", "auto")
+        val kvCacheType = request.optString("kvCacheType", "f16")
         // The offload plan is part of the load identity: reusing a CPU-resident model for a GPU
-        // request would silently validate the accelerator against itself.
+        // request would silently validate the accelerator against itself. The attention path and KV
+        // type are part of it too: they are context parameters, so changing them without reloading
+        // would quietly measure the previous configuration.
         if (modelId == loadedModelId &&
             contextTokens == loadedContextTokens &&
             gpuLayers == loadedGpuLayers &&
             deviceFilter == loadedDeviceFilter &&
             enableThinking == loadedThinking &&
+            flashAttention == loadedFlashAttention &&
+            kvCacheType == loadedKvCacheType &&
             cpuValidated
         ) {
             return JSONObject(bridge.state())
@@ -305,6 +313,8 @@ class InferenceProcessService : Service() {
                     gpuLayers = gpuLayers,
                     deviceFilter = deviceFilter,
                     enableThinking = enableThinking,
+                    flashAttention = flashAttention,
+                    kvCacheType = kvCacheType,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())
@@ -316,6 +326,8 @@ class InferenceProcessService : Service() {
             loadedGpuLayers = gpuLayers
             loadedDeviceFilter = deviceFilter
             loadedThinking = enableThinking
+            loadedFlashAttention = flashAttention
+            loadedKvCacheType = kvCacheType
             cpuValidated = true
             return loadResult
                 .put("alreadyLoaded", false)
@@ -330,6 +342,9 @@ class InferenceProcessService : Service() {
             loadedContextTokens = 0
             loadedGpuLayers = 0
             loadedDeviceFilter = ""
+            loadedThinking = false
+            loadedFlashAttention = "auto"
+            loadedKvCacheType = "f16"
             cpuValidated = false
             throw error
         }
@@ -342,6 +357,9 @@ class InferenceProcessService : Service() {
         loadedContextTokens = 0
         loadedGpuLayers = 0
         loadedDeviceFilter = ""
+        loadedThinking = false
+        loadedFlashAttention = "auto"
+        loadedKvCacheType = "f16"
         cpuValidated = false
         return result
     }

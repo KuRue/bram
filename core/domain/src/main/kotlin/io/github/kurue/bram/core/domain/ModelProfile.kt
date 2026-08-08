@@ -34,6 +34,57 @@ data class SamplerSettings(
 }
 
 /**
+ * Whether llama.cpp's FlashAttention path is used for this profile's runs.
+ *
+ * AUTO (the default) lets llama.cpp decide per graph, which keeps today's behavior: CPU gets
+ * FlashAttention wherever it is compiled in, and a backend that cannot run the ops falls back to
+ * plain attention. ON forces the flash path and fails loudly if the backend refuses it, which is
+ * the diagnostic that told us whether the Hexagon HTP path can take the fast kernels at all. OFF
+ * disables it, which is the reference everyone else is measured against.
+ */
+enum class FlashAttentionMode(val wire: String) {
+    AUTO("auto"),
+    ON("on"),
+    OFF("off");
+
+    val label: String
+        get() = when (this) {
+            AUTO -> "Auto"
+            ON -> "On"
+            OFF -> "Off"
+        }
+
+    companion object {
+        fun fromWire(value: String): FlashAttentionMode =
+            entries.firstOrNull { it.wire == value } ?: AUTO
+    }
+}
+
+/**
+ * How the KV cache is stored.
+ *
+ * F16 is what Bram always used. Q8_0 halves the cache and can only ever shift attention scores a
+ * little, but it is exactly the kind of quiet change that only matters when it is measured — and
+ * this is a profile setting precisely so the accelerator comparison can tell us whether it is a
+ * good idea on a given device.
+ */
+enum class KvCacheType(val wire: String) {
+    F16("f16"),
+    Q8_0("q8_0");
+
+    val label: String
+        get() = when (this) {
+            F16 -> "F16"
+            Q8_0 -> "Q8"
+        }
+
+    companion object {
+        fun fromWire(value: String): KvCacheType =
+            entries.firstOrNull { it.wire == value } ?: F16
+    }
+}
+
+/**
  * What one processor scored against the CPU reference.
  *
  * [agrees] is the part that decides anything: a backend that disagrees is not a slower option, it
@@ -71,6 +122,8 @@ data class ModelProfile(
     /** Which processor to load onto. Empty means CPU. */
     val backendId: String = "",
     val thinkingEnabled: Boolean = false,
+    val flashAttention: FlashAttentionMode = FlashAttentionMode.AUTO,
+    val kvCacheType: KvCacheType = KvCacheType.F16,
     val sampler: SamplerSettings = SamplerSettings(),
     val systemPrompt: String = "",
     val createdAtEpochMillis: Long = System.currentTimeMillis(),

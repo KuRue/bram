@@ -30,6 +30,10 @@ struct runtime_state {
     int threads = 0;
     int gpu_layers = 0;
     bool enable_thinking = false;
+    // Context-level settings carried from the load request: llama.cpp decides the attention path
+    // and KV cache layout per context, so they are applied wherever a context is created.
+    llama_flash_attn_type flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+    ggml_type kv_type = GGML_TYPE_F16;
     std::string model_path;
 
     // The chat context outlives a single turn so its KV cache can be reused. Rebuilding it every
@@ -250,6 +254,9 @@ llama_context * create_context(int context_tokens = 0) {
     params.n_threads_batch = g_state.threads;
     params.no_perf = false;
     params.abort_callback = abort_callback;
+    params.flash_attn_type = g_state.flash_attn_type;
+    params.type_k = g_state.kv_type;
+    params.type_v = g_state.kv_type;
     llama_context * context = llama_init_from_model(g_state.model, params);
     if (context == nullptr) throw std::runtime_error("Could not allocate the requested model context");
     return context;
@@ -466,7 +473,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_probe(
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     JNIEnv * env, jobject, jstring path, jint context_tokens, jint batch_tokens, jint threads,
-    jint gpu_layers, jstring device_filter, jboolean enable_thinking) {
+    jint gpu_layers, jstring device_filter, jboolean enable_thinking, jstring flash_attention,
+    jstring kv_cache) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         ensure_backend();
@@ -475,6 +483,25 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         const std::string model_path = from_jstring(env, path);
         llama_model_params params = llama_model_default_params();
         params.n_gpu_layers = gpu_layers;
+
+        const std::string fa = flash_attention == nullptr ? std::string() : from_jstring(env, flash_attention);
+        if (fa == "on" || fa == "force" || fa == "enabled") {
+            g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        } else if (fa == "off" || fa == "disabled") {
+            g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        } else {
+            g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+        }
+        const std::string kv = kv_cache == nullptr ? std::string() : from_jstring(env, kv_cache);
+        if (kv == "q8_0") {
+            // Q8_0 halves the cache. The output and attention layers stay F16; llama.cpp keeps
+            // those in full precision regardless of this setting. Note that a quantized V cache
+            // forces flash attention on in llama.cpp, and a disabled path fails the context
+            // creation — the app constrains that combination, and the error would surface here.
+            g_state.kv_type = GGML_TYPE_Q8_0;
+        } else {
+            g_state.kv_type = GGML_TYPE_F16;
+        }
 
         // Without an explicit list llama.cpp offloads to whichever accelerator it considers best,
         // which makes "validate the NPU" ambiguous on a device that also exposes a GPU. When a
@@ -515,9 +542,10 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         params.check_tensors = false;
         drain_recent_log();
         __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-            "bram_load: requesting n_gpu_layers=%d device_filter='%s' matched=%d",
+            "bram_load: requesting n_gpu_layers=%d device_filter='%s' matched=%d fa=%s kv=%s",
             static_cast<int>(gpu_layers), filter.c_str(),
-            selected.empty() ? 0 : static_cast<int>(selected.size() - 1));
+            selected.empty() ? 0 : static_cast<int>(selected.size() - 1),
+            fa.empty() ? "auto" : fa.c_str(), kv.empty() ? "f16" : kv.c_str());
         g_state.model = llama_model_load_from_file(model_path.c_str(), params);
         if (g_state.model == nullptr) {
             std::string detail = drain_recent_log();
@@ -548,7 +576,9 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
                << ",\"contextTokens\":" << g_state.context_tokens
                << ",\"threads\":" << g_state.threads
                << ",\"requestedGpuLayers\":" << g_state.gpu_layers
-               << ",\"offloadedToGpu\":" << (g_state.gpu_layers > 0 ? "true" : "false") << "}";
+               << ",\"offloadedToGpu\":" << (g_state.gpu_layers > 0 ? "true" : "false")
+               << ",\"flashAttention\":\"" << json_escape(fa.empty() ? "auto" : fa) << "\""
+               << ",\"kvCacheType\":\"" << json_escape(kv.empty() ? "f16" : kv) << "\"}";
         return result.str();
     });
 }

@@ -6,7 +6,9 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import io.github.kurue.bram.core.domain.ConversationMessage
+import io.github.kurue.bram.core.domain.FlashAttentionMode
 import io.github.kurue.bram.core.domain.GenerationEvent
+import io.github.kurue.bram.core.domain.KvCacheType
 import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.GenerationRequest
@@ -80,6 +82,8 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         gpuLayers: Int = 0,
         deviceFilter: String = "",
         enableThinking: Boolean = false,
+        flashAttention: FlashAttentionMode = FlashAttentionMode.AUTO,
+        kvCacheType: KvCacheType = KvCacheType.F16,
     ): JSONObject = withContext(Dispatchers.IO) {
         val request = JSONObject()
             .put("modelId", model.id.value)
@@ -92,6 +96,8 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("gpuLayers", gpuLayers)
             .put("deviceFilter", deviceFilter)
             .put("enableThinking", enableThinking)
+            .put("flashAttention", flashAttention.wire)
+            .put("kvCacheType", kvCacheType.wire)
         JSONObject(requireService().load(request.toString()))
     }
 

@@ -16,6 +16,8 @@ internal class NativeLlamaBridge {
         gpuLayers: Int,
         deviceFilter: String,
         enableThinking: Boolean,
+        flashAttention: String,
+        kvCacheType: String,
     ): String
     external fun referenceDecode(tokenCount: Int): String
     external fun teacherForced(forcedTokens: IntArray): String

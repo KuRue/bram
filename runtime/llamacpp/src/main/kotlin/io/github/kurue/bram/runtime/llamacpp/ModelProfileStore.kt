@@ -2,6 +2,8 @@ package io.github.kurue.bram.runtime.llamacpp
 
 import android.content.Context
 import io.github.kurue.bram.core.domain.BackendMeasurement
+import io.github.kurue.bram.core.domain.FlashAttentionMode
+import io.github.kurue.bram.core.domain.KvCacheType
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.ModelProfile
@@ -108,6 +110,8 @@ class ModelProfileStore(context: Context) {
         .put("contextTokens", contextTokens)
         .put("backendId", backendId)
         .put("thinkingEnabled", thinkingEnabled)
+        .put("flashAttention", flashAttention.wire)
+        .put("kvCacheType", kvCacheType.wire)
         .put("temperature", sampler.temperature.toDouble())
         .put("topP", sampler.topP.toDouble())
         .put("topK", sampler.topK)
@@ -143,6 +147,8 @@ class ModelProfileStore(context: Context) {
             contextTokens = optInt("contextTokens", 4_096),
             backendId = optString("backendId"),
             thinkingEnabled = optBoolean("thinkingEnabled"),
+            flashAttention = FlashAttentionMode.fromWire(optString("flashAttention")),
+            kvCacheType = KvCacheType.fromWire(optString("kvCacheType")),
             sampler = SamplerSettings(
                 temperature = optDouble("temperature", fallback.temperature.toDouble()).toFloat(),
                 topP = optDouble("topP", fallback.topP.toDouble()).toFloat(),
