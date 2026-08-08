@@ -7,7 +7,7 @@ Last updated: 2026-08-08
 | Item | Value |
 |---|---|
 | Repository | Private `KuRue/bram` |
-| main | [`664716f`](https://github.com/KuRue/bram/commit/664716f) — through auto-configure (#20) |
+| main | [`48ff4f6`](https://github.com/KuRue/bram/commit/48ff4f6) — through Milestone 19 (in-app model downloads) |
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
 | Test emulator | AVD `Pixel_9a`, x86_64, 6 GB RAM / 16 GB storage |
 | Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone, tool-capable), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
