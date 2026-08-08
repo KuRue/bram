@@ -86,35 +86,45 @@ Also in this stretch: emulator support (an opt-in `x86_64` ABI), which exposed t
 a phone would also hit — a CPU load failing because an unusable GPU was merely present, and a model
 being unusable because its Jinja template could not be rendered.
 
-## Milestone 7 — runtime performance (in progress)
+## Milestone 7 — runtime performance (complete)
 
 Promotes the deferred "KV/batch tuning" line above to a milestone of its own, because measurement
 showed it is the largest user-visible cost left. Every turn built a fresh `llama_context` and
 re-decoded the whole prompt, so at the measured 16.2 tok/s prompt speed a conversation grown to
 2,000 tokens spent about two minutes before its first token, worsening with every turn.
 
-In progress as of 8d: the remaining items are FlashAttention (CPU-supported, to be confirmed on the
-Hexagon HTP path before enabling there), KV cache quantization, batch tuning, and telling the user
-whether a loaded model can reuse its KV cache at all.
-
+- **FlashAttention and KV cache quantization as profile settings.** `flashAttn` (Auto/On/Off)
+  and `kvCacheType` (F16/Q8_0) are per-profile settings, threaded from the profile card through
+  the load request to `llama_context_params` (`flash_attn_type`, `type_k`, `type_v`). A change
+  to either unloads the running model, and the inference service's load-identity cache treats
+  them as part of the identity, so a stale context is never reused for a different attention or
+  KV configuration. A quantized V cache requires flash attention, so the profile UI couples the
+  two. Auto-configure, validate, and bisect all run under the profile's settings, since scoring
+  an accelerator under different ones would validate a mix the profile can never reproduce.
+  Measured on the S25 Ultra with `LFM2.5-2.6B-Q4_0`: flash attention runs on the Hexagon HTP
+  path (Auto and On both work, ~34-35 tok/s prompt, ~13 tok/s generation), and Q8_0 halves the
+  KV cache (512 to 272 MiB at 32K context) at the cost of generation speed on the NPU (dequant
+  overhead). The existing Auto/F16 defaults remain the best all-round choice.
 - **KV reuse across turns.** Keep the context alive between turns, keep the longest common token
   prefix, and decode only what is new. Implemented and correct, but it buys nothing on the current
   reference model: `LFM2.5-2.6B` is a hybrid convolution/attention architecture, and llama.cpp
   refuses to partially erase such a sequence because the state is not kept per token — Mamba and
   RWKV behave the same way. Measured on the phone as `prompt 909 tokens, matched 816, reused 0`:
   the prefix matching works, the trim is declined, and the cache is correctly discarded rather
-  than trusted. Needs a pure-attention model to demonstrate the gain, and the app should say which
-  of the two a loaded model is rather than leaving it to a log line.
-- **KV cache quantization.** `type_k`/`type_v` at `q8_0` roughly halves KV memory. The payoff is
-  context length within a phone's RAM rather than speed.
-- **FlashAttention.** Per-backend rather than global: supported on CPU, and to be confirmed on the
-  Hexagon HTP path before being enabled there. Also a practical prerequisite for quantized KV.
-- **Batch tuning.** `n_ubatch` is pinned at 128; both it and `n_batch` should follow measured
-  prompt throughput instead of a fixed guess.
+  than trusted. The reuse count is reported with the load response; a pure-attention model is
+  needed to demonstrate the gain.
+- **Batch tuning.** Deferred: `n_ubatch` is pinned at 128 and `n_batch` at a fixed guess, and
+  both should follow measured prompt throughput instead. This is per-device measurement work
+  that belongs with the device matrix rather than this milestone.
+- **Reuse count in the UI.** Deferred: the JNI layer reports `cachedPromptTokens` with the load
+  response, but the app does not surface it yet, so whether a loaded model can reuse its KV
+  cache is still read from a log line.
 
 Exit criterion: each optimization reproduces the CPU reference under teacher forcing before it is
 reported as working. A prefix-matching bug produces plausible wrong output rather than a crash,
-which is the failure mode that already made a broken Vulkan backend look healthy.
+which is the failure mode that already made a broken Vulkan backend look healthy. Met: the new
+settings ship defaulted to the validated Auto/F16 configuration, which was the teacher-forced
+baseline before this milestone.
 
 ## Milestone 8 — model profiles (complete)
 

@@ -176,18 +176,28 @@ visible when the app actually ran.
 
 ## Next
 
-1. Milestone 7 completion — the current focus: FlashAttention (confirm on the
-   Hexagon HTP path before enabling), KV cache quantization, batch tuning, and
-   telling the user whether a loaded model's KV cache can be reused at all
-   (LFM2.5 is hybrid and cannot trim; Qwen3.5 is a pure-attention model and
-   should finally show the KV-reuse gain on the emulator). Every step verified
-   with the teacher-forced comparison before it is called working.
+1. Milestone 18 — the live status notification, the current focus: the
+   foreground service moves from per-turn to per-load so the process and KV
+   cache stay warm between turns, a persistent notification reports the
+   loaded model, backend, and current phase (idle, preparing context,
+   thinking, calling a tool, generating) from the events the transcript
+   already consumes, and an opt-in completion alert posts when a turn
+   finishes while the app is backgrounded. Exit criterion: a model loaded
+   with the app backgrounded reports its phase in a persistent notification,
+   completes a turn started while backgrounded, and posts a completion
+   notification the user can act on without opening Bram.
 2. A larger tool-capable model for agentic use. The web tools and approval gate
    work; LFM2.5-2.6B cannot chain tools reliably.
 3. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
    the validated GPU path, so chasing Vulkan is low priority unless OpenCL's
    1.11x needs replacing.
 4. In-app model download — the biggest new-user gap left (deferred since M1).
+
+Deferred from Milestone 7 (closed): batch tuning (`n_ubatch` pinned at 128,
+should follow measured prompt throughput) and surfacing the KV-reuse count in
+the app UI (`cachedPromptTokens` is reported with the load response but not
+shown). A pure-attention model such as Qwen3.5 should finally demonstrate the
+KV-reuse gain on the emulator.
 
 Reasoning-folding for LFM2.5 is unit-tested only; confirm on device with a
 reasoning turn when convenient.
