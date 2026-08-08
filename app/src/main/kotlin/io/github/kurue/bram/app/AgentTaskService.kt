@@ -5,13 +5,11 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.RemoteInput
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.IBinder
 import androidx.core.content.ContextCompat
@@ -112,9 +110,6 @@ class AgentTaskService : Service() {
         private const val EXTRA_PHASE = "phase"
         private const val EXTRA_DETAIL = "detail"
 
-        /** Key of the inline reply on the completion alert, read by [CompletionReplyReceiver]. */
-        const val KEY_REPLY = "reply"
-
         /**
          * Starts the status service or moves it to the given state. Called on every phase change,
          * so a turn can be followed from the shade; the service itself decides what to show.
@@ -134,10 +129,11 @@ class AgentTaskService : Service() {
 
         /**
          * Posts the opt-in completion alert: a dismissible notification that a backgrounded turn
-         * finished, with an inline reply that starts the next turn without opening the app. No-op
-         * without the notification permission, which Android also requires before it would show.
+         * finished, showing a summary of the reply so the shade reads it before the app is opened.
+         * No-op without the notification permission, which Android also requires before it would
+         * show.
          */
-        fun postCompletion(context: Context, model: String) {
+        fun postCompletion(context: Context, model: String, summary: String) {
             if (ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.POST_NOTIFICATIONS,
@@ -163,29 +159,19 @@ class AgentTaskService : Service() {
                 Intent(context, MainActivity::class.java),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
-            val reply = PendingIntent.getBroadcast(
-                context,
-                1,
-                Intent(context, CompletionReplyReceiver::class.java),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-            )
+            val text = summary.take(MAX_SUMMARY_LENGTH) +
+                if (summary.length > MAX_SUMMARY_LENGTH) "…" else ""
             val notification = Notification.Builder(context, COMPLETION_CHANNEL_ID)
                 .setContentTitle("Turn finished")
-                .setContentText(model)
+                .setContentText(text)
+                .setStyle(Notification.BigTextStyle().bigText(text))
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentIntent(open)
                 .setAutoCancel(true)
-                .addAction(
-                    Notification.Action.Builder(
-                        Icon.createWithResource(context, android.R.drawable.ic_menu_send),
-                        "Reply",
-                        reply,
-                    ).addRemoteInput(
-                        RemoteInput.Builder(KEY_REPLY).setLabel("Reply").build(),
-                    ).build(),
-                )
                 .build()
             manager.notify(COMPLETION_NOTIFICATION_ID, notification)
         }
+
+        private const val MAX_SUMMARY_LENGTH = 500
     }
 }

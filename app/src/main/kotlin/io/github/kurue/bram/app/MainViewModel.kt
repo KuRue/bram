@@ -370,11 +370,6 @@ class MainViewModel(
                 }
             }
         }
-        // A reply typed into the completion alert starts a turn without opening the app. The
-        // foreground service keeps this process alive, so the conversation can run on.
-        viewModelScope.launch {
-            BackgroundTurns.incoming.collect { text -> send(text) }
-        }
         refreshToolPermissions()
         refreshDeviceProfile()
         reloadCatalogs()
@@ -1564,7 +1559,8 @@ class MainViewModel(
                     val turnName = selection.localModel?.displayName
                         ?: snapshot.selectedEndpoint?.displayName
                         ?: BramDefaults.IDENTITY.displayName
-                    AgentTaskService.postCompletion(container.appContext, turnName)
+                    val summary = reply.first.ifBlank { turnName }
+                    AgentTaskService.postCompletion(container.appContext, model = turnName, summary = summary)
                 }
                 refreshDeviceProfile()
             }

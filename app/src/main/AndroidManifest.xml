@@ -31,12 +31,6 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- The "Reply" action on the completion alert. Same process as the app, so a reply can
-             reach the running conversation without bringing the app forward. -->
-        <receiver
-            android:name=".CompletionReplyReceiver"
-            android:exported="false" />
-
         <activity
             android:name=".MainActivity"
             android:exported="true">

@@ -453,7 +453,7 @@ prompt-reprocessing cost that KV reuse exists to remove.
 - Per-conversation privacy and remote-fallback policies.
 - Optional speculative decoding and task-specific worker models.
 
-## Milestone 18 — a live status notification for the loaded model (in progress)
+## Milestone 18 — a live status notification for the loaded model (complete)
 
 A loaded model today is invisible once the app is backgrounded: the foreground service runs only
 for the length of a turn, so the only way to know a reply has finished is to come back and look.
@@ -482,16 +482,18 @@ load, stopped on unload or inference-process death — and its notification repo
 backend, and a `ModelPhase` (idle/preparing/generating/thinking/tool) driven from the turn events
 the transcript already consumes. A remote turn holds the service only for its own duration. The
 completion alert is a setting (Settings > Notifications) that requests `POST_NOTIFICATIONS` when
-switched on, posts when a turn finishes while the app is backgrounded, and carries an inline
-"Reply" action that starts the next turn from the shade without opening the app.
+switched on, posts when a turn finishes while the app is backgrounded, and shows a summary of the
+reply (expandable) so the shade reads it before the app is opened.
 
-Remaining: on-device verification of the exit criterion — the phase notification for a
-backgrounded loaded model, a turn completing that was started from the completion alert's reply
-action, and the alert itself posting only when the setting is on.
+Verified on the S25 Ultra: the service holds for the loaded model's lifetime with its status
+notification, the permission flow and alert gating work, and a turn started foregrounded completes
+after the app is backgrounded with the summary alert posting. Design note: an early build offered
+an inline Reply action on the alert, but a reply to a message you cannot see yet is pointless, so
+the alert now carries the reply's text instead and tapping it opens Bram.
 
 Exit criterion: a model loaded with the app backgrounded reports its phase in a persistent
-notification, completes a turn started while backgrounded, and — when the setting is on — posts a
-completion notification the user can act on without opening Bram.
+notification, a turn finishes while the app is backgrounded, and — when the setting is on — posts
+a completion notification summarizing the reply that the user can act on without opening Bram.
 
 ## Testing matrix
 

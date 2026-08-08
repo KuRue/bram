@@ -176,17 +176,16 @@ visible when the app actually ran.
 
 ## Next
 
-1. Milestone 18 — the live status notification, the current focus. Implemented:
-   the status service now runs per model-load (start on load, stop on unload or
-   inference-process death) and its notification reports model, backend, and
-   phase (idle / preparing / generating / thinking / tool) from the turn events
-   the transcript already consumes; remote turns hold the service only for
-   their duration; the completion alert is a settings toggle that requests
-   POST_NOTIFICATIONS, posts when a turn finishes backgrounded, and carries an
-   inline Reply action that starts the next turn from the shade. Remaining:
-   verify the exit criterion on device — phase notification with the app
-   backgrounded, a reply-started turn completing in the background, and the
-   alert gating correctly.
+1. Milestone 18 — live status notification, done and verified on the S25 Ultra.
+   The status service runs per model-load (start on load, stop on unload or
+   inference-process death), its notification reports model, backend, and
+   phase from the turn events the transcript already consumes, and the
+   opt-in completion alert (Settings > Notifications) posts a summary of the
+   reply when a turn finishes backgrounded. Design note: an inline Reply
+   action on the alert was dropped in testing — a reply to a message you
+   cannot see yet is pointless — so the alert shows the reply text instead.
+   The build-sync now mirrors deletions (--delete) while excluding the
+   WSL-only OpenCL stub.
 2. A larger tool-capable model for agentic use. The web tools and approval gate
    work; LFM2.5-2.6B cannot chain tools reliably.
 3. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
