@@ -66,6 +66,19 @@ class HuggingFaceCatalogTest {
     }
 
     @Test
+    fun `tree parsing hides split gguf parts a one-shot download cannot use`() {
+        val body = """
+            [
+              {"type":"file","path":"model-q4_k_m-00001-of-00002.gguf","size":4000,"lfs":{"oid":"a","size":4000}},
+              {"type":"file","path":"model-q4_k_m-00002-of-00002.gguf","size":700,"lfs":{"oid":"b","size":700}},
+              {"type":"file","path":"model-q4_k_m.gguf","size":4700,"lfs":{"oid":"c","size":4700}}
+            ]
+        """.trimIndent()
+
+        assertEquals(listOf("model-q4_k_m.gguf"), parseHuggingFaceTree(body, "r").map { it.fileName })
+    }
+
+    @Test
     fun `listGgufFiles fetches the tree api and parses the reply`() {
         server.createContext("/api/models/Owner/Model-GGUF/tree/main") { exchange ->
             val body = """

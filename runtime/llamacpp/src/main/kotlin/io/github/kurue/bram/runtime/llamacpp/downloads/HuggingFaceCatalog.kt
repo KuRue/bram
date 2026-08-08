@@ -82,6 +82,11 @@ internal fun parseHuggingFaceTree(body: String, repoId: String): List<RemoteMode
         if (entry.optString("type") != "file") continue
         val path = entry.optString("path")
         if (!path.endsWith(".gguf", ignoreCase = true)) continue
+        // Some publishers (e.g. the official Qwen repos) split a GGUF across LFS parts named
+        // `...-00001-of-00003.gguf`. A single-part download is an incomplete file that will not
+        // load, so multi-part files are hidden rather than offered; a repo whose only quants are
+        // split will simply list nothing, which is honest about what a one-shot transfer can do.
+        if (MULTI_PART_GGUF.containsMatchIn(path)) continue
         val lfs = entry.optJSONObject("lfs") ?: continue
         val sha = lfs.optString("oid")
         if (sha.isBlank()) continue
@@ -94,3 +99,5 @@ internal fun parseHuggingFaceTree(body: String, repoId: String): List<RemoteMode
     }
     return files.sortedBy(RemoteModelFile::sizeBytes)
 }
+
+private val MULTI_PART_GGUF = Regex("-\\d{5}-of-\\d{5}", RegexOption.IGNORE_CASE)

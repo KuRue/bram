@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
@@ -1061,27 +1062,35 @@ private fun DownloadModelDialog(
                             Text("Cancel")
                         }
                     } else {
-                        state.downloadCatalog.forEach { file ->
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clickable(enabled = !state.isDownloading) { onStartDownload(file) }
-                                    .padding(vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(file.displayName, style = MaterialTheme.typography.bodyLarge)
+                        // A popular repo ships a dozen quants; without a cap the AlertDialog clips
+                        // them past the first few, so the larger (often better) options were
+                        // unreachable. Scroll inside a bounded height and the field/button stay put.
+                        Column(
+                            Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            state.downloadCatalog.forEach { file ->
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable(enabled = !state.isDownloading) { onStartDownload(file) }
+                                        .padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(file.displayName, style = MaterialTheme.typography.bodyLarge)
+                                        Text(
+                                            formatBytes(file.sizeBytes),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                     Text(
-                                        formatBytes(file.sizeBytes),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        "Download",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
                                     )
                                 }
-                                Text(
-                                    "Download",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
                             }
                         }
                     }
