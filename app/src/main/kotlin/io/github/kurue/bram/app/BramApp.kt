@@ -70,6 +70,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -97,6 +98,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import io.github.kurue.bram.core.domain.AcceleratorCapability
 import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.CapabilityState
@@ -134,6 +138,18 @@ fun BramApp(viewModel: MainViewModel) {
     var panel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
+    }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        // The toggle works either way; without the permission the completion alert is simply
+        // never posted, which the settings screen says.
+    }
+    LaunchedEffect(state.requestNotificationPermission) {
+        if (state.requestNotificationPermission) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            viewModel.consumedPermissionRequest()
+        }
     }
 
     BackdropHost {
@@ -263,6 +279,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onRefreshDiagnostics = viewModel::refreshDeviceProfile,
                                 onWithdrawToolPermission = viewModel::withdrawToolPermission,
+                                onSetCompletionAlerts = viewModel::setCompletionAlerts,
                             )
                             AppPanel.SESSION -> SessionScreen(
                                 state = state,
@@ -1659,6 +1676,7 @@ private fun SettingsScreen(
     onRemoveEndpoint: (String) -> Unit,
     onRefreshDiagnostics: () -> Unit,
     onWithdrawToolPermission: (String) -> Unit,
+    onSetCompletionAlerts: (Boolean) -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
@@ -1742,6 +1760,38 @@ private fun SettingsScreen(
                 )
                 ReadinessRow("Durable conversation memory", "Deferred")
                 ReadinessRow("Skills and automation", "Deferred")
+            }
+        }
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        SectionHeader("Notifications")
+        GlassSurface(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Completion alert", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "A notification when a turn finishes while Bram is in the background, with a reply action you can use without opening the app.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = state.completionAlertsEnabled,
+                        onCheckedChange = onSetCompletionAlerts,
+                    )
+                }
+                val permissionGranted = ContextCompat.checkSelfPermission(
+                    LocalContext.current,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (state.completionAlertsEnabled && !permissionGranted) {
+                    Text(
+                        "Notification permission is off, so completion alerts will not show. " +
+                            "Turn it on for Bram in the system settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
         if (state.alwaysAllowedTools.isNotEmpty()) {

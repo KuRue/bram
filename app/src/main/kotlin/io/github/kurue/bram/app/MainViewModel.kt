@@ -294,6 +294,10 @@ data class AppUiState(
     val autoConfigure: AutoConfigureProgress? = null,
     val acceleratorReport: AcceleratorReport? = null,
     val acceleratorBisection: AcceleratorBisection? = null,
+    /** Whether a finished backgrounded turn posts the completion alert. */
+    val completionAlertsEnabled: Boolean = false,
+    /** One-shot signal to the activity to ask for the notification permission. */
+    val requestNotificationPermission: Boolean = false,
 ) {
     val selectedLocalModel: LocalModelRecord?
         get() = localModels.firstOrNull { it.id.value == selectedRuntimeId }
@@ -341,6 +345,8 @@ class MainViewModel(
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var conversationId = ConversationId(UUID.randomUUID().toString())
     private var generationJob: Job? = null
+    /** Whether the app is what the user is looking at. Gates the completion alert. */
+    private var appForeground = true
 
     init {
         container.llamaCppClient.processFailureListener = { message ->
@@ -352,12 +358,22 @@ class MainViewModel(
                     error = message,
                 )
             }
+            // The model is gone with the process; the status service has nothing left to hold.
+            AgentTaskService.stop(container.appContext)
             refreshDeviceProfile()
         }
         viewModelScope.launch {
             container.approvalGate.pending.collect { pending ->
                 mutableState.update { it.copy(pendingApproval = pending) }
+                if (pending != null) {
+                    pushModelStatus(ModelPhase.CALLING_TOOL, "Awaiting approval")
+                }
             }
+        }
+        // A reply typed into the completion alert starts a turn without opening the app. The
+        // foreground service keeps this process alive, so the conversation can run on.
+        viewModelScope.launch {
+            BackgroundTurns.incoming.collect { text -> send(text) }
         }
         refreshToolPermissions()
         refreshDeviceProfile()
@@ -938,6 +954,7 @@ class MainViewModel(
                         },
                     )
                 }
+                pushModelStatus(ModelPhase.IDLE)
                 refreshDeviceProfile()
             }.onFailure { error ->
                 mutableState.update {
@@ -948,6 +965,7 @@ class MainViewModel(
                         error = error.message ?: "Could not load the local model",
                     )
                 }
+                AgentTaskService.stop(container.appContext)
                 refreshDeviceProfile()
             }
             mutableState.update { it.copy(isLoadingModel = false, status = null) }
@@ -1241,6 +1259,44 @@ class MainViewModel(
         generationJob?.cancel(CancellationException("Stopped by user"))
     }
 
+    /**
+     * Moves the status notification to the current phase. No-op when nothing is loaded or
+     * selected, which is when there is nothing to hold a foreground service for.
+     */
+    private fun pushModelStatus(phase: ModelPhase, detail: String? = null) {
+        val s = mutableState.value
+        val name = s.loadedModelId
+            ?.let { id -> s.localModels.firstOrNull { it.id.value == id }?.displayName }
+            ?: s.selectedEndpoint?.displayName
+            ?: return
+        val backend = s.loadedBackend?.label
+            ?: if (s.selectedRuntimeId?.startsWith(REMOTE_PREFIX) == true) "Remote" else "CPU"
+        AgentTaskService.update(
+            container.appContext,
+            model = name,
+            backend = backend,
+            phase = phase,
+            detail = detail,
+        )
+    }
+
+    /** The activity reports whether the user is looking at the app, gating the completion alert. */
+    fun setAppForeground(foreground: Boolean) {
+        appForeground = foreground
+    }
+
+    fun setCompletionAlerts(enabled: Boolean) {
+        container.notificationSettings.setCompletionAlerts(enabled)
+        mutableState.update {
+            it.copy(completionAlertsEnabled = enabled, requestNotificationPermission = enabled)
+        }
+    }
+
+    /** The activity acted on the one-shot permission request; clear it so it does not re-fire. */
+    fun consumedPermissionRequest() {
+        mutableState.update { it.copy(requestNotificationPermission = false) }
+    }
+
     fun send(text: String) {
         val prompt = text.trim()
         if (prompt.isEmpty()) return
@@ -1298,10 +1354,12 @@ class MainViewModel(
             )
         }
 
+        // The status service already runs for a loaded model; remote turns start it now and it is
+        // stopped again in the finally. Either way the notification says what is happening.
+        pushModelStatus(ModelPhase.PREPARING)
         // Run on the application scope, not the ViewModel's: agent work is expected to continue
         // while the user is elsewhere, and a run tied to the screen would be cancelled the moment
         // the ViewModel is cleared. AgentTaskService keeps the process alive for the duration.
-        AgentTaskService.start(container.appContext, "Answering: ${prompt.take(40)}")
         generationJob = container.appScope.launch {
             val agent = container.agent()
             // Reported by the runtime before any text arrives, since only it knows what the loaded
@@ -1314,6 +1372,7 @@ class MainViewModel(
             var thinkingStartedAt = 0L
             val finishedThinking = mutableListOf<AgentActivity.Thinking>()
             var thinkingMillisTotal = 0L
+            var thinking = false
             try {
                 agent.run(
                     request = AgentRunRequest(
@@ -1327,7 +1386,10 @@ class MainViewModel(
                     runtime = selection.runtime,
                 ).collect { event ->
                     when (event) {
-                        is AgentEvent.Status -> mutableState.update { it.copy(status = event.text) }
+                        is AgentEvent.Status -> {
+                            mutableState.update { it.copy(status = event.text) }
+                            pushModelStatus(ModelPhase.GENERATING)
+                        }
                         is AgentEvent.Reasoning -> reasoningFormat = event.format
                         is AgentEvent.ContextPrepared -> mutableState.update {
                             it.copy(
@@ -1370,6 +1432,13 @@ class MainViewModel(
                                     inProgress = true,
                                 )
                             }
+                            if (inFlight != null && !thinking) {
+                                thinking = true
+                                pushModelStatus(ModelPhase.THINKING)
+                            } else if (inFlight == null && thinking) {
+                                thinking = false
+                                pushModelStatus(ModelPhase.GENERATING)
+                            }
                             mutableState.update {
                                 it.copy(
                                     messages = requestMessages + ConversationMessage(
@@ -1392,6 +1461,7 @@ class MainViewModel(
                                     messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningFormat).visibleText, activity + finishedThinking),
                                 )
                             }
+                            pushModelStatus(ModelPhase.CALLING_TOOL)
                         }
                         is AgentEvent.ToolFinished -> {
                             val index = activity.indexOfLast { entry ->
@@ -1407,6 +1477,7 @@ class MainViewModel(
                                     messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningFormat).visibleText, activity + finishedThinking),
                                 )
                             }
+                            pushModelStatus(ModelPhase.GENERATING)
                         }
                         is AgentEvent.Usage -> mutableState.update { it.copy(lastUsage = event.usage) }
                         is AgentEvent.Metrics -> mutableState.update {
@@ -1482,7 +1553,19 @@ class MainViewModel(
                 // so the thread on disk matches what is on screen.
                 persistActiveConversation(settled)
                 generationJob = null
-                AgentTaskService.stop(container.appContext)
+                if (mutableState.value.loadedModelId != null) {
+                    // A loaded model keeps the status service alive; the turn just went idle.
+                    pushModelStatus(ModelPhase.IDLE)
+                } else {
+                    // A remote turn holds the service only for its own duration.
+                    AgentTaskService.stop(container.appContext)
+                }
+                if (!appForeground && container.notificationSettings.completionAlertsEnabled()) {
+                    val turnName = selection.localModel?.displayName
+                        ?: snapshot.selectedEndpoint?.displayName
+                        ?: BramDefaults.IDENTITY.displayName
+                    AgentTaskService.postCompletion(container.appContext, turnName)
+                }
                 refreshDeviceProfile()
             }
         }
@@ -1505,6 +1588,8 @@ class MainViewModel(
                 status = null,
             )
         }
+        // No model left to hold a foreground service for.
+        AgentTaskService.stop(container.appContext)
         refreshDeviceProfile()
     }
 

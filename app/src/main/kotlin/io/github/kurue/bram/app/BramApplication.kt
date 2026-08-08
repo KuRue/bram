@@ -48,6 +48,7 @@ class AppContainer(application: Application) {
     val localModelStore = LocalModelStore(application)
     val modelProfileStore = ModelProfileStore(application)
     val toolPermissionStore = ToolPermissionStore(application)
+    val notificationSettings = NotificationSettingsStore(application)
 
     /**
      * Held by the container rather than built per run, so the screen can watch what it is waiting

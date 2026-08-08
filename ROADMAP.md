@@ -453,7 +453,7 @@ prompt-reprocessing cost that KV reuse exists to remove.
 - Per-conversation privacy and remote-fallback policies.
 - Optional speculative decoding and task-specific worker models.
 
-## Milestone 18 — a live status notification for the loaded model (not started)
+## Milestone 18 — a live status notification for the loaded model (in progress)
 
 A loaded model today is invisible once the app is backgrounded: the foreground service runs only
 for the length of a turn, so the only way to know a reply has finished is to come back and look.
@@ -476,6 +476,18 @@ The cost is the always-present notification Android requires of a foreground ser
 return for the model staying warm and visible. This is the visible half of the background-run line
 that Milestone 13 is the queue half of, and the completion alert is the same result notification
 M13 names, surfaced through the system rather than the app.
+
+Implemented: the status service now tracks the loaded model for its whole lifetime — started on
+load, stopped on unload or inference-process death — and its notification reports the model,
+backend, and a `ModelPhase` (idle/preparing/generating/thinking/tool) driven from the turn events
+the transcript already consumes. A remote turn holds the service only for its own duration. The
+completion alert is a setting (Settings > Notifications) that requests `POST_NOTIFICATIONS` when
+switched on, posts when a turn finishes while the app is backgrounded, and carries an inline
+"Reply" action that starts the next turn from the shade without opening the app.
+
+Remaining: on-device verification of the exit criterion — the phase notification for a
+backgrounded loaded model, a turn completing that was started from the completion alert's reply
+action, and the alert itself posting only when the setting is on.
 
 Exit criterion: a model loaded with the app backgrounded reports its phase in a persistent
 notification, completes a turn started while backgrounded, and — when the setting is on — posts a

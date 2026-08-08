@@ -176,16 +176,17 @@ visible when the app actually ran.
 
 ## Next
 
-1. Milestone 18 — the live status notification, the current focus: the
-   foreground service moves from per-turn to per-load so the process and KV
-   cache stay warm between turns, a persistent notification reports the
-   loaded model, backend, and current phase (idle, preparing context,
-   thinking, calling a tool, generating) from the events the transcript
-   already consumes, and an opt-in completion alert posts when a turn
-   finishes while the app is backgrounded. Exit criterion: a model loaded
-   with the app backgrounded reports its phase in a persistent notification,
-   completes a turn started while backgrounded, and posts a completion
-   notification the user can act on without opening Bram.
+1. Milestone 18 — the live status notification, the current focus. Implemented:
+   the status service now runs per model-load (start on load, stop on unload or
+   inference-process death) and its notification reports model, backend, and
+   phase (idle / preparing / generating / thinking / tool) from the turn events
+   the transcript already consumes; remote turns hold the service only for
+   their duration; the completion alert is a settings toggle that requests
+   POST_NOTIFICATIONS, posts when a turn finishes backgrounded, and carries an
+   inline Reply action that starts the next turn from the shade. Remaining:
+   verify the exit criterion on device — phase notification with the app
+   backgrounded, a reply-started turn completing in the background, and the
+   alert gating correctly.
 2. A larger tool-capable model for agentic use. The web tools and approval gate
    work; LFM2.5-2.6B cannot chain tools reliably.
 3. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is

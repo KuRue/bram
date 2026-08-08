@@ -22,6 +22,16 @@ class MainActivity : ComponentActivity() {
         )[MainViewModel::class.java]
     }
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.setAppForeground(true)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        viewModel.setAppForeground(false)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
