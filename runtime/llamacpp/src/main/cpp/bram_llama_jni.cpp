@@ -27,6 +27,10 @@ struct runtime_state {
     common_chat_params last_chat_params;
     int context_tokens = 0;
     int batch_tokens = 0;
+    // Prompt tokens llama.cpp computes between model evaluations. Left at 0 unless the load
+    // request says otherwise, in which case a context is created with this many rather than the
+    // llama.cpp default of 128. See the batch setting in create_context.
+    int ubatch_tokens = 0;
     int threads = 0;
     int gpu_layers = 0;
     bool enable_thinking = false;
@@ -248,8 +252,18 @@ bool abort_callback(void *) {
 llama_context * create_context(int context_tokens = 0) {
     llama_context_params params = llama_context_default_params();
     params.n_ctx = static_cast<uint32_t>(context_tokens > 0 ? context_tokens : g_state.context_tokens);
-    params.n_batch = static_cast<uint32_t>(std::min(g_state.batch_tokens, static_cast<int>(params.n_ctx)));
-    params.n_ubatch = static_cast<uint32_t>(std::min(128, static_cast<int>(params.n_batch)));
+    // The batch settings travel with the load request: they are context parameters, so every
+    // context the runtime creates (chat, reference, self-test) has to use the same ones or the
+    // measured configuration stops being the configuration in use. Zero means llama.cpp's own
+    // defaults, which is what Bram ran before the settings existed.
+    params.n_batch = static_cast<uint32_t>(
+        g_state.batch_tokens > 0
+            ? std::min(g_state.batch_tokens, static_cast<int>(params.n_ctx))
+            : std::min(512, static_cast<int>(params.n_ctx)));
+    params.n_ubatch = static_cast<uint32_t>(
+        g_state.ubatch_tokens > 0
+            ? std::min(g_state.ubatch_tokens, static_cast<int>(params.n_batch))
+            : std::min(128, static_cast<int>(params.n_batch)));
     params.n_threads = g_state.threads;
     params.n_threads_batch = g_state.threads;
     params.no_perf = false;
@@ -472,9 +486,9 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_probe(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
-    JNIEnv * env, jobject, jstring path, jint context_tokens, jint batch_tokens, jint threads,
-    jint gpu_layers, jstring device_filter, jboolean enable_thinking, jstring flash_attention,
-    jstring kv_cache) {
+    JNIEnv * env, jobject, jstring path, jint context_tokens, jint batch_tokens, jint ubatch_tokens,
+    jint threads, jint gpu_layers, jstring device_filter, jboolean enable_thinking,
+    jstring flash_attention, jstring kv_cache) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         ensure_backend();
@@ -557,6 +571,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         if (!g_state.chat_templates) throw std::runtime_error("Could not initialize the GGUF chat template");
         g_state.context_tokens = context_tokens;
         g_state.batch_tokens = batch_tokens;
+        g_state.ubatch_tokens = ubatch_tokens;
         g_state.threads = threads;
         g_state.gpu_layers = gpu_layers;
         g_state.enable_thinking = enable_thinking == JNI_TRUE;
@@ -574,6 +589,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
                << ",\"parameterCount\":" << llama_model_n_params(g_state.model)
                << ",\"tensorBytes\":" << llama_model_size(g_state.model)
                << ",\"contextTokens\":" << g_state.context_tokens
+               << ",\"batchTokens\":" << g_state.batch_tokens
+               << ",\"ubatchTokens\":" << g_state.ubatch_tokens
                << ",\"threads\":" << g_state.threads
                << ",\"requestedGpuLayers\":" << g_state.gpu_layers
                << ",\"offloadedToGpu\":" << (g_state.gpu_layers > 0 ? "true" : "false")
@@ -925,13 +942,19 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_reference
         if (tokens.empty()) throw std::runtime_error("Reference decode tokenizer returned no tokens");
         llama_context * context = create_context();
         const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);
+        // The prompt is where the batch size shows itself: llama.cpp fills n_batch tokens per
+        // evaluation, so a bigger batch means fewer evaluations for the same prompt. These two
+        // numbers are what the batch tuning scores each candidate on.
+        const auto prompt_start = std::chrono::steady_clock::now();
         decode_prompt(context, tokens);
+        const auto prompt_end = std::chrono::steady_clock::now();
         llama_sampler * sampler = llama_sampler_init_greedy();
         const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
         const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
 
         std::ostringstream ids;
         std::string text;
+        const auto decode_start = std::chrono::steady_clock::now();
         ids << "[";
         for (int index = 0; index < wanted; ++index) {
             const llama_token token = llama_sampler_sample(sampler, context, -1);
@@ -945,13 +968,21 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_reference
             }
         }
         ids << "]";
+        const auto decode_end = std::chrono::steady_clock::now();
+        const auto prompt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prompt_end - prompt_start).count();
+        const auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start).count();
         __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-            "bram_reference: gpu_layers=%d tokens=%s text=\"%s\"",
-            g_state.gpu_layers, ids.str().c_str(), text.c_str());
+            "bram_reference: gpu_layers=%d batch=%d/%d tokens=%s text=\"%s\" prompt_ms=%lld decode_ms=%lld",
+            g_state.gpu_layers, g_state.batch_tokens, g_state.ubatch_tokens, ids.str().c_str(),
+            text.c_str(), static_cast<long long>(prompt_ms), static_cast<long long>(decode_ms));
         std::ostringstream result;
         result << "{\"tokens\":" << ids.str()
                << ",\"text\":\"" << json_escape(text) << "\""
                << ",\"promptTokens\":" << tokens.size()
+               << ",\"promptMillis\":" << prompt_ms
+               << ",\"decodeMillis\":" << decode_ms
+               << ",\"batchTokens\":" << g_state.batch_tokens
+               << ",\"ubatchTokens\":" << g_state.ubatch_tokens
                << ",\"gpuLayers\":" << g_state.gpu_layers << "}";
         return result.str();
     });

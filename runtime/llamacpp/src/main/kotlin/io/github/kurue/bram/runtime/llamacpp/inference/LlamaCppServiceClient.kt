@@ -84,14 +84,26 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         enableThinking: Boolean = false,
         flashAttention: FlashAttentionMode = FlashAttentionMode.AUTO,
         kvCacheType: KvCacheType = KvCacheType.F16,
+        /** Prompt tokens per evaluation, or 0 for the llama.cpp default Bram always used. */
+        batchTokens: Int = 0,
+        /** Tokens between model evaluations, or 0 for the llama.cpp default of 128. */
+        ubatchTokens: Int = 0,
     ): JSONObject = withContext(Dispatchers.IO) {
+        // Normalized before it reaches the service so the load identity compares concrete numbers:
+        // "default" must mean the same thing on every request, or every call would force a reload.
+        val effectiveBatch = if (batchTokens > 0) {
+            minOf(batchTokens, model.preferredContextTokens)
+        } else {
+            minOf(512, model.preferredContextTokens)
+        }
         val request = JSONObject()
             .put("modelId", model.id.value)
             .put("contentUri", model.contentUri)
             .put("localPath", model.localPath)
             .put("fileSizeBytes", model.fileSizeBytes)
             .put("contextTokens", model.preferredContextTokens)
-            .put("batchTokens", minOf(512, model.preferredContextTokens))
+            .put("batchTokens", effectiveBatch)
+            .put("ubatchTokens", if (ubatchTokens > 0) minOf(ubatchTokens, effectiveBatch) else 0)
             .put("threads", threads)
             .put("gpuLayers", gpuLayers)
             .put("deviceFilter", deviceFilter)
@@ -164,6 +176,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                                 promptMillis = event.optLong("promptMillis"),
                                 decodeMillis = event.optLong("decodeMillis"),
                                 processPssBytes = event.optLong("processPssBytes").takeIf { it > 0 },
+                                cachedPromptTokens = event.optInt("cachedPromptTokens").takeIf { it > 0 },
                             ),
                         ),
                     )

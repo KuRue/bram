@@ -47,7 +47,13 @@ class ModelProfileStore(context: Context) {
     }
 
     suspend fun save(profile: ModelProfile): ModelProfile = withContext(Dispatchers.IO) {
-        val sanitized = profile.copy(sampler = profile.sampler.sanitized())
+        val context = profile.contextTokens.coerceAtLeast(256)
+        val batch = profile.batchTokens.coerceIn(0, context)
+        val sanitized = profile.copy(
+            sampler = profile.sampler.sanitized(),
+            batchTokens = batch,
+            ubatchTokens = profile.ubatchTokens.coerceIn(0, batch),
+        )
         val existing = decode(preferences.getString(KEY_PROFILES, null))
         val merged = existing.filterNot { it.id == sanitized.id } + sanitized
         write(merged)
@@ -112,6 +118,8 @@ class ModelProfileStore(context: Context) {
         .put("thinkingEnabled", thinkingEnabled)
         .put("flashAttention", flashAttention.wire)
         .put("kvCacheType", kvCacheType.wire)
+        .put("batchTokens", batchTokens)
+        .put("ubatchTokens", ubatchTokens)
         .put("temperature", sampler.temperature.toDouble())
         .put("topP", sampler.topP.toDouble())
         .put("topK", sampler.topK)
@@ -136,19 +144,25 @@ class ModelProfileStore(context: Context) {
         )
         .put("autoConfiguredNote", autoConfiguredNote)
         .put("autoConfiguredAtEpochMillis", autoConfiguredAtEpochMillis)
+        .put("batchTuneNote", batchTuneNote)
+        .put("batchTunedAtEpochMillis", batchTunedAtEpochMillis)
         .put("isDefault", isDefault)
 
     private fun JSONObject.toProfile(): ModelProfile {
         val fallback = SamplerSettings()
+        val storedContext = optInt("contextTokens", 4_096)
+        val storedBatch = optInt("batchTokens", 0).coerceIn(0, storedContext)
         return ModelProfile(
             id = getString("id"),
             name = getString("name"),
             modelId = ModelId(getString("modelId")),
-            contextTokens = optInt("contextTokens", 4_096),
+            contextTokens = storedContext,
             backendId = optString("backendId"),
             thinkingEnabled = optBoolean("thinkingEnabled"),
             flashAttention = FlashAttentionMode.fromWire(optString("flashAttention")),
             kvCacheType = KvCacheType.fromWire(optString("kvCacheType")),
+            batchTokens = storedBatch,
+            ubatchTokens = optInt("ubatchTokens", 0).coerceIn(0, storedBatch),
             sampler = SamplerSettings(
                 temperature = optDouble("temperature", fallback.temperature.toDouble()).toFloat(),
                 topP = optDouble("topP", fallback.topP.toDouble()).toFloat(),

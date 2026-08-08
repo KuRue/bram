@@ -65,6 +65,29 @@ class ModelProfileTest {
     }
 
     @Test
+    fun `a default profile runs the original batch configuration`() {
+        // Zero means llama.cpp's defaults (512/128), which is what Bram always loaded with, so an
+        // untouched profile cannot change prompt speed or memory on upgrade.
+        val profile = ModelProfile.defaultFor(model())
+        assertEquals(0, profile.batchTokens)
+        assertEquals(0, profile.ubatchTokens)
+        assertTrue(profile.batchTuneNote.isBlank())
+    }
+
+    @Test
+    fun `a tuned profile remembers what was chosen and when`() {
+        val profile = ModelProfile.defaultFor(model()).copy(
+            batchTokens = 1_024,
+            ubatchTokens = 128,
+            batchTuneNote = "Tuned batch 1024/128 on Vulkan: 42 prompt tok/s, matching the CPU reference",
+            batchTunedAtEpochMillis = 123L,
+        )
+        assertEquals(1_024, profile.batchTokens)
+        assertEquals(128, profile.ubatchTokens)
+        assertEquals(123L, profile.batchTunedAtEpochMillis)
+    }
+
+    @Test
     fun `unknown wire values fall back to the safe defaults`() {
         assertEquals(FlashAttentionMode.AUTO, FlashAttentionMode.fromWire("banana"))
         assertEquals(FlashAttentionMode.ON, FlashAttentionMode.fromWire("on"))

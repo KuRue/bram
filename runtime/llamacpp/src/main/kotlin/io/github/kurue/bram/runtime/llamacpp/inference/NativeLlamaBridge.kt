@@ -12,6 +12,7 @@ internal class NativeLlamaBridge {
         modelPath: String,
         contextTokens: Int,
         batchTokens: Int,
+        ubatchTokens: Int,
         threads: Int,
         gpuLayers: Int,
         deviceFilter: String,

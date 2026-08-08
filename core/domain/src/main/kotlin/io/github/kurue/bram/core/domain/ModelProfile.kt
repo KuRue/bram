@@ -124,6 +124,23 @@ data class ModelProfile(
     val thinkingEnabled: Boolean = false,
     val flashAttention: FlashAttentionMode = FlashAttentionMode.AUTO,
     val kvCacheType: KvCacheType = KvCacheType.F16,
+    /**
+     * How many prompt tokens llama.cpp evaluates at once, or 0 for the llama.cpp default of 512.
+     *
+     * A larger batch means fewer evaluations for the same prompt, so this is the biggest lever on
+     * time-to-first-token — and the first thing to trade against context size, because the batch
+     * is a context parameter and its space comes out of the same memory. It is a profile setting
+     * because the best value is specific to the model, the device, and the backend it loads onto.
+     */
+    val batchTokens: Int = 0,
+    /**
+     * Tokens llama.cpp computes between model evaluations, or 0 for the llama.cpp default of 128.
+     *
+     * Almost always left alone: the micro-batch mostly matters at the extremes, and llama.cpp's
+     * default suits small and mid-range models. It exists so the tuning measurement can try both
+     * the obvious answer (128) and the larger one (256) and keep what actually wins.
+     */
+    val ubatchTokens: Int = 0,
     val sampler: SamplerSettings = SamplerSettings(),
     val systemPrompt: String = "",
     val createdAtEpochMillis: Long = System.currentTimeMillis(),
@@ -149,6 +166,14 @@ data class ModelProfile(
      * change the answer, and a build once dropped a whole backend without saying so.
      */
     val autoConfiguredAtEpochMillis: Long = 0L,
+    /**
+     * What the last batch tuning chose and why, in words. Kept beside the backend note so a
+     * measured choice can be inspected instead of trusted, and empty when the profile has never
+     * been tuned or its batch settings were set by hand.
+     */
+    val batchTuneNote: String = "",
+    /** When that batch measurement was taken. */
+    val batchTunedAtEpochMillis: Long = 0L,
     /**
      * Whether Bram made this profile rather than the user. A model gets one on import so it is
      * usable immediately, and an untouched default can be renamed or reshaped without the user

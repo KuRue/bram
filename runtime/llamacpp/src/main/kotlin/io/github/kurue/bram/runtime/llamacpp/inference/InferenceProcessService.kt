@@ -34,6 +34,8 @@ class InferenceProcessService : Service() {
     private var loadedThinking: Boolean = false
     private var loadedFlashAttention: String = "auto"
     private var loadedKvCacheType: String = "f16"
+    private var loadedBatchTokens: Int = 0
+    private var loadedUbatchTokens: Int = 0
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
@@ -267,6 +269,11 @@ class InferenceProcessService : Service() {
         val enableThinking = request.optBoolean("enableThinking", false)
         val flashAttention = request.optString("flashAttention", "auto")
         val kvCacheType = request.optString("kvCacheType", "f16")
+        // The batch configuration is a context parameter like the attention path: it changes how
+        // llama.cpp splits the prompt into evaluations, so reusing a context built for another
+        // batch would measure and run a different configuration than the one requested.
+        val batchTokens = request.optInt("batchTokens", 0).coerceIn(0, contextTokens)
+        val ubatchTokens = request.optInt("ubatchTokens", 0).coerceIn(0, batchTokens)
         // The offload plan is part of the load identity: reusing a CPU-resident model for a GPU
         // request would silently validate the accelerator against itself. The attention path and KV
         // type are part of it too: they are context parameters, so changing them without reloading
@@ -278,6 +285,8 @@ class InferenceProcessService : Service() {
             enableThinking == loadedThinking &&
             flashAttention == loadedFlashAttention &&
             kvCacheType == loadedKvCacheType &&
+            batchTokens == loadedBatchTokens &&
+            ubatchTokens == loadedUbatchTokens &&
             cpuValidated
         ) {
             return JSONObject(bridge.state())
@@ -307,7 +316,8 @@ class InferenceProcessService : Service() {
                 bridge.load(
                     modelPath = modelFile.absolutePath,
                     contextTokens = contextTokens,
-                    batchTokens = request.optInt("batchTokens", 512).coerceIn(32, contextTokens),
+                    batchTokens = batchTokens,
+                    ubatchTokens = ubatchTokens,
                     threads = request.optInt("threads", Runtime.getRuntime().availableProcessors())
                         .coerceIn(1, Runtime.getRuntime().availableProcessors()),
                     gpuLayers = gpuLayers,
@@ -328,6 +338,8 @@ class InferenceProcessService : Service() {
             loadedThinking = enableThinking
             loadedFlashAttention = flashAttention
             loadedKvCacheType = kvCacheType
+            loadedBatchTokens = batchTokens
+            loadedUbatchTokens = ubatchTokens
             cpuValidated = true
             return loadResult
                 .put("alreadyLoaded", false)

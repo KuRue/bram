@@ -109,16 +109,24 @@ re-decoded the whole prompt, so at the measured 16.2 tok/s prompt speed a conver
   prefix, and decode only what is new. Implemented and correct, but it buys nothing on the current
   reference model: `LFM2.5-2.6B` is a hybrid convolution/attention architecture, and llama.cpp
   refuses to partially erase such a sequence because the state is not kept per token — Mamba and
-  RWKV behave the same way. Measured on the phone as `prompt 909 tokens, matched 816, reused 0`:
+  RWKV behave the same way. Measured on the phone as `prompt 1021 tokens, matched 960, reused 0`:
   the prefix matching works, the trim is declined, and the cache is correctly discarded rather
-  than trusted. The reuse count is reported with the load response; a pure-attention model is
-  needed to demonstrate the gain.
-- **Batch tuning.** Deferred: `n_ubatch` is pinned at 128 and `n_batch` at a fixed guess, and
-  both should follow measured prompt throughput instead. This is per-device measurement work
-  that belongs with the device matrix rather than this milestone.
-- **Reuse count in the UI.** Deferred: the JNI layer reports `cachedPromptTokens` with the load
-  response, but the app does not surface it yet, so whether a loaded model can reuse its KV
-  cache is still read from a log line.
+  than trusted. A pure-attention model such as Qwen3.5 is needed to demonstrate the gain.
+- **Batch tuning.** `n_batch` and `n_ubatch` are per-profile settings (0 meaning llama.cpp's
+  defaults of 512/128, which is what Bram always ran), threaded from the profile card through
+  the load request to `llama_context_params` and into the service's load-identity cache, so
+  changing the batch reloads the model instead of silently reusing a context built for another
+  configuration. "Tune batch" measures the profile's own backend under teacher forcing: each
+  candidate must meet the same 90% agreement bar as the accelerator comparison before its speed
+  counts, scored on the greedy reference decode's prompt phase (now timed in the JNI layer). The
+  winner is written to the profile with a dated note. Measured on the S25 Ultra with
+  `LFM2.5-2.6B-Q4_0` on the Hexagon HTP: all four candidates (256/128, 512/128, 512/256, 1024/128)
+  reproduced the reference at 95.8%, and 512/256 won prompt speed (35 tok/s).
+- **Reuse count in the UI.** The composer's metrics line now appends "KV reuse: N of M tok" from
+  the `cachedPromptTokens` the JNI layer reports with the load response, so whether a loaded
+  model can reuse its KV cache is read from the screen rather than a log line. It reports what
+  was actually reused — honestly zero on the hybrid LFM2 model, most of the context on a
+  pure-attention one.
 
 Exit criterion: each optimization reproduces the CPU reference under teacher forcing before it is
 reported as working. A prefix-matching bug produces plausible wrong output rather than a crash,

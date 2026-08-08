@@ -290,6 +290,8 @@ data class AppUiState(
     /** What the currently loaded model is actually running on. */
     val loadedBackend: RuntimeBackend? = null,
     val isValidatingAccelerator: Boolean = false,
+    /** Which profile the batch tuning is measuring right now, or null when idle. */
+    val batchTuneProfileId: String? = null,
     /** Present while auto-configure runs. The dialog is shown for exactly as long as this is. */
     val autoConfigure: AutoConfigureProgress? = null,
     val acceleratorReport: AcceleratorReport? = null,
@@ -336,6 +338,16 @@ data class EndpointDraft(
     val contextWindowTokens: Int,
     val apiKey: String,
     val allowInsecureHttp: Boolean,
+)
+
+/** One batch configuration's result during a tuning run. */
+private data class BatchScore(
+    val batch: Int,
+    val ubatch: Int,
+    /** The greedy reference decode's prompt phase, in milliseconds. Lower is faster. */
+    val promptMillis: Long,
+    /** How closely it reproduced the CPU reference, so the note can say so. */
+    val agreement: Double,
 )
 
 class MainViewModel(
@@ -655,7 +667,9 @@ class MainViewModel(
         val snapshot = mutableState.value
         val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
         val model = snapshot.localModels.firstOrNull { it.id == profile.modelId } ?: return
-        if (snapshot.isLoadingModel || snapshot.isGenerating || snapshot.isValidatingAccelerator) return
+        if (snapshot.isLoadingModel || snapshot.isGenerating || snapshot.isValidatingAccelerator ||
+            snapshot.batchTuneProfileId != null
+        ) return
         val restoreLoaded = snapshot.loadedModelId
 
         viewModelScope.launch {
@@ -917,6 +931,8 @@ class MainViewModel(
                     enableThinking = profile.thinkingEnabled,
                     flashAttention = profile.flashAttention,
                     kvCacheType = profile.kvCacheType,
+                    batchTokens = profile.batchTokens,
+                    ubatchTokens = profile.ubatchTokens,
                 )
             }.onSuccess { result ->
                 viewModelScope.launch {
@@ -1095,6 +1111,136 @@ class MainViewModel(
             // composer stays enabled with no model behind it and sending does nothing.
             runCatching { unloadModelInternal(forget = false) }
             mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
+            refreshDeviceProfile()
+            restoreLoaded?.let { loadModel(it) }
+        }
+    }
+
+    /**
+     * Measures which batch configuration is fastest for a profile, then saves the winner.
+     *
+     * Prompt speed lives in n_batch — how many prompt tokens llama.cpp evaluates at once — so a
+     * bigger batch means fewer evaluations and a shorter wait for the first token, up to the point
+     * where the device's memory or the backend's tile size stops cooperating. The candidates are
+     * scored on the profile's own backend under teacher forcing: each one must reproduce the CPU
+     * reference token-for-token before its speed counts, so a bigger batch cannot buy time by
+     * changing the math. The winner is written into the profile, like an accelerator measurement,
+     * and the model is restored to whatever was loaded before.
+     */
+    fun tuneBatch(profileId: String) {
+        val state = mutableState.value
+        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
+        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        if (state.isLoadingModel || state.isGenerating ||
+            state.isValidatingAccelerator || state.batchTuneProfileId != null
+        ) return
+        val restoreLoaded = state.loadedModelId
+        viewModelScope.launch {
+            val backend = resolveLoadBackend(profile.backendId)
+            mutableState.update {
+                it.copy(
+                    batchTuneProfileId = profile.id,
+                    error = null,
+                    status = "Recording the CPU reference…",
+                )
+            }
+            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            val threads = (visibleCores - 2).coerceIn(1, 4)
+            val gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0
+            val tried = mutableListOf<String>()
+            runCatching {
+                // The reference is always recorded on CPU at the default batch, so every candidate
+                // is scored against the same yardstick and "fastest" can never mean "wrong the
+                // same way twice".
+                container.llamaCppClient.load(
+                    model,
+                    threads,
+                    gpuLayers = 0,
+                    enableThinking = profile.thinkingEnabled,
+                    flashAttention = profile.flashAttention,
+                    kvCacheType = profile.kvCacheType,
+                )
+                val cpuReference = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                val reference = cpuReference.optJSONArray("tokens").toIntList()
+                check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
+                val forced = reference.toIntArray()
+                // The default (512/128) is in the list so there is always a baseline to fall back
+                // to, and 1024/128 is the largest batch worth trying before the profile's context
+                // memory starts paying for it.
+                val candidates = listOf(256 to 128, 512 to 128, 512 to 256, 1024 to 128)
+                val scored = mutableListOf<BatchScore>()
+                for ((batch, ubatch) in candidates) {
+                    mutableState.update {
+                        it.copy(status = "Measuring batch $batch/$ubatch on ${backend.label}…")
+                    }
+                    container.llamaCppClient.load(
+                        model,
+                        threads,
+                        gpuLayers = gpuLayers,
+                        deviceFilter = backend.devicePrefix,
+                        enableThinking = profile.thinkingEnabled,
+                        flashAttention = profile.flashAttention,
+                        kvCacheType = profile.kvCacheType,
+                        batchTokens = batch,
+                        ubatchTokens = ubatch,
+                    )
+                    val predicted = container.llamaCppClient.teacherForced(forced)
+                        .optJSONArray("predictions").toIntList()
+                    // Exact equality is the wrong bar here: a quantized accelerator legitimately
+                    // disagrees with the fp32 CPU on near-ties (the same one bisection finds at a
+                    // fixed offload depth). The batch must hold the same ground the accelerator
+                    // comparison does — usable, not identical.
+                    val agreement = AcceleratorAgreement.score(reference, predicted)
+                    if (AcceleratorAgreement.isUsable(agreement)) {
+                        // The agreement check already ran the same graph shape, but the score that
+                        // decides anything is the wall time of the actual greedy reference path.
+                        val decode = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                        scored += BatchScore(
+                            batch = batch,
+                            ubatch = ubatch,
+                            promptMillis = decode.optLong("promptMillis", 0L),
+                            agreement = agreement,
+                        )
+                    }
+                    tried += "$batch/$ubatch"
+                }
+                check(scored.isNotEmpty()) {
+                    "None of the batch configurations met the " +
+                        "${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% agreement bar " +
+                        "against the CPU reference (${tried.joinToString(", ")} all failed)"
+                }
+                val best = scored.minBy { it.promptMillis }
+                val promptTokens = cpuReference.optInt("promptTokens", 0)
+                val rate = if (best.promptMillis > 0 && promptTokens > 0) {
+                    promptTokens * 1000 / best.promptMillis
+                } else {
+                    0
+                }
+                val comparable = reference.size
+                val tuned = profile.copy(
+                    batchTokens = best.batch,
+                    ubatchTokens = best.ubatch,
+                    batchTuneNote = buildString {
+                        append("Tuned batch ${best.batch}/${best.ubatch} on ${backend.label}: ")
+                        append("$rate prompt tok/s, ")
+                        append("${(best.agreement * comparable).toInt()}/$comparable predictions ")
+                        append("match the CPU reference")
+                        append(". Tried ${tried.joinToString(", ")}.")
+                    },
+                    batchTunedAtEpochMillis = System.currentTimeMillis(),
+                )
+                container.modelProfileStore.save(tuned)
+                reloadProfiles(selectId = profile.id)
+            }.onFailure { error ->
+                mutableState.update {
+                    it.copy(error = error.message ?: "Could not tune the batch size")
+                }
+            }
+            // The measurement leaves the runtime on the last candidate, so drop it and restore
+            // whatever was loaded before — the profile, now with its tuned batch, if it was the
+            // one being tuned.
+            runCatching { unloadModelInternal(forget = false) }
+            mutableState.update { it.copy(batchTuneProfileId = null, status = null) }
             refreshDeviceProfile()
             restoreLoaded?.let { loadModel(it) }
         }

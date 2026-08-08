@@ -272,6 +272,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onDeleteProfile = viewModel::deleteProfile,
                                 onLoadProfile = viewModel::loadProfile,
                                 onAutoConfigure = viewModel::autoConfigure,
+                                onTuneBatch = viewModel::tuneBatch,
                             )
                             AppPanel.SETTINGS -> SettingsScreen(
                                 state = state,
@@ -680,6 +681,9 @@ private fun ChatComposer(
                     append(state.loadedBackend?.label ?: "Runtime")
                     append(": ${formatRate(metrics.promptTokensPerSecond)} prompt")
                     append(" · ${formatRate(metrics.decodeTokensPerSecond)} generation")
+                    metrics.cachedPromptTokens?.let { reused ->
+                        append(" · KV reuse: $reused of ${metrics.promptTokens} tok")
+                    }
                     metrics.processPssBytes?.let { append(" · ${formatBytes(it)} PSS") }
                 },
                 style = MaterialTheme.typography.labelSmall,
@@ -785,6 +789,7 @@ private fun ModelsScreen(
     onDeleteProfile: (String) -> Unit,
     onLoadProfile: (String) -> Unit,
     onAutoConfigure: (String) -> Unit,
+    onTuneBatch: (String) -> Unit,
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var showNewProfilePicker by rememberSaveable { mutableStateOf(false) }
@@ -839,7 +844,9 @@ private fun ModelsScreen(
                     loaded = state.activeProfileId == profile.id &&
                         state.loadedModelId == model.id.value && state.cpuValidated,
                     loading = state.isLoadingModel && state.activeProfileId == profile.id,
-                    busy = state.isGenerating || state.isValidatingAccelerator,
+                    busy = state.isGenerating || state.isValidatingAccelerator || state.batchTuneProfileId != null,
+                    tuning = state.batchTuneProfileId == profile.id,
+                    tuneStatus = state.status?.takeIf { state.batchTuneProfileId == profile.id },
                     backend = backend,
                     availableBackends = state.availableBackends,
                     canDelete = state.profiles.count { it.modelId == profile.modelId } > 1,
@@ -852,6 +859,7 @@ private fun ModelsScreen(
                     onDeleteProfile = { onDeleteProfile(profile.id) },
                     onDuplicate = { onCreateProfile(model) },
                     onAutoConfigure = { onAutoConfigure(profile.id) },
+                    onTuneBatch = { onTuneBatch(profile.id) },
                 )
             }
         }
@@ -1047,6 +1055,29 @@ private fun AcceleratorValidationCard(
 }
 
 /**
+ * A batch configuration a profile can pin, in prompt/micro-batch tokens.
+ *
+ * 0/0 means llama.cpp's defaults (512/128), which is what Bram ran before the setting existed, so
+ * it is the preset an untouched profile matches.
+ */
+private data class BatchPreset(
+    val batch: Int,
+    val ubatch: Int,
+    val label: String,
+) {
+    fun matches(profile: ModelProfile): Boolean =
+        profile.batchTokens == batch && profile.ubatchTokens == ubatch
+}
+
+private val batchPresets = listOf(
+    BatchPreset(0, 0, "Default 512/128"),
+    BatchPreset(256, 128, "256/128"),
+    BatchPreset(512, 128, "512/128"),
+    BatchPreset(512, 256, "512/256"),
+    BatchPreset(1_024, 128, "1024/128"),
+)
+
+/**
  * One saved way of running a model.
  *
  * The profile is what a person picks, so it is the title; the file it runs is an attribute of it.
@@ -1063,6 +1094,9 @@ private fun ProfileCard(
     loaded: Boolean,
     loading: Boolean,
     busy: Boolean,
+    tuning: Boolean,
+    /** The live step while [tuning], shown inline so the measurement is not silent. */
+    tuneStatus: String?,
     backend: RuntimeBackend,
     availableBackends: List<RuntimeBackend>,
     canDelete: Boolean,
@@ -1073,6 +1107,7 @@ private fun ProfileCard(
     onDeleteProfile: () -> Unit,
     onDuplicate: () -> Unit,
     onAutoConfigure: () -> Unit,
+    onTuneBatch: () -> Unit,
 ) {
     // Settings the runtime reads at load time cannot change under a loaded model.
     val locked = loaded || loading || busy
@@ -1307,6 +1342,54 @@ private fun ProfileCard(
                             checked = profile.thinkingEnabled,
                             onCheckedChange = { onUpdateProfile(profile.copy(thinkingEnabled = it)) },
                             enabled = !busy,
+                        )
+                    }
+
+                    // The batch is a context parameter like flash attention: it changes how the
+                    // prompt is evaluated, so it belongs with the load-time settings rather than
+                    // the sampling ones. It is also the biggest lever on time-to-first-token, so
+                    // the measured option sits right beside the manual presets instead of hiding
+                    // behind the auto-configure flow.
+                    SectionLabel("Batch")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        batchPresets.forEach { preset ->
+                            FilterChip(
+                                selected = preset.matches(profile),
+                                onClick = {
+                                    onUpdateProfile(
+                                        profile.copy(
+                                            batchTokens = preset.batch,
+                                            ubatchTokens = preset.ubatch,
+                                        ),
+                                    )
+                                },
+                                enabled = !locked,
+                                label = { Text(preset.label) },
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = onTuneBatch,
+                        enabled = !locked,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (tuning) "Tuning…" else "Tune batch")
+                    }
+                    tuneStatus?.let { status ->
+                        Text(
+                            status,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    profile.batchTuneNote.takeIf(String::isNotBlank)?.let { note ->
+                        Text(
+                            note,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }

@@ -196,8 +196,12 @@ visible when the app actually ran.
 Deferred from Milestone 7 (closed): batch tuning (`n_ubatch` pinned at 128,
 should follow measured prompt throughput) and surfacing the KV-reuse count in
 the app UI (`cachedPromptTokens` is reported with the load response but not
-shown). A pure-attention model such as Qwen3.5 should finally demonstrate the
-KV-reuse gain on the emulator.
+shown). Both shipped after the milestone closed: batch is a per-profile setting
+with a teacher-forced "Tune batch" measurement (winner saved with a dated
+note; measured 512/256 on the NPU profile), and the composer metrics line
+shows "KV reuse: N of M tok". The reuse count is honest — zero on the hybrid
+LFM2 model, which refuses partial cache trims; a pure-attention model such as
+Qwen3.5 should finally demonstrate the KV-reuse gain on the emulator.
 
 Reasoning-folding for LFM2.5 is unit-tested only; confirm on device with a
 reasoning turn when convenient.
