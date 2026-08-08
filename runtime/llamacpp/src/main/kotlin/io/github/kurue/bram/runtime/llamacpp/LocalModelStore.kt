@@ -144,10 +144,70 @@ class LocalModelStore(
             hasChatTemplate = metadata.hasChatTemplate,
             preferredContextTokens = recommendInitialContext(metadata.trainedContextTokens),
         )
+        addOrReplace(record, uri.toString())
+        progress(ModelImportProgress("Verified", document.size, document.size))
+        record
+    }
 
+    /**
+     * Imports a file [ModelDownloader] already downloaded and SHA-256 verified.
+     *
+     * The verification is the downloader's job, so this only reads the GGUF header, moves the
+     * file into the model store under its digest name, and records it. [contentUri] is the source
+     * URL so the record keeps where the model came from, and replacing by it makes a re-download
+     * update the existing record instead of duplicating it.
+     */
+    suspend fun importDownloaded(
+        verifiedFile: java.io.File,
+        expectedSha256: String,
+        sourceUrl: String,
+        originalFileName: String,
+        progress: (ModelImportProgress) -> Unit = {},
+    ): LocalModelRecord = withContext(Dispatchers.IO) {
+        require(verifiedFile.isFile) { "The downloaded model file is missing" }
+        val size = verifiedFile.length()
+        require(size > 0) { "The downloaded model file is empty" }
+        progress(ModelImportProgress("Reading GGUF metadata", size, size))
+        val metadata = java.io.FileInputStream(verifiedFile).use(metadataReader::read)
+
+        modelsDirectory.mkdirs()
+        val modelFile = java.io.File(modelsDirectory, "${expectedSha256.take(24)}.gguf")
+        if (modelFile.exists()) {
+            runCatching { modelFile.delete() }
+        }
+        if (!verifiedFile.renameTo(modelFile)) {
+            runCatching { verifiedFile.delete() }
+            throw IllegalStateException("Could not move the downloaded GGUF into app storage")
+        }
+        val record = LocalModelRecord(
+            id = ModelId("local:${expectedSha256.take(24)}"),
+            displayName = displayNameFor(metadata.name, originalFileName),
+            fileName = originalFileName,
+            contentUri = sourceUrl,
+            localPath = modelFile.absolutePath,
+            fileSizeBytes = size,
+            sha256 = expectedSha256,
+            ggufVersion = metadata.version,
+            architecture = metadata.architecture,
+            quantization = metadata.quantization,
+            trainedContextTokens = metadata.trainedContextTokens,
+            layerCount = metadata.layerCount,
+            hasChatTemplate = metadata.hasChatTemplate,
+            preferredContextTokens = recommendInitialContext(metadata.trainedContextTokens),
+        )
+        addOrReplace(record, sourceUrl)
+        progress(ModelImportProgress("Verified", size, size))
+        record
+    }
+
+    /**
+     * Records a model in the catalog, replacing any record with the same id or source, and deletes
+     * the copies the replaced records left behind.
+     */
+    private fun addOrReplace(record: LocalModelRecord, sourceKey: String) {
         val models = decode(preferences.getString(KEY_MODELS, null)).toMutableList()
-        val replaced = models.filter { it.id == record.id || it.contentUri == record.contentUri }
-        models.removeAll { it.id == record.id || it.contentUri == record.contentUri }
+        val replaced = models.filter { it.id == record.id || it.contentUri == sourceKey }
+        models.removeAll { it.id == record.id || it.contentUri == sourceKey }
         models += record
         persist(models)
         replaced.asSequence()
@@ -157,8 +217,6 @@ class LocalModelStore(
             }
             .distinct()
             .forEach { path -> runCatching { java.io.File(path).delete() } }
-        progress(ModelImportProgress("Verified", document.size, document.size))
-        record
     }
 
     // The per-model backend, context, and reasoning settings are no longer written here: they are

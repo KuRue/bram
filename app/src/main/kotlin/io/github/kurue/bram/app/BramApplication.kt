@@ -21,6 +21,8 @@ import io.github.kurue.bram.runtime.openai.OpenAiCompatibleRuntime
 import io.github.kurue.bram.runtime.llamacpp.LlamaCppRuntime
 import io.github.kurue.bram.runtime.llamacpp.LocalModelStore
 import io.github.kurue.bram.runtime.llamacpp.ModelProfileStore
+import io.github.kurue.bram.runtime.llamacpp.downloads.HuggingFaceCatalog
+import io.github.kurue.bram.runtime.llamacpp.downloads.ModelDownloader
 import io.github.kurue.bram.runtime.llamacpp.inference.LlamaCppServiceClient
 import org.json.JSONArray
 import org.json.JSONObject
@@ -49,6 +51,14 @@ class AppContainer(application: Application) {
     val modelProfileStore = ModelProfileStore(application)
     val toolPermissionStore = ToolPermissionStore(application)
     val notificationSettings = NotificationSettingsStore(application)
+
+    /**
+     * Where downloads are staged while they run. Separate from the model store so a half-downloaded
+     * `.part` file can never be mistaken for an imported model.
+     */
+    val downloadsDirectory: java.io.File = java.io.File(application.filesDir, "downloads")
+    val huggingFaceCatalog = HuggingFaceCatalog()
+    val modelDownloader = ModelDownloader(huggingFaceCatalog)
 
     /**
      * Held by the container rather than built per run, so the screen can watch what it is waiting

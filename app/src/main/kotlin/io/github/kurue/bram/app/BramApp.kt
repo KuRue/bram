@@ -116,6 +116,7 @@ import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.displayName
+import io.github.kurue.bram.runtime.llamacpp.downloads.RemoteModelFile
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -273,6 +274,10 @@ fun BramApp(viewModel: MainViewModel) {
                                 onLoadProfile = viewModel::loadProfile,
                                 onAutoConfigure = viewModel::autoConfigure,
                                 onTuneBatch = viewModel::tuneBatch,
+                                onBrowseRepo = viewModel::browseModelRepo,
+                                onStartDownload = viewModel::startModelDownload,
+                                onCancelDownload = viewModel::cancelModelDownload,
+                                onClearDownloadResult = viewModel::clearDownloadResult,
                             )
                             AppPanel.SETTINGS -> SettingsScreen(
                                 state = state,
@@ -790,14 +795,31 @@ private fun ModelsScreen(
     onLoadProfile: (String) -> Unit,
     onAutoConfigure: (String) -> Unit,
     onTuneBatch: (String) -> Unit,
+    onBrowseRepo: (String) -> Unit,
+    onStartDownload: (RemoteModelFile) -> Unit,
+    onCancelDownload: () -> Unit,
+    onClearDownloadResult: () -> Unit,
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var showNewProfilePicker by rememberSaveable { mutableStateOf(false) }
+    var showDownloadDialog by rememberSaveable { mutableStateOf(false) }
     if (showNewProfilePicker) {
         NewProfileDialog(
             models = state.localModels,
             onPick = { model -> onCreateProfile(model); showNewProfilePicker = false },
             onDismiss = { showNewProfilePicker = false },
+        )
+    }
+    if (showDownloadDialog) {
+        DownloadModelDialog(
+            state = state,
+            onBrowse = onBrowseRepo,
+            onStartDownload = onStartDownload,
+            onCancelDownload = onCancelDownload,
+            onDismiss = {
+                showDownloadDialog = false
+                onClearDownloadResult()
+            },
         )
     }
     LazyColumn(
@@ -817,16 +839,25 @@ private fun ModelsScreen(
                 }
             }
         }
+        item {
+            OutlinedButton(
+                onClick = { showDownloadDialog = true },
+                enabled = !state.isDownloading,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Download a model") }
+        }
         if (state.localModels.isEmpty() && !state.isImporting) {
             item {
                 GlassSurface(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("No models yet", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Pick a GGUF from this device. Bram copies it into its own storage so the " +
-                                "native runtime can load it, then verifies the copy with SHA-256.",
+                            "Pick a GGUF from this device — or download one from Hugging Face. " +
+                                "Bram copies it into its own storage so the native runtime can load " +
+                                "it, then verifies the copy with SHA-256.",
                         )
                         Button(onClick = onImport) { Text("Choose a GGUF") }
+                        OutlinedButton(onClick = { showDownloadDialog = true }) { Text("Download a model") }
                     }
                 }
             }
@@ -940,6 +971,139 @@ private fun NewProfileDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+/**
+ * Finds and downloads a GGUF from Hugging Face, straight into the model list.
+ *
+ * The dialog moves through three phases: pick a repository and list its files, download the chosen
+ * one with a live progress bar, and confirm what landed. The repository field is free text so any
+ * public GGUF repo works, with a few small known-good suggestions beside it.
+ */
+@Composable
+private fun DownloadModelDialog(
+    state: AppUiState,
+    onBrowse: (String) -> Unit,
+    onStartDownload: (RemoteModelFile) -> Unit,
+    onCancelDownload: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var repo by rememberSaveable { mutableStateOf("") }
+    val finished = state.downloadedModelName != null
+    AlertDialog(
+        onDismissRequest = { if (!state.isDownloading && !finished) onDismiss() },
+        title = { Text(if (finished) "Model ready" else "Download model") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (finished) {
+                    Text(
+                        "${state.downloadedModelName} is verified and imported. " +
+                            "It is in your models list, ready to load.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else {
+                    Text(
+                        "Fetch a GGUF straight from Hugging Face. The download is verified by " +
+                            "SHA-256 before it is imported, so a corrupted copy is rejected.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = repo,
+                        onValueChange = { repo = it },
+                        singleLine = true,
+                        enabled = !state.isDownloading,
+                        label = { Text("Repository") },
+                        supportingText = { Text("e.g. Qwen/Qwen2.5-0.5B-Instruct-GGUF") },
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        suggestedDownloadRepos.forEach { suggested ->
+                            FilterChip(
+                                selected = repo == suggested,
+                                onClick = { repo = suggested },
+                                enabled = !state.isDownloading,
+                                label = { Text(suggested.removePrefix("Qwen/")) },
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = { onBrowse(repo) },
+                        enabled = !state.isDownloading && repo.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Find files") }
+
+                    state.downloadBrowseError?.let { error ->
+                        Text(
+                            error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+
+                    if (state.isDownloading) {
+                        val progress = state.downloadProgress
+                        val total = progress?.totalBytes ?: 0L
+                        val read = progress?.bytesRead ?: 0L
+                        LinearProgressIndicator(
+                            progress = {
+                                if (total > 0) (read.toFloat() / total).coerceIn(0f, 1f) else 0.3f
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            "${progress?.stage ?: "Downloading"} · ${formatBytes(read)} of ${formatBytes(total)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = onCancelDownload, modifier = Modifier.align(Alignment.End)) {
+                            Text("Cancel")
+                        }
+                    } else {
+                        state.downloadCatalog.forEach { file ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !state.isDownloading) { onStartDownload(file) }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(file.displayName, style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        formatBytes(file.sizeBytes),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Text(
+                                    "Download",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            if (finished) {
+                Button(onClick = onDismiss) { Text("Done") }
+            } else if (!state.isDownloading) {
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        },
+    )
+}
+
+private val suggestedDownloadRepos = listOf(
+    "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+    "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+    "Qwen/Qwen2.5-3B-Instruct-GGUF",
+)
 
 @Composable
 private fun AcceleratorValidationCard(

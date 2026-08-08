@@ -1,6 +1,6 @@
 # Session handoff
 
-Last updated: 2026-08-07
+Last updated: 2026-08-08
 
 ## Current source of truth
 
@@ -27,6 +27,21 @@ build tree is a synced copy of the same working tree.
   reference, records results on the profile, picks the fastest that agreed, and shows the run live
   in an in-tree overlay that blurs the app behind it. Also fixes a silent CPU fallback (backend
   detection now queries the runtime synchronously before choosing) and darkens/opens up the glass.
+- **Milestone 18** — the status service holds for the loaded model's lifetime (start on load, stop
+  on unload or inference-process death) with a phase notification, and an opt-in completion alert
+  posts a summary of the reply when a turn finishes backgrounded. The alert shows the reply text
+  rather than an inline Reply action, which testing showed to be pointless for a message you cannot
+  see yet. Also: the build-sync now mirrors deletions (`--delete`) while excluding the WSL-only
+  OpenCL stub.
+- **Milestone 19 (in-app model downloads)** — "Download a model" on the Models screen: the
+  HuggingFace tree API is browsed from the dialog (smallest-first, LFS-only, readable errors for
+  missing/gated repos), the download streams to a `.gguf.part` staging file with live progress and
+  an instant Cancel (cancellation severs the connection to wake a blocked read), verifies SHA-256,
+  and imports the digest-named copy with its HF source URL recorded. Eleven new unit tests cover
+  the catalog and downloader against stub HTTP servers. Verified on the S25 Ultra: Qwen2.5-0.5B
+  Q2_K (396 MB) downloaded at ~1.3 MB/s, verified, imported, auto-profiled, and loaded; the second
+  turn showed `KV reuse: 565 of 585 tok` and prompt processing at 2489 tok/s vs 104 tok/s cold —
+  the first on-device demonstration of the Milestone 7 KV-reuse gain.
 
 ## What works (on main)
 
@@ -43,6 +58,12 @@ seven, with no error reported. Vulkan compiles and is offered, but is not
 validated. Auto-configure measures whichever backends the build and device
 offer and records the results on the profile; NPU routing was re-verified
 after the backend changes (all four htp skels packaged and loaded).
+
+**Model downloads.** Import a GGUF straight from Hugging Face from the
+Models screen: browse the repository's quantizations (smallest-first,
+SHA-256-verified, readable errors for missing or gated repos), download with
+live progress and cancellation, and the verified copy lands in the models
+list with a profile ready to load.
 
 **Conversations.** Persisted as one JSON file each with a rebuildable index.
 Multiple threads, New and History, titles from the first message, restored on
@@ -65,8 +86,11 @@ is the one tool a local model can call end to end. (More tools live on
 
 ## What is not implemented
 
-- **Model download.** Getting a GGUF in still needs a browser and the file
-  picker. Deliberately deferred.
+- **Task queue and scheduling.** One run is tracked at a time. There is no
+  queue, no scheduled work, and no per-task UI. `AgentTaskService` is the
+  foundation, not the finished thing.
+- **Resumable or queued downloads.** One verified, cancellable transfer at a
+  time; a dropped connection restarts the file rather than resuming it.
 - **Task queue and scheduling.** One run is tracked at a time. There is no
   queue, no scheduled work, and no per-task UI. `AgentTaskService` is the
   foundation, not the finished thing.
@@ -176,22 +200,14 @@ visible when the app actually ran.
 
 ## Next
 
-1. Milestone 18 — live status notification, done and verified on the S25 Ultra.
-   The status service runs per model-load (start on load, stop on unload or
-   inference-process death), its notification reports model, backend, and
-   phase from the turn events the transcript already consumes, and the
-   opt-in completion alert (Settings > Notifications) posts a summary of the
-   reply when a turn finishes backgrounded. Design note: an inline Reply
-   action on the alert was dropped in testing — a reply to a message you
-   cannot see yet is pointless — so the alert shows the reply text instead.
-   The build-sync now mirrors deletions (--delete) while excluding the
-   WSL-only OpenCL stub.
-2. A larger tool-capable model for agentic use. The web tools and approval gate
-   work; LFM2.5-2.6B cannot chain tools reliably.
-3. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
+1. A larger tool-capable model for agentic use. The web tools and approval gate
+   work; LFM2.5-2.6B cannot chain tools reliably. Downloading one is now a
+   dialog away.
+2. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
    the validated GPU path, so chasing Vulkan is low priority unless OpenCL's
    1.11x needs replacing.
-4. In-app model download — the biggest new-user gap left (deferred since M1).
+3. Resumable and queued downloads (multi-file repositories, Xet) — the
+   download path is built; these extend it rather than rework it.
 
 Deferred from Milestone 7 (closed): batch tuning (`n_ubatch` pinned at 128,
 should follow measured prompt throughput) and surfacing the KV-reuse count in
@@ -200,8 +216,9 @@ shown). Both shipped after the milestone closed: batch is a per-profile setting
 with a teacher-forced "Tune batch" measurement (winner saved with a dated
 note; measured 512/256 on the NPU profile), and the composer metrics line
 shows "KV reuse: N of M tok". The reuse count is honest — zero on the hybrid
-LFM2 model, which refuses partial cache trims; a pure-attention model such as
-Qwen3.5 should finally demonstrate the KV-reuse gain on the emulator.
+LFM2 model, which refuses partial cache trims; Milestone 19's Qwen2.5-0.5B
+download finally demonstrated the gain on the phone (565 of 585 tokens
+reused, prompt at 2489 tok/s vs 104 cold).
 
 Reasoning-folding for LFM2.5 is unit-tested only; confirm on device with a
 reasoning turn when convenient.

@@ -26,6 +26,7 @@ import io.github.kurue.bram.core.domain.RemoteApiKind
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.TokenUsage
 import io.github.kurue.bram.runtime.llamacpp.ModelImportProgress
+import io.github.kurue.bram.runtime.llamacpp.downloads.RemoteModelFile
 import java.net.URI
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -266,6 +267,15 @@ data class AppUiState(
     val cpuValidated: Boolean = false,
     val isImporting: Boolean = false,
     val importProgress: ModelImportProgress? = null,
+    /** The GGUFs the browsed repository published, smallest first, or empty while none are shown. */
+    val downloadCatalog: List<RemoteModelFile> = emptyList(),
+    /** The repository the catalog was fetched from, or null when nothing was browsed yet. */
+    val downloadRepoId: String? = null,
+    val downloadBrowseError: String? = null,
+    val isDownloading: Boolean = false,
+    val downloadProgress: ModelImportProgress? = null,
+    /** Set when a download finishes, so the dialog can say what landed before it closes. */
+    val downloadedModelName: String? = null,
     val isLoadingModel: Boolean = false,
     val modelLoadDetail: String? = null,
     val messages: List<ConversationMessage> = emptyList(),
@@ -357,6 +367,7 @@ class MainViewModel(
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var conversationId = ConversationId(UUID.randomUUID().toString())
     private var generationJob: Job? = null
+    private var downloadJob: Job? = null
     /** Whether the app is what the user is looking at. Gates the completion alert. */
     private var appForeground = true
 
@@ -619,6 +630,112 @@ class MainViewModel(
             }
             mutableState.update { it.copy(isImporting = false, importProgress = null) }
         }
+    }
+
+    /**
+     * Fetches the GGUFs a Hugging Face repository publishes, into the catalog the download dialog
+     * shows. The repository id is normalized the same way the UI suggests it.
+     */
+    fun browseModelRepo(repoId: String) {
+        val repo = repoId.trim().trim('/').removePrefix("https://huggingface.co/")
+        if (repo.isBlank()) {
+            mutableState.update { it.copy(downloadBrowseError = "Enter a repository id like Qwen/Qwen2.5-0.5B-Instruct-GGUF") }
+            return
+        }
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(downloadRepoId = repo, downloadBrowseError = null, downloadedModelName = null)
+            }
+            runCatching { container.huggingFaceCatalog.listGgufFiles(repo) }
+                .onSuccess { files ->
+                    mutableState.update {
+                        it.copy(
+                            downloadCatalog = files,
+                            downloadBrowseError = if (files.isEmpty()) {
+                                "This repository has no GGUF files to download"
+                            } else {
+                                null
+                            },
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    mutableState.update {
+                        it.copy(
+                            downloadCatalog = emptyList(),
+                            downloadBrowseError = error.message ?: "Could not reach Hugging Face",
+                        )
+                    }
+                }
+        }
+    }
+
+    /**
+     * Downloads a repository GGUF into app storage, verifies it, and imports it like any other
+     * model. Runs on the application scope so a screen change does not kill the transfer.
+     */
+    fun startModelDownload(file: RemoteModelFile) {
+        val state = mutableState.value
+        if (state.isDownloading || state.isImporting) return
+        // A model is roughly as large as the file, and the staged copy exists beside it, so the
+        // download needs the file's size in free space plus room to breathe.
+        val freeBytes = container.deviceProfiler.snapshot().freeStorageBytes
+        if (freeBytes < file.sizeBytes + FREE_STORAGE_BUFFER_BYTES) {
+            mutableState.update {
+                it.copy(
+                    error = "Not enough free storage for ${file.displayName} " +
+                        "(${formatBytesForError(file.sizeBytes)} needed, ${formatBytesForError(freeBytes)} free).",
+                )
+            }
+            return
+        }
+        downloadJob = container.appScope.launch {
+            mutableState.update {
+                it.copy(
+                    isDownloading = true,
+                    downloadProgress = ModelImportProgress("Downloading"),
+                    downloadedModelName = null,
+                    error = null,
+                )
+            }
+            try {
+                val staged = container.modelDownloader.download(file, container.downloadsDirectory) { progress ->
+                    mutableState.update { it.copy(downloadProgress = progress) }
+                }
+                val model = container.localModelStore.importDownloaded(
+                    verifiedFile = staged,
+                    expectedSha256 = file.sha256,
+                    sourceUrl = container.huggingFaceCatalog.resolveDownloadUrl(file.repoId, file.fileName),
+                    originalFileName = file.fileName,
+                ) { progress ->
+                    mutableState.update { it.copy(downloadProgress = progress) }
+                }
+                mutableState.update { it.copy(downloadedModelName = model.displayName) }
+                reloadLocalModels(selectId = model.id.value)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                mutableState.update {
+                    it.copy(error = error.message ?: "Could not download the model")
+                }
+            } finally {
+                mutableState.update { it.copy(isDownloading = false, downloadProgress = null) }
+            }
+        }
+    }
+
+    fun cancelModelDownload() {
+        downloadJob?.cancel()
+    }
+
+    /** Clears the "downloaded" notice once the dialog that shows it is gone. */
+    fun clearDownloadResult() {
+        mutableState.update { it.copy(downloadedModelName = null, downloadBrowseError = null) }
+    }
+
+    private fun formatBytesForError(bytes: Long): String {
+        val mb = bytes / 1_048_576L
+        return if (mb >= 1_024) "%.1f GB".format(mb / 1_024.0) else "$mb MB"
     }
 
     fun resolveApproval(decision: ToolApprovalDecision) {
@@ -1865,6 +1982,9 @@ private const val REFERENCE_TOKENS = 24
 
 /** llama.cpp clamps this to the model's layer count, so it means "offload everything". */
 private const val FULL_GPU_OFFLOAD = 999
+
+/** Free storage the download needs beside the file itself: the staged copy and the imported one. */
+private const val FREE_STORAGE_BUFFER_BYTES = 512L * 1024 * 1024
 
 private fun Int?.orZero(): Int = this ?: 0
 
