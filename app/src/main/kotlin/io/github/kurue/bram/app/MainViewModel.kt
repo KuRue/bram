@@ -497,6 +497,25 @@ class MainViewModel(
         }.getOrDefault(listOf(RuntimeBackend.CPU))
     }
 
+    /**
+     * Picks the backend a load should actually target.
+     *
+     * A profile names its preferred backend, but at a cold start the accelerator list may not have
+     * been populated yet — [detectBackends] runs as its own coroutine. Resolving against that stale
+     * list is exactly how an NPU profile came back from a cold start running on the CPU, so when the
+     * preference is an accelerator the runtime has not yet reported, the runtime is asked before any
+     * fallback to CPU. CPU profiles never wait, since CPU is always present.
+     */
+    private suspend fun resolveLoadBackend(backendId: String): RuntimeBackend {
+        val preferred = RuntimeBackend.fromId(backendId)
+        if (preferred == RuntimeBackend.CPU) return RuntimeBackend.CPU
+        val known = mutableState.value.availableBackends
+        if (preferred in known) return preferred
+        val detected = detectBackendsNow()
+        if (detected != known) mutableState.update { it.copy(availableBackends = detected) }
+        return preferred.takeIf { it in detected } ?: RuntimeBackend.CPU
+    }
+
     /** Removes model copies nothing in the catalog references and reports what was reclaimed. */
     fun reclaimModelStorage() {
         viewModelScope.launch {
@@ -858,9 +877,12 @@ class MainViewModel(
         val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
         val modelId = model.id.value
         if (state.isLoadingModel || state.isGenerating) return
-        val backend = RuntimeBackend.fromId(profile.backendId)
-            .takeIf { it in state.availableBackends } ?: RuntimeBackend.CPU
         viewModelScope.launch {
+            // Resolved here rather than above the launch: at a cold start the profile may name an
+            // accelerator that detection has not reported yet, and a stale availableBackends list
+            // would silently restore an NPU profile onto the CPU. resolveLoadBackend re-detects in
+            // that case rather than falling back without asking.
+            val backend = resolveLoadBackend(profile.backendId)
             mutableState.update {
                 it.copy(
                     selectedRuntimeId = modelId,
