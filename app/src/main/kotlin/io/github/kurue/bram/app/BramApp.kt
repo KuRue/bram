@@ -108,6 +108,7 @@ import io.github.kurue.bram.core.domain.KvCacheType
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.displayName
@@ -124,7 +125,7 @@ private enum class AppSection(val label: String, val glyph: String) {
 }
 
 /** Panels reachable from the menu, each shown as a sheet over the conversation. */
-private enum class AppPanel { MODELS, SETTINGS }
+private enum class AppPanel { MODELS, SETTINGS, SESSION }
 
 @Composable
 fun BramApp(viewModel: MainViewModel) {
@@ -182,7 +183,7 @@ fun BramApp(viewModel: MainViewModel) {
                 onNewConversation = viewModel::startNewConversation,
                 // With no models there is nothing to choose between, so the pill goes straight to
                 // the place that fixes that.
-                onPickModel = { panel = AppPanel.MODELS },
+                onPickModel = { panel = if (state.localModels.isEmpty()) AppPanel.MODELS else AppPanel.SESSION },
             )
 
             ChatComposer(
@@ -262,6 +263,10 @@ fun BramApp(viewModel: MainViewModel) {
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onRefreshDiagnostics = viewModel::refreshDeviceProfile,
                                 onWithdrawToolPermission = viewModel::withdrawToolPermission,
+                            )
+                            AppPanel.SESSION -> SessionScreen(
+                                state = state,
+                                onSetMode = viewModel::updatePermissionMode,
                             )
                         }
                     }
@@ -565,9 +570,15 @@ private fun ChatTranscript(
     // not merely each new message. The large offset scrolls past the item rather than aligning its
     // top, which matters because a reply is routinely taller than the viewport: aligning the top
     // would pin the screen to the opening line while the rest was written out of sight.
-    LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content?.length) {
-        if (state.messages.isNotEmpty()) {
-            runCatching { listState.animateScrollToItem(state.messages.lastIndex, LARGE_SCROLL_OFFSET) }
+    LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content?.length, state.pendingApproval) {
+        when {
+            // The approval card sits just past the last message, so a long thread leaves it hidden
+            // under the composer or off the bottom. Bring it into view the moment it appears,
+            // otherwise the run blocks on a prompt the user cannot see.
+            state.pendingApproval != null && state.messages.isNotEmpty() ->
+                runCatching { listState.animateScrollToItem(state.messages.size, LARGE_SCROLL_OFFSET) }
+            state.messages.isNotEmpty() ->
+                runCatching { listState.animateScrollToItem(state.messages.lastIndex, LARGE_SCROLL_OFFSET) }
         }
     }
 
@@ -1545,6 +1556,101 @@ private fun AutoConfigureRow(label: String, status: String, color: Color) {
         )
     }
 }
+
+@Composable
+private fun SessionScreen(
+    state: AppUiState,
+    onSetMode: (PermissionMode) -> Unit,
+) {
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionHeader("Session", state.activeConversationId?.let { "This conversation" } ?: "Not started")
+
+        // The mode is the one thing that changes how the conversation behaves rather than what it
+        // shows, so it sits at the top. The helper text says what the current selection does, since
+        // three one-word labels leave the difference between them to guesswork.
+        SectionLabel("Tool permission")
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            PermissionMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = mode == state.permissionMode,
+                    onClick = { onSetMode(mode) },
+                    label = { Text(mode.label) },
+                )
+            }
+        }
+        Text(
+            when (state.permissionMode) {
+                PermissionMode.AUTO -> "Read-only tools run without asking; anything with side effects is confirmed first."
+                PermissionMode.MANUAL -> "Every tool call is confirmed, including read-only ones."
+                PermissionMode.BYPASS -> "Every tool runs without asking. Use only for runs you trust outright."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+        // Stats are read-only, so a plain set of labelled values rather than controls. Everything
+        // here is a count the conversation already tracks; nothing is inferred or estimated beyond
+        // what the runtime reported.
+        SectionHeader("Stats")
+        val userCount = state.messages.count { it.role == MessageRole.USER }
+        val assistantCount = state.messages.count { it.role == MessageRole.ASSISTANT }
+        val contextWindow = state.selectedLocalModel?.preferredContextTokens
+            ?: state.selectedEndpoint?.contextWindowTokens
+        StatRow("Messages", "${state.messages.size}" + if (state.messages.isNotEmpty()) "  ·  $userCount you, $assistantCount Bram" else "")
+        StatRow("Tokens generated", formatTokenCount(state.sessionOutputTokens))
+        StatRow("Tokens read", formatTokenCount(state.sessionInputTokens))
+        StatRow(
+            "Context",
+            when {
+                state.lastContextTokens != null && contextWindow != null ->
+                    "${formatTokens(state.lastContextTokens)} / ${formatTokens(contextWindow)}"
+                state.lastContextTokens != null -> formatTokens(state.lastContextTokens)
+                contextWindow != null -> "${formatTokens(contextWindow)} window"
+                else -> "No model loaded"
+            },
+        )
+        state.lastMetrics?.let { metrics ->
+            StatRow(
+                "Last turn",
+                "${formatTokens(metrics.promptTokens)} in · ${formatTokens(metrics.outputTokens)} out" +
+                    metrics.decodeTokensPerSecond?.let { " · ${formatRate(it)}" }.orEmpty(),
+            )
+        }
+    }
+}
+
+/** A label and a value on one line, the shape every stat row takes. */
+@Composable
+private fun StatRow(label: String, value: String) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * A count for the stats card. Unlike [formatTokens], zero is shown as 0 rather than "unknown",
+ * because a fresh session genuinely has generated nothing — "unknown" would read as a missing
+ * measurement rather than an honest empty total.
+ */
+private fun formatTokenCount(tokens: Int): String =
+    if (tokens <= 0) "0" else formatTokens(tokens)
 
 @Composable
 private fun SettingsScreen(

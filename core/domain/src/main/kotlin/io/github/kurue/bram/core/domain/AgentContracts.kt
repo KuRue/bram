@@ -57,6 +57,32 @@ enum class ToolApprovalDecision {
 }
 
 /**
+ * How a conversation asks before running a tool.
+ *
+ * A session-level choice rather than a global one: a quick lookup and an unattended long-running
+ * task want different defaults, and the conversation is the unit of a task. AUTO is the quiet
+ * option that still guards side effects; MANUAL asks about every call, including read-only ones,
+ * which is the mode for watching a tool closely; BYPASS skips the gate entirely, for a run the
+ * user has decided to trust outright.
+ */
+enum class PermissionMode(val wire: String) {
+    AUTO("auto"),
+    MANUAL("manual"),
+    BYPASS("bypass");
+
+    val label: String
+        get() = when (this) {
+            AUTO -> "Auto"
+            MANUAL -> "Manual"
+            BYPASS -> "Bypass"
+        }
+
+    companion object {
+        fun fromWire(value: String?): PermissionMode = entries.firstOrNull { it.wire == value } ?: AUTO
+    }
+}
+
+/**
  * Decides whether a tool call may proceed.
  *
  * Denial is an ordinary answer, not an error: it comes back to the model as a tool result so the

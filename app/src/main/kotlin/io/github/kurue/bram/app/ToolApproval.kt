@@ -1,6 +1,7 @@
 package io.github.kurue.bram.app
 
 import android.content.Context
+import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.ToolApprovalGate
 import io.github.kurue.bram.core.domain.ToolDefinition
@@ -91,6 +92,18 @@ class InteractiveApprovalGate(
 
     private val mutablePending = MutableStateFlow<PendingToolApproval?>(null)
 
+    /**
+     * The active conversation's mode. Set by the ViewModel when a run starts and when the user
+     * changes it, since the gate is a singleton but the choice is per conversation. Runs are
+     * serial, so a single mutable value is enough.
+     */
+    @Volatile
+    private var mode: PermissionMode = PermissionMode.AUTO
+
+    fun setMode(mode: PermissionMode) {
+        this.mode = mode
+    }
+
     companion object {
         /**
          * The key an allowance is remembered under: the tool, plus the values of the arguments it
@@ -125,13 +138,20 @@ class InteractiveApprovalGate(
         argumentsJson: String,
         recovered: Boolean,
     ): ToolApprovalDecision {
-        // A recovered call skips both shortcuts. It is text read as an intent, and the text could
-        // have come from anywhere the model has read — including a tool's own output.
-        if (!recovered && tool.readOnly && tool.requiredPermissions.isEmpty()) {
+        val current = mode
+        // BYPASS runs everything, including recovered calls: the user has taken responsibility for
+        // the whole run, so prompting would only re-ask a question they have already answered.
+        if (current == PermissionMode.BYPASS) return ToolApprovalDecision.ALLOW_ONCE
+
+        val scope = approvalScope(tool, argumentsJson)
+        // An explicit "allow always" grant is stronger than the mode, so it holds even in MANUAL —
+        // otherwise withdrawing trust would require switching modes rather than using the list.
+        if (!recovered && scope in permissions.alwaysAllowed()) return ToolApprovalDecision.ALLOW_ONCE
+        // AUTO lets a read-only tool that needs no permission run silently. MANUAL asks about it,
+        // which is the point of asking about everything.
+        if (current == PermissionMode.AUTO && !recovered && tool.readOnly && tool.requiredPermissions.isEmpty()) {
             return ToolApprovalDecision.ALLOW_ONCE
         }
-        val scope = approvalScope(tool, argumentsJson)
-        if (!recovered && scope in permissions.alwaysAllowed()) return ToolApprovalDecision.ALLOW_ONCE
 
         val answer = CompletableDeferred<ToolApprovalDecision>()
         val request = PendingToolApproval(

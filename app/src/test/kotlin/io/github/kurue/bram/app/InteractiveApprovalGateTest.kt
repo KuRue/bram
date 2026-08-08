@@ -1,5 +1,6 @@
 package io.github.kurue.bram.app
 
+import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.ToolDefinition
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -47,6 +48,49 @@ class InteractiveApprovalGateTest {
         val gate = InteractiveApprovalGate(FakePermissions())
         val decision = gate.decide(tool(readOnly = true), "{}")
         assertEquals(ToolApprovalDecision.ALLOW_ONCE, decision)
+        assertNull(gate.pending.value)
+    }
+
+    @Test
+    fun `bypass mode runs a side-effecting tool without asking`() = runTest {
+        val gate = InteractiveApprovalGate(FakePermissions())
+        gate.setMode(PermissionMode.BYPASS)
+        val decision = gate.decide(tool(), "{}")
+        assertEquals(ToolApprovalDecision.ALLOW_ONCE, decision)
+        assertNull(gate.pending.value)
+    }
+
+    @Test
+    fun `bypass mode runs even a recovered call`() = runTest {
+        // A recovered call is text read as an intent, which normally always asks. Bypass is the
+        // user taking responsibility for the whole run, so it is not re-asked.
+        val gate = InteractiveApprovalGate(FakePermissions())
+        gate.setMode(PermissionMode.BYPASS)
+        assertEquals(ToolApprovalDecision.ALLOW_ONCE, gate.decide(tool(), "{}", recovered = true))
+        assertNull(gate.pending.value)
+    }
+
+    @Test
+    fun `manual mode asks about a read-only tool that auto would run silently`() = runTest {
+        val gate = InteractiveApprovalGate(FakePermissions())
+        gate.setMode(PermissionMode.MANUAL)
+        val decision = async { gate.decide(tool(readOnly = true), "{}") }
+        yield()
+        // AUTO would have allowed this without prompting; MANUAL asks.
+        assertEquals("send_message", gate.pending.value?.toolName)
+        gate.pending.value?.resolve(ToolApprovalDecision.DENY)
+        assertEquals(ToolApprovalDecision.DENY, decision.await())
+    }
+
+    @Test
+    fun `an always-allowed tool still runs in manual mode`() = runTest {
+        // An explicit "allow always" grant is stronger than the mode, so MANUAL does not re-ask a
+        // tool the user has already trusted for good.
+        val permissions = FakePermissions()
+        permissions.allowAlways("send_message")
+        val gate = InteractiveApprovalGate(permissions)
+        gate.setMode(PermissionMode.MANUAL)
+        assertEquals(ToolApprovalDecision.ALLOW_ONCE, gate.decide(tool(), "{}"))
         assertNull(gate.pending.value)
     }
 

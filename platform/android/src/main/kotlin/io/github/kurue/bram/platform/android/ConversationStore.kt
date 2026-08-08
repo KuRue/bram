@@ -7,6 +7,7 @@ import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.ConversationSummary
 import io.github.kurue.bram.core.domain.MessageId
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.PermissionMode
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +72,28 @@ class ConversationStore(context: Context) {
     suspend fun delete(id: ConversationId) = withContext(Dispatchers.IO) {
         conversationFile(id).delete()
         writeIndex(readIndex().filterNot { it.id == id })
+    }
+
+    /** The conversation's tool-permission mode, defaulting to AUTO for a fresh or pre-existing file. */
+    suspend fun permissionMode(id: ConversationId): PermissionMode = withContext(Dispatchers.IO) {
+        val file = conversationFile(id)
+        if (!file.isFile) return@withContext PermissionMode.AUTO
+        runCatching {
+            PermissionMode.fromWire(JSONObject(file.readText()).optString("permissionMode"))
+        }.getOrDefault(PermissionMode.AUTO)
+    }
+
+    /** Rewrites only the mode field, leaving messages untouched; called when the user changes it. */
+    suspend fun setPermissionMode(id: ConversationId, mode: PermissionMode) {
+        withContext(Dispatchers.IO) {
+            val file = conversationFile(id)
+            if (!file.isFile) return@withContext
+            runCatching {
+                val root = JSONObject(file.readText())
+                root.put("permissionMode", mode.wire)
+                writeAtomically(file, root.toString())
+            }
+        }
     }
 
     fun newId(): ConversationId = ConversationId(UUID.randomUUID().toString())

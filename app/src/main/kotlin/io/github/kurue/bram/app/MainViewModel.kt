@@ -16,6 +16,7 @@ import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.SamplerSettings
@@ -276,6 +277,14 @@ data class AppUiState(
     val modelStorageBytes: Long = 0,
     val conversations: List<ConversationSummary> = emptyList(),
     val activeConversationId: String? = null,
+    /** How this conversation asks before running a tool. Per conversation, defaults to AUTO. */
+    val permissionMode: PermissionMode = PermissionMode.AUTO,
+    /** Tokens fed to the model on the most recent turn, when the runtime reported the count. */
+    val lastContextTokens: Int? = null,
+    /** Cumulative input tokens across the conversation's turns, for the session stats card. */
+    val sessionInputTokens: Int = 0,
+    /** Cumulative output tokens the model has generated across the conversation's turns. */
+    val sessionOutputTokens: Int = 0,
     /** Backends this build found on the device, CPU always included. */
     val availableBackends: List<RuntimeBackend> = listOf(RuntimeBackend.CPU),
     /** What the currently loaded model is actually running on. */
@@ -365,12 +374,20 @@ class MainViewModel(
             val messages = mostRecent
                 ?.let { summary -> runCatching { container.conversationStore.load(summary.id) }.getOrDefault(emptyList()) }
                 .orEmpty()
+            val mode = mostRecent
+                ?.let { runCatching { container.conversationStore.permissionMode(it.id) }.getOrDefault(PermissionMode.AUTO) }
+                ?: PermissionMode.AUTO
             mostRecent?.let { conversationId = it.id }
+            container.approvalGate.setMode(mode)
             mutableState.update {
                 it.copy(
                     conversations = summaries,
                     activeConversationId = mostRecent?.id?.value,
                     messages = messages,
+                    permissionMode = mode,
+                    lastContextTokens = null,
+                    sessionInputTokens = 0,
+                    sessionOutputTokens = 0,
                 )
             }
         }
@@ -394,6 +411,7 @@ class MainViewModel(
     fun startNewConversation() {
         if (mutableState.value.isGenerating) return
         conversationId = container.conversationStore.newId()
+        container.approvalGate.setMode(PermissionMode.AUTO)
         mutableState.update {
             it.copy(
                 messages = emptyList(),
@@ -402,6 +420,10 @@ class MainViewModel(
                 error = null,
                 lastUsage = null,
                 lastMetrics = null,
+                permissionMode = PermissionMode.AUTO,
+                lastContextTokens = null,
+                sessionInputTokens = 0,
+                sessionOutputTokens = 0,
             )
         }
     }
@@ -411,7 +433,9 @@ class MainViewModel(
         viewModelScope.launch {
             val target = ConversationId(id)
             val messages = runCatching { container.conversationStore.load(target) }.getOrDefault(emptyList())
+            val mode = runCatching { container.conversationStore.permissionMode(target) }.getOrDefault(PermissionMode.AUTO)
             conversationId = target
+            container.approvalGate.setMode(mode)
             mutableState.update {
                 it.copy(
                     messages = messages,
@@ -420,6 +444,10 @@ class MainViewModel(
                     error = null,
                     lastUsage = null,
                     lastMetrics = null,
+                    permissionMode = mode,
+                    lastContextTokens = null,
+                    sessionInputTokens = 0,
+                    sessionOutputTokens = 0,
                 )
             }
         }
@@ -560,6 +588,20 @@ class MainViewModel(
     fun withdrawToolPermission(scope: String) {
         container.toolPermissionStore.withdraw(scope)
         refreshToolPermissions()
+    }
+
+    /**
+     * Changes the active conversation's tool-permission mode. The gate is updated immediately so a
+     * run in flight is bound by the new mode, and the choice is persisted so reopening the
+     * conversation keeps it.
+     */
+    fun updatePermissionMode(mode: PermissionMode) {
+        container.approvalGate.setMode(mode)
+        mutableState.update { it.copy(permissionMode = mode) }
+        val id = conversationId
+        viewModelScope.launch {
+            runCatching { container.conversationStore.setPermissionMode(id, mode) }
+        }
     }
 
     private fun refreshToolPermissions() {
@@ -1220,6 +1262,9 @@ class MainViewModel(
             return
         }
         val prompt = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
+        // Bind the gate to this conversation's mode for the duration of the run. Runs are serial,
+        // and the mode could have been changed on another conversation in the meantime.
+        container.approvalGate.setMode(snapshot.permissionMode)
         mutableState.update {
             it.copy(
                 messages = requestMessages,
@@ -1264,6 +1309,8 @@ class MainViewModel(
                         is AgentEvent.Reasoning -> reasoningFormat = event.format
                         is AgentEvent.ContextPrepared -> mutableState.update {
                             it.copy(
+                                lastContextTokens = event.estimatedInputTokens,
+                                sessionInputTokens = it.sessionInputTokens + event.estimatedInputTokens,
                                 status = buildString {
                                     append("Context: ${event.estimatedInputTokens} tokens")
                                     if (event.omittedMessageCount > 0) {
@@ -1340,7 +1387,12 @@ class MainViewModel(
                             }
                         }
                         is AgentEvent.Usage -> mutableState.update { it.copy(lastUsage = event.usage) }
-                        is AgentEvent.Metrics -> mutableState.update { it.copy(lastMetrics = event.metrics) }
+                        is AgentEvent.Metrics -> mutableState.update {
+                            it.copy(
+                                lastMetrics = event.metrics,
+                                sessionOutputTokens = it.sessionOutputTokens + event.metrics.outputTokens,
+                            )
+                        }
                         is AgentEvent.Completed -> completedMessage = event.message
                         is AgentEvent.Failed -> mutableState.update {
                             val localPlanFailed = selection.localModel != null
