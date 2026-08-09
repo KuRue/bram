@@ -61,13 +61,17 @@ class InteractiveApprovalGateTest {
     }
 
     @Test
-    fun `bypass mode runs even a recovered call`() = runTest {
-        // A recovered call is text read as an intent, which normally always asks. Bypass is the
-        // user taking responsibility for the whole run, so it is not re-asked.
+    fun `bypass still asks about a recovered call`() = runTest {
+        // A recovered call is text read as an intent, and web_fetch puts pages Bram did not write
+        // into the context. Trusting a run is not the same as trusting every page it reads, so
+        // this is the one thing bypass does not wave through.
         val gate = InteractiveApprovalGate(FakePermissions())
         gate.setMode(PermissionMode.BYPASS)
-        assertEquals(ToolApprovalDecision.ALLOW_ONCE, gate.decide(tool(), "{}", recovered = true))
-        assertNull(gate.pending.value)
+        val decision = async { gate.decide(tool(), "{}", recovered = true) }
+        yield()
+        assertEquals("send_message", gate.pending.value?.toolName)
+        gate.pending.value?.resolve(ToolApprovalDecision.DENY)
+        assertEquals(ToolApprovalDecision.DENY, decision.await())
     }
 
     @Test

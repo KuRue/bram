@@ -982,16 +982,20 @@ private fun ModelsScreen(
             item {
                 GlassSurface(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("No LiteRT packages yet", fontWeight = FontWeight.SemiBold)
+                        Text("LiteRT is not usable yet", fontWeight = FontWeight.SemiBold)
                         Text(
                             "A LiteRT package (a \".litertlm\" file) is a compiled on-device model " +
-                                "for Google's LiteRT-LM runtime. Pick one from this device and Bram " +
-                                "will run it in-process — a GPU package compiles kernels on its " +
-                                "first load, which takes a while.",
+                                "for Google's LiteRT-LM runtime. Bram can import and route to one, " +
+                                "but every turn ends by killing the app: the published runtime calls " +
+                                "a coroutines method no released version provides. Import is off " +
+                                "until a corrected build ships.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Button(onClick = onImport) { Text("Choose a .litertlm package") }
+                        // Deliberately disabled rather than hidden: the work is wired end to end and
+                        // the blocker is upstream, so the reason is worth reading rather than the
+                        // section silently disappearing.
+                        Button(onClick = onImport, enabled = false) { Text("Choose a .litertlm package") }
                     }
                 }
             }
@@ -1062,7 +1066,8 @@ private fun LiteRtPackageCard(
                 if (loaded) {
                     OutlinedButton(onClick = onUnload, enabled = !busy) { Text("Unload") }
                 } else {
-                    Button(onClick = onLoad, enabled = !loading && !busy) {
+                    // Loading works; finishing a turn does not. See the empty-state note.
+                    Button(onClick = onLoad, enabled = false) {
                         if (loading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(14.dp),

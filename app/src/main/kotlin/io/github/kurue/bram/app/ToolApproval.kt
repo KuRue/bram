@@ -139,9 +139,12 @@ class InteractiveApprovalGate(
         recovered: Boolean,
     ): ToolApprovalDecision {
         val current = mode
-        // BYPASS runs everything, including recovered calls: the user has taken responsibility for
-        // the whole run, so prompting would only re-ask a question they have already answered.
-        if (current == PermissionMode.BYPASS) return ToolApprovalDecision.ALLOW_ONCE
+        // BYPASS runs what the model asked for without asking again — but not a call recovered from
+        // unmarked text. That is text read as an intent, and `web_fetch` puts pages Bram did not
+        // write into the context, so the text could have come from anywhere. Taking responsibility
+        // for a run is not the same as vouching for every page it reads, which is the one case the
+        // fences on recovered calls exist for.
+        if (current == PermissionMode.BYPASS && !recovered) return ToolApprovalDecision.ALLOW_ONCE
 
         val scope = approvalScope(tool, argumentsJson)
         // An explicit "allow always" grant is stronger than the mode, so it holds even in MANUAL —
