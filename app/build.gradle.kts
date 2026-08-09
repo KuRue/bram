@@ -69,6 +69,7 @@ dependencies {
     implementation(project(":platform:android"))
     implementation(project(":runtime:openai"))
     implementation(project(":runtime:llamacpp"))
+    implementation(project(":runtime:litertlm"))
 
     val composeBom = platform(libs.compose.bom)
     implementation(composeBom)
