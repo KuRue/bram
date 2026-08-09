@@ -123,3 +123,22 @@ interface RemoteEndpointStore {
     suspend fun remove(endpointId: String)
     suspend fun resolveCredential(endpointId: String, credentialAlias: String): String?
 }
+
+/**
+ * A configured remote MCP server: an HTTP(S) endpoint speaking the streamable-HTTP transport.
+ *
+ * Only that transport is supported, deliberately: it needs nothing beyond an HTTP client, which is
+ * all an Android app can provide — the popular stdio transport spawns a child process, which Bram
+ * cannot do (the platform blocks execve of app data, see the architecture notes), so a stdio server
+ * could never run here even if it were wired up.
+ */
+data class McpServer(
+    val id: String,
+    val displayName: String,
+    /** The endpoint the client talks to; requests never leave this origin once configured. */
+    val baseUrl: String,
+    /** The token sent as an `Authorization: Bearer` header, when configured. */
+    val credentialAlias: String = "mcp-token",
+    /** The URL stays http:// (LAN servers are common); prompts and results travel unencrypted. */
+    val allowInsecureHttp: Boolean = false,
+)
