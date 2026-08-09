@@ -104,6 +104,8 @@ class AgentTaskService : Service() {
 
         private const val COMPLETION_CHANNEL_ID = "bram-completions"
         private const val COMPLETION_NOTIFICATION_ID = 1002
+        private const val TASK_CHANNEL_ID = "bram-task-results"
+        private const val TASK_NOTIFICATION_ID = 1003
 
         private const val EXTRA_MODEL = "model"
         private const val EXTRA_BACKEND = "backend"
@@ -171,6 +173,77 @@ class AgentTaskService : Service() {
                 .build()
             manager.notify(COMPLETION_NOTIFICATION_ID, notification)
         }
+
+        /**
+         * Posts the result of a finished scheduled task. Only when the permission is held, and
+         * channel is [NotificationManager.IMPORTANCE_DEFAULT] so a task completing is actually
+         * noticed — unlike the running-model status, this is the alert the user scheduled work for.
+         */
+        fun postTaskFinished(context: Context, task: AgentTask) {
+            val manager = notificationManager(context) ?: return
+            val title = when (task.state) {
+                TaskState.SUCCEEDED -> "Task finished: ${task.displayName}"
+                TaskState.FAILED -> "Task failed: ${task.displayName}"
+                TaskState.CANCELLED -> "Task cancelled: ${task.displayName}"
+                else -> return
+            }
+            val text = task.resultSummary ?: task.error ?: "Done."
+            val notification = Notification.Builder(context, TASK_CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(text.take(MAX_SUMMARY_LENGTH))
+                .setStyle(Notification.BigTextStyle().bigText(text.take(MAX_SUMMARY_LENGTH)))
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentIntent(openPendingIntent(context))
+                .setAutoCancel(true)
+                .build()
+            manager.notify(TASK_NOTIFICATION_ID + task.id.hashCode() % 1000, notification)
+        }
+
+        /** Says a scheduled task came due but cannot run until a model is loaded. */
+        fun postTaskDeferred(context: Context, task: AgentTask) {
+            val manager = notificationManager(context) ?: return
+            val text = "The task \"${task.displayName}\" is due, but no model is loaded. " +
+                "It will run as soon as one is."
+            val notification = Notification.Builder(context, TASK_CHANNEL_ID)
+                .setContentTitle("Task waiting for a model")
+                .setContentText(text)
+                .setStyle(Notification.BigTextStyle().bigText(text))
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentIntent(openPendingIntent(context))
+                .setAutoCancel(true)
+                .build()
+            manager.notify(TASK_NOTIFICATION_ID + task.id.hashCode() % 1000, notification)
+        }
+
+        private fun notificationManager(context: Context): NotificationManager? {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return null
+            }
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return null
+            if (Build.VERSION.SDK_INT >= 26 && manager.getNotificationChannel(TASK_CHANNEL_ID) == null) {
+                manager.createNotificationChannel(
+                    NotificationChannel(
+                        TASK_CHANNEL_ID,
+                        "Task results",
+                        NotificationManager.IMPORTANCE_DEFAULT,
+                    ).apply {
+                        this.description = "Posted when a scheduled task finishes or is waiting for a model."
+                    },
+                )
+            }
+            return manager
+        }
+
+        private fun openPendingIntent(context: Context): PendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            Intent(context, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
 
         private const val MAX_SUMMARY_LENGTH = 500
     }
