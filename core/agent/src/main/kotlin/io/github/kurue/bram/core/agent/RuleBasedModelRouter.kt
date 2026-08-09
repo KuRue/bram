@@ -16,17 +16,15 @@ class RuleBasedModelRouter {
             reason == null
         }
 
-        val selected = eligible.maxByOrNull { candidate ->
-            var score = 0.0
-            if (candidate.model.location == ModelLocation.LOCAL) score += 1.0
-            if (request.preferQuality) score += (candidate.estimatedQuality ?: 0.0) * 3.0
-            candidate.estimatedLatencyMillis?.let { score -= it / 100_000.0 }
-            candidate.estimatedBatteryCost?.let { score -= it * 0.25 }
-            score
+        // Highest score first; the first entry is the decision, the rest are the fallback order.
+        val ranked = eligible.sortedByDescending { candidate ->
+            score(request, candidate)
         }
 
+        val selected = ranked.firstOrNull()
         return RoutingDecision(
             selected = selected,
+            fallbacks = ranked.drop(1),
             rejectedReasons = rejected,
             rationale = buildList {
                 if (selected == null) {
@@ -35,9 +33,21 @@ class RuleBasedModelRouter {
                     add("Selected ${selected.model.displayName} after hard privacy/capability filtering.")
                     if (selected.model.location == ModelLocation.LOCAL) add("Local execution received the default privacy preference.")
                     if (request.preferQuality) add("Measured or declared quality influenced the score.")
+                    if (ranked.size > 1) {
+                        add("Fallback order: ${ranked.drop(1).joinToString { it.model.displayName }}.")
+                    }
                 }
             },
         )
+    }
+
+    private fun score(request: RoutingRequest, candidate: RoutingCandidate): Double {
+        var score = 0.0
+        if (candidate.model.location == ModelLocation.LOCAL) score += 1.0 * request.localBias
+        if (request.preferQuality) score += (candidate.estimatedQuality ?: 0.0) * 3.0
+        candidate.estimatedLatencyMillis?.let { score -= it / 100_000.0 }
+        candidate.estimatedBatteryCost?.let { score -= it * 0.25 }
+        return score
     }
 
     private fun rejectionReason(request: RoutingRequest, candidate: RoutingCandidate): String? {

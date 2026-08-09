@@ -132,16 +132,50 @@ data class ExecutionPlan(
     val rationale: List<String>,
 )
 
-enum class RoutingMode {
-    LOCAL_ONLY,
-    REMOTE_ONLY,
-    AUTO,
+/**
+ * How a run may choose between local and remote processing, decided once per run by the router.
+ * AUTO weighs quality, latency, and battery; the only-only modes are hard gates.
+ */
+enum class RoutingMode(val wire: String) {
+    AUTO("auto"),
+    LOCAL_ONLY("local_only"),
+    REMOTE_ONLY("remote_only");
+
+    val label: String
+        get() = when (this) {
+            AUTO -> "Auto"
+            LOCAL_ONLY -> "Local only"
+            REMOTE_ONLY -> "Remote only"
+        }
+
+    companion object {
+        fun fromWire(value: String?): RoutingMode = entries.firstOrNull { it.wire == value } ?: AUTO
+    }
 }
 
-enum class PrivacyClass {
-    LOCAL_ONLY,
-    PRIVATE_REMOTE_ALLOWED,
-    STANDARD,
+/**
+ * How much this conversation trusts remote processing of its content.
+ *
+ * LOCAL_ONLY means the content never leaves the device: remote candidates are hard-rejected
+ * regardless of routing mode. PRIVATE_REMOTE_ALLOWED means remote processing is acceptable but
+ * local is preferred — the router keeps its normal quality/latency/battery scoring with a local
+ * bias on top. STANDARD is the plain default: no bias, remote processed under the routing mode.
+ */
+enum class PrivacyClass(val wire: String) {
+    STANDARD("standard"),
+    PRIVATE_REMOTE_ALLOWED("private_remote_allowed"),
+    LOCAL_ONLY("local_only");
+
+    val label: String
+        get() = when (this) {
+            STANDARD -> "Standard"
+            PRIVATE_REMOTE_ALLOWED -> "Prefer local"
+            LOCAL_ONLY -> "Local only"
+        }
+
+    companion object {
+        fun fromWire(value: String?): PrivacyClass = entries.firstOrNull { it.wire == value } ?: STANDARD
+    }
 }
 
 data class RoutingCandidate(
@@ -158,10 +192,14 @@ data class RoutingRequest(
     val requiredCapabilities: Set<ModelCapability>,
     val minimumContextTokens: Int,
     val preferQuality: Boolean = false,
+    /** Extra weight given to local candidates; privacy classes that prefer local raise it. */
+    val localBias: Double = 1.0,
 )
 
 data class RoutingDecision(
     val selected: RoutingCandidate?,
+    /** The remaining eligible candidates in score order, for a policy-aware fallback. */
+    val fallbacks: List<RoutingCandidate> = emptyList(),
     val rejectedReasons: Map<ModelId, String>,
     val rationale: List<String>,
 )

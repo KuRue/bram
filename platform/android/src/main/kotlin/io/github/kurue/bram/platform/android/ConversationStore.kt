@@ -8,6 +8,7 @@ import io.github.kurue.bram.core.domain.ConversationSummary
 import io.github.kurue.bram.core.domain.MessageId
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.PermissionMode
+import io.github.kurue.bram.core.domain.PrivacyClass
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -91,6 +92,31 @@ class ConversationStore(context: Context) {
             runCatching {
                 val root = JSONObject(file.readText())
                 root.put("permissionMode", mode.wire)
+                writeAtomically(file, root.toString())
+            }
+        }
+    }
+
+    /**
+     * The conversation's privacy class, defaulting to STANDARD for a fresh or pre-existing file.
+     * Local-only means its content never leaves the device, so a conversation saved before the
+     * routing feature existed still routes like today.
+     */
+    suspend fun privacyClass(id: ConversationId): PrivacyClass = withContext(Dispatchers.IO) {
+        val file = conversationFile(id)
+        if (!file.isFile) return@withContext PrivacyClass.STANDARD
+        runCatching {
+            PrivacyClass.fromWire(JSONObject(file.readText()).optString("privacyClass"))
+        }.getOrDefault(PrivacyClass.STANDARD)
+    }
+
+    suspend fun setPrivacyClass(id: ConversationId, privacyClass: PrivacyClass) {
+        withContext(Dispatchers.IO) {
+            val file = conversationFile(id)
+            if (!file.isFile) return@withContext
+            runCatching {
+                val root = JSONObject(file.readText())
+                root.put("privacyClass", privacyClass.wire)
                 writeAtomically(file, root.toString())
             }
         }
