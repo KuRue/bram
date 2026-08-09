@@ -22,7 +22,41 @@ data class MemoryRecord(
 interface MemoryStore {
     suspend fun workingSummary(conversationId: ConversationId): MemoryRecord?
     suspend fun search(conversationId: ConversationId, query: String, limit: Int): List<MemoryRecord>
+    /** Searches every conversation, for the agent's own recall tool and for diagnostics. */
+    suspend fun searchAll(query: String, limit: Int): List<MemoryRecord>
     suspend fun put(conversationId: ConversationId, memory: MemoryRecord)
+}
+
+/** Where an agent run stands, for the persistent run journal. */
+enum class RunStatus {
+    RUNNING,
+    SUCCEEDED,
+    FAILED,
+}
+
+/**
+ * One entry of the run journal: a turn (or a task run) from start to finish, with what it did and
+ * how much it cost. Written by the orchestrator around every run so there is a record of agent
+ * activity that survives the app — the provenance half of the memory story.
+ */
+data class RunJournalEntry(
+    val id: String,
+    val conversationId: ConversationId,
+    val startedAtEpochMillis: Long,
+    val finishedAtEpochMillis: Long? = null,
+    val status: RunStatus,
+    val toolTurns: Int = 0,
+    val inputTokens: Int? = null,
+    val outputTokens: Int? = null,
+    val error: String? = null,
+)
+
+interface RunJournal {
+    suspend fun upsert(entry: RunJournalEntry)
+}
+
+object NoopRunJournal : RunJournal {
+    override suspend fun upsert(entry: RunJournalEntry) = Unit
 }
 
 interface ToolHandler {
