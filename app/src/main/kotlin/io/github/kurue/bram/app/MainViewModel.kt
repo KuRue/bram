@@ -1,30 +1,49 @@
 package io.github.kurue.bram.app
 
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.kurue.bram.core.domain.AcceleratorAgreement
 import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.AgentEvent
 import io.github.kurue.bram.core.domain.AgentRunRequest
+import io.github.kurue.bram.core.domain.Automation
 import io.github.kurue.bram.core.domain.ConversationId
+import io.github.kurue.bram.core.domain.Cron
 import io.github.kurue.bram.core.domain.findOffloadBoundary
 import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.ConversationSummary
 import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.GenerationMetrics
+import io.github.kurue.bram.core.domain.LiteRtBackend
+import io.github.kurue.bram.core.domain.LITE_RT_CONTEXT_TOKENS
+import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
+import io.github.kurue.bram.core.domain.McpServer
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.ReasoningFormat
+import io.github.kurue.bram.core.domain.RunJournalEntry
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.SamplerSettings
+import io.github.kurue.bram.core.domain.SkillActionOutcome
+import io.github.kurue.bram.core.domain.SkillImportOutcome
+import io.github.kurue.bram.core.domain.SkillPackage
+import io.github.kurue.bram.core.domain.SkillPrompt
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.ModelRuntime
+import io.github.kurue.bram.core.domain.ModelCapability
+import io.github.kurue.bram.core.domain.PrivacyClass
 import io.github.kurue.bram.core.domain.RemoteApiKind
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import io.github.kurue.bram.core.domain.RoutingMode
+import io.github.kurue.bram.core.domain.RoutingRequest
 import io.github.kurue.bram.core.domain.TokenUsage
+import io.github.kurue.bram.core.agent.RuleBasedModelRouter
+import io.github.kurue.bram.platform.android.RoutingSettingsStore
 import io.github.kurue.bram.runtime.llamacpp.ModelImportProgress
 import io.github.kurue.bram.runtime.llamacpp.downloads.RemoteModelFile
 import java.net.URI
@@ -254,6 +273,8 @@ private fun ReasoningFormat.firstEndTagFrom(text: String, from: Int): Pair<Int, 
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
+    /** Imported LiteRT packages (`.litertlm`), catalogued separately from GGUFs. */
+    val litertlmModels: List<LiteRtModelRecord> = emptyList(),
     val profiles: List<ModelProfile> = emptyList(),
     /** A tool call waiting on the user. The run is blocked until this is answered. */
     val pendingApproval: PendingToolApproval? = null,
@@ -265,6 +286,10 @@ data class AppUiState(
     val selectedRuntimeId: String? = null,
     val loadedModelId: String? = null,
     val cpuValidated: Boolean = false,
+    /** The LiteRT package the resident engine holds, or null when none is loaded. */
+    val litertlmLoadedId: String? = null,
+    /** What the resident LiteRT engine loaded onto. */
+    val litertlmLoadedBackend: LiteRtBackend? = null,
     val isImporting: Boolean = false,
     val importProgress: ModelImportProgress? = null,
     /** The GGUFs the browsed repository published, smallest first, or empty while none are shown. */
@@ -278,6 +303,8 @@ data class AppUiState(
     val downloadedModelName: String? = null,
     val isLoadingModel: Boolean = false,
     val modelLoadDetail: String? = null,
+    val isLoadingLiteRt: Boolean = false,
+    val liteRtLoadDetail: String? = null,
     val messages: List<ConversationMessage> = emptyList(),
     val isGenerating: Boolean = false,
     val status: String? = null,
@@ -289,6 +316,14 @@ data class AppUiState(
     val activeConversationId: String? = null,
     /** How this conversation asks before running a tool. Per conversation, defaults to AUTO. */
     val permissionMode: PermissionMode = PermissionMode.AUTO,
+    /** How this conversation's content may be processed. Per conversation; see [PrivacyClass]. */
+    val privacyClass: PrivacyClass = PrivacyClass.STANDARD,
+    /** How every turn chooses between local and remote processing. Global. */
+    val routingMode: RoutingMode = RoutingMode.AUTO,
+    /** The privacy class a brand new conversation starts with. Global. */
+    val defaultPrivacyClass: PrivacyClass = PrivacyClass.STANDARD,
+    /** What the most recent routing decision picked, for the session header and notifications. */
+    val lastRoutedRuntimeLabel: String? = null,
     /** Tokens fed to the model on the most recent turn, when the runtime reported the count. */
     val lastContextTokens: Int? = null,
     /** Cumulative input tokens across the conversation's turns, for the session stats card. */
@@ -310,15 +345,41 @@ data class AppUiState(
     val completionAlertsEnabled: Boolean = false,
     /** One-shot signal to the activity to ask for the notification permission. */
     val requestNotificationPermission: Boolean = false,
+    /** An Android runtime permission a tool call needs, to show to the system dialog. */
+    val runtimePermissionRequest: String? = null,
+    /** The human words for what is being requested, for an explainer under the card. */
+    val runtimePermissionLabel: String? = null,
+    /** The scheduled-task queue, newest first, with live state as runs progress. */
+    val tasks: List<AgentTask> = emptyList(),
+    /** The persistent run journal, newest first, for the diagnostics card. */
+    val recentRuns: List<RunJournalEntry> = emptyList(),
+    /** Configured MCP servers with what the last refresh found, per server. */
+    val mcpServers: List<McpServerUi> = emptyList(),
+    /** True while every configured server is being asked what tools it has. */
+    val mcpRefreshing: Boolean = false,
+    /** Imported skill packages, with their active and staged versions. */
+    val skills: List<SkillPackage> = emptyList(),
+    /** The last skill action's result, shown under the skills section. */
+    val skillStatus: String? = null,
+    /** Recurring schedules that enqueue a task at their cron time. */
+    val automations: List<Automation> = emptyList(),
+    /** The last automation action's result, shown under the automations section. */
+    val automationStatus: String? = null,
 ) {
     val selectedLocalModel: LocalModelRecord?
         get() = localModels.firstOrNull { it.id.value == selectedRuntimeId }
+
+    val selectedLiteRtModel: LiteRtModelRecord?
+        get() = litertlmModels.firstOrNull { it.id.value == selectedRuntimeId }
 
     val selectedEndpoint: RemoteEndpoint?
         get() = endpoints.firstOrNull { remoteRuntimeId(it.id) == selectedRuntimeId }
 
     val selectedLocalModelIsLoaded: Boolean
         get() = selectedLocalModel?.id?.value == loadedModelId && cpuValidated
+
+    val selectedLiteRtIsLoaded: Boolean
+        get() = selectedLiteRtModel?.id?.value == litertlmLoadedId
 
     /** The backend a given model will load onto, falling back to CPU when unavailable. */
     fun backendFor(model: LocalModelRecord): RuntimeBackend =
@@ -348,6 +409,23 @@ data class EndpointDraft(
     val contextWindowTokens: Int,
     val apiKey: String,
     val allowInsecureHttp: Boolean,
+    val apiKind: RemoteApiKind = RemoteApiKind.CHAT_COMPLETIONS,
+)
+
+/** One configured MCP server as the settings screen shows it after a refresh. */
+data class McpServerUi(
+    val server: McpServer,
+    /** How many tools the server advertised, 0 when the last refresh failed. */
+    val toolCount: Int,
+    /** Why the last refresh failed, or null when it succeeded. */
+    val error: String? = null,
+)
+
+data class McpServerDraft(
+    val displayName: String,
+    val baseUrl: String,
+    val token: String,
+    val allowInsecureHttp: Boolean,
 )
 
 /** One batch configuration's result during a tuning run. */
@@ -370,8 +448,11 @@ class MainViewModel(
     private var downloadJob: Job? = null
     /** Whether the app is what the user is looking at. Gates the completion alert. */
     private var appForeground = true
+    /** Pure candidate scorer; one per ViewModel because it holds no state. */
+    private val router = RuleBasedModelRouter()
 
     init {
+        restoreRoutingSettings()
         container.llamaCppClient.processFailureListener = { message ->
             mutableState.update {
                 it.copy(
@@ -393,12 +474,156 @@ class MainViewModel(
                 }
             }
         }
+        // A tool call that was allowed but needs a runtime permission asks for it here: the broker
+        // publishes the permission, the activity shows the system dialog, and the answer resolves
+        // the broker so the tool either runs or returns permission_denied.
+        viewModelScope.launch {
+            container.runtimePermissionBroker.pendingPermission.collect { androidPermission ->
+                val label = androidPermission?.let { permission ->
+                    RuntimePermissions.androidPermissions
+                        .entries
+                        .firstOrNull { it.value == permission }
+                        ?.let { RuntimePermissions.label(it.key) }
+                }
+                mutableState.update {
+                    it.copy(runtimePermissionRequest = androidPermission, runtimePermissionLabel = label)
+                }
+            }
+        }
         refreshToolPermissions()
         refreshDeviceProfile()
         reloadCatalogs()
         detectBackends()
         restoreConversations()
+        installTaskRunner()
+        refreshRunJournal()
+        refreshMcpServers()
+        refreshSkills()
+        refreshAutomations()
+        container.automationRunner.rescheduleAll()
     }
+
+    private fun refreshRunJournal() {
+        viewModelScope.launch {
+            val runs = runCatching { container.runJournal.recent(12) }.getOrDefault(emptyList())
+            mutableState.update { it.copy(recentRuns = runs) }
+        }
+    }
+
+    /**
+     * Points the task queue at the agent and at everything the queue cannot know for itself:
+     * whether a runtime is ready to run right now, and how to tell the user a task finished (or is
+     * waiting for a model) when the app is not in front of them.
+     */
+    private fun installTaskRunner() {
+        val runner = container.taskRunner
+        runner.executor = { task -> runTask(task) }
+        runner.canRun = {
+            val snapshot = mutableState.value
+            routeSelection(snapshot, snapshot.defaultPrivacyClass).isNotEmpty()
+        }
+        runner.notifier = { task ->
+            val backgrounded = !appForeground
+            when (task.state) {
+                TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED ->
+                    if (backgrounded && container.notificationSettings.completionAlertsEnabled()) {
+                        AgentTaskService.postTaskFinished(container.appContext, task)
+                    }
+                TaskState.DEFERRED -> if (backgrounded) {
+                    AgentTaskService.postTaskDeferred(container.appContext, task)
+                }
+                else -> Unit
+            }
+        }
+        viewModelScope.launch {
+            runner.tasks.collect { tasks ->
+                mutableState.update { it.copy(tasks = tasks) }
+            }
+        }
+        // Tasks due while the app was closed run as soon as a model is ready again.
+        runner.processNow()
+    }
+
+    /**
+     * Runs one queued task to an outcome: its own conversation, AUTO permission mode (the
+     * remembered allowances still apply), and its reply written back to the store as the session's
+     * record — the task's named session that can be reopened from the library.
+     *
+     * Tasks are unattended, so a failed attempt falls back down the routing order instead of
+     * failing outright; a cancellation is a real stop, not a retry.
+     */
+    private suspend fun runTask(task: AgentTask): TaskOutcome {
+        val snapshot = mutableState.value
+        val plan = routeSelection(snapshot, snapshot.defaultPrivacyClass)
+            .takeIf { it.isNotEmpty() }
+            ?: return TaskOutcome.Failed("No eligible runtime; load a model or check the routing policy.")
+        container.approvalGate.setMode(PermissionMode.AUTO)
+        var failure: String? = null
+        var reply: String? = null
+        var activity = emptyList<String>()
+        for (selection in plan) {
+            val attemptActivity = mutableListOf<String>()
+            var attemptReply: String? = null
+            var attemptFailure: String? = null
+            val request = AgentRunRequest(
+                conversationId = task.conversationId,
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = task.prompt)),
+                identity = BramDefaults.IDENTITY,
+                maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
+                sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
+                profileInstructions = runInstructions(snapshot),
+            )
+            try {
+                container.agent().run(request, selection.runtime).collect { event ->
+                    when (event) {
+                        is AgentEvent.Status -> Unit
+                        is AgentEvent.Reasoning -> Unit
+                        is AgentEvent.ContextPrepared -> attemptActivity += "Context prepared (${event.estimatedInputTokens} tokens)"
+                        is AgentEvent.ToolStarted -> attemptActivity += "Called ${event.call.name}"
+                        is AgentEvent.ToolFinished -> Unit
+                        is AgentEvent.TextDelta -> Unit
+                        is AgentEvent.Usage -> Unit
+                        is AgentEvent.Metrics -> Unit
+                        is AgentEvent.Completed -> attemptReply = event.message.content
+                        is AgentEvent.Failed -> attemptFailure = event.message
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                attemptFailure = error.message ?: error::class.java.simpleName
+            }
+            when {
+                attemptReply != null -> {
+                    reply = attemptReply
+                    activity = attemptActivity
+                    break
+                }
+                attemptFailure != null -> failure = attemptFailure
+                else -> failure = "The run ended without producing a reply."
+            }
+        }
+        if (failure != null) return TaskOutcome.Failed(failure)
+        val text = reply ?: return TaskOutcome.Failed("The run ended without producing a reply.")
+        val messages = listOf(
+            ConversationMessage(role = MessageRole.USER, content = task.prompt),
+            ConversationMessage(role = MessageRole.ASSISTANT, content = text),
+        )
+        runCatching { container.conversationStore.save(task.conversationId, messages, title = task.displayName) }
+        return TaskOutcome.Succeeded(text, activity)
+    }
+
+    /** Queues a task. [inMinutes] null runs it as soon as the queue is free, else it is scheduled. */
+    fun enqueueTask(displayName: String, prompt: String, inMinutes: Int? = null) {
+        val scheduledAt = inMinutes?.takeIf { it > 0 }?.let { System.currentTimeMillis() + it * 60_000L }
+        container.taskRunner.enqueue(displayName, prompt, scheduledAt)
+    }
+
+    fun cancelTask(id: String) = container.taskRunner.cancel(id)
+
+    fun retryTask(id: String) = container.taskRunner.retry(id)
+
+    fun deleteTask(id: String) = container.taskRunner.delete(id)
 
     /** Reopens the most recent conversation so closing Bram does not discard the thread. */
     private fun restoreConversations() {
@@ -411,6 +636,9 @@ class MainViewModel(
             val mode = mostRecent
                 ?.let { runCatching { container.conversationStore.permissionMode(it.id) }.getOrDefault(PermissionMode.AUTO) }
                 ?: PermissionMode.AUTO
+            val privacy = mostRecent
+                ?.let { runCatching { container.conversationStore.privacyClass(it.id) }.getOrDefault(PrivacyClass.STANDARD) }
+                ?: PrivacyClass.STANDARD
             mostRecent?.let { conversationId = it.id }
             container.approvalGate.setMode(mode)
             mutableState.update {
@@ -419,6 +647,7 @@ class MainViewModel(
                     activeConversationId = mostRecent?.id?.value,
                     messages = messages,
                     permissionMode = mode,
+                    privacyClass = privacy,
                     lastContextTokens = null,
                     sessionInputTokens = 0,
                     sessionOutputTokens = 0,
@@ -455,6 +684,7 @@ class MainViewModel(
                 lastUsage = null,
                 lastMetrics = null,
                 permissionMode = PermissionMode.AUTO,
+                privacyClass = it.defaultPrivacyClass,
                 lastContextTokens = null,
                 sessionInputTokens = 0,
                 sessionOutputTokens = 0,
@@ -468,6 +698,7 @@ class MainViewModel(
             val target = ConversationId(id)
             val messages = runCatching { container.conversationStore.load(target) }.getOrDefault(emptyList())
             val mode = runCatching { container.conversationStore.permissionMode(target) }.getOrDefault(PermissionMode.AUTO)
+            val privacy = runCatching { container.conversationStore.privacyClass(target) }.getOrDefault(PrivacyClass.STANDARD)
             conversationId = target
             container.approvalGate.setMode(mode)
             mutableState.update {
@@ -479,6 +710,7 @@ class MainViewModel(
                     lastUsage = null,
                     lastMetrics = null,
                     permissionMode = mode,
+                    privacyClass = privacy,
                     lastContextTokens = null,
                     sessionInputTokens = 0,
                     sessionOutputTokens = 0,
@@ -553,30 +785,27 @@ class MainViewModel(
     /** Removes model copies nothing in the catalog references and reports what was reclaimed. */
     fun reclaimModelStorage() {
         viewModelScope.launch {
-            runCatching { container.localModelStore.deleteOrphanedCopies() }
-                .onSuccess { reclaimed ->
-                    mutableState.update {
-                        it.copy(
-                            status = if (reclaimed > 0) {
-                                "Reclaimed ${reclaimed / 1_048_576L} MB of unreferenced model copies"
-                            } else {
-                                "No unreferenced model copies to remove"
-                            },
-                        )
-                    }
-                    refreshModelStorage()
-                }
-                .onFailure { error ->
-                    mutableState.update {
-                        it.copy(error = error.message ?: "Could not reclaim model storage")
-                    }
-                }
+            val reclaimed = runCatching { container.localModelStore.deleteOrphanedCopies() }
+                .getOrDefault(0L) +
+                runCatching { container.liteRtLmStore.deleteOrphanedCopies() }
+                    .getOrDefault(0L)
+            mutableState.update {
+                it.copy(
+                    status = if (reclaimed > 0) {
+                        "Reclaimed ${reclaimed / 1_048_576L} MB of unreferenced model copies"
+                    } else {
+                        "No unreferenced model copies to remove"
+                    },
+                )
+            }
+            refreshModelStorage()
         }
     }
 
     private fun refreshModelStorage() {
         viewModelScope.launch {
-            val bytes = runCatching { container.localModelStore.storageBytesUsed() }.getOrDefault(0L)
+            val bytes = runCatching { container.localModelStore.storageBytesUsed() }.getOrDefault(0L) +
+                runCatching { container.liteRtLmStore.storageBytesUsed() }.getOrDefault(0L)
             mutableState.update { it.copy(modelStorageBytes = bytes) }
         }
     }
@@ -619,17 +848,36 @@ class MainViewModel(
                     error = null,
                 )
             }
+            val isLiteRt = isLiteRtPackage(uri)
             runCatching {
-                container.localModelStore.importModel(uri) { progress ->
-                    mutableState.update { it.copy(importProgress = progress) }
+                if (isLiteRt) {
+                    container.liteRtLmStore.importPackage(uri) { progress ->
+                        mutableState.update {
+                            it.copy(importProgress = ModelImportProgress(progress.stage, progress.bytesRead, progress.totalBytes))
+                        }
+                    }.id.value
+                } else {
+                    container.localModelStore.importModel(uri) { progress ->
+                        mutableState.update { it.copy(importProgress = progress) }
+                    }.id.value
                 }
-            }.onSuccess { model ->
-                reloadLocalModels(selectId = model.id.value)
+            }.onSuccess { id ->
+                if (isLiteRt) reloadLiteRtModels(selectId = id) else reloadLocalModels(selectId = id)
             }.onFailure { error ->
-                mutableState.update { it.copy(error = error.message ?: "Could not import the GGUF") }
+                mutableState.update { it.copy(error = error.message ?: "Could not import the model") }
             }
             mutableState.update { it.copy(isImporting = false, importProgress = null) }
         }
+    }
+
+    /** Whether a picked document is a LiteRT package (`.litertlm`) rather than a GGUF. */
+    private fun isLiteRtPackage(uri: Uri): Boolean {
+        val name = runCatching {
+            container.appContext.contentResolver
+                .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        }.getOrNull()
+        return name?.endsWith(".litertlm", ignoreCase = true) == true
     }
 
     /**
@@ -760,6 +1008,43 @@ class MainViewModel(
         val id = conversationId
         viewModelScope.launch {
             runCatching { container.conversationStore.setPermissionMode(id, mode) }
+        }
+    }
+
+    /**
+     * Changes the active conversation's privacy class: LOCAL_ONLY keeps its content on the device,
+     * PRIVATE_REMOTE_ALLOWED lets remote processing in but prefers local, STANDARD has no
+     * preference. Persisted per conversation like the tool-permission mode.
+     */
+    fun updateConversationPrivacyClass(privacyClass: PrivacyClass) {
+        mutableState.update { it.copy(privacyClass = privacyClass) }
+        val id = conversationId
+        viewModelScope.launch {
+            runCatching { container.conversationStore.setPrivacyClass(id, privacyClass) }
+        }
+    }
+
+    /** The global routing mode: how every turn picks between local and remote. */
+    fun setRoutingMode(mode: RoutingMode) {
+        mutableState.update { it.copy(routingMode = mode) }
+        viewModelScope.launch {
+            runCatching { container.routingSettings.setRoutingMode(mode) }
+        }
+    }
+
+    /** The privacy class a brand new conversation starts with. */
+    fun setDefaultPrivacyClass(privacyClass: PrivacyClass) {
+        mutableState.update { it.copy(defaultPrivacyClass = privacyClass) }
+        viewModelScope.launch {
+            runCatching { container.routingSettings.setDefaultPrivacyClass(privacyClass) }
+        }
+    }
+
+    private fun restoreRoutingSettings() {
+        viewModelScope.launch {
+            val mode = runCatching { container.routingSettings.routingMode() }.getOrDefault(RoutingMode.AUTO)
+            val default = runCatching { container.routingSettings.defaultPrivacyClass() }.getOrDefault(PrivacyClass.STANDARD)
+            mutableState.update { it.copy(routingMode = mode, defaultPrivacyClass = default) }
         }
     }
 
@@ -1056,6 +1341,8 @@ class MainViewModel(
                     container.localModelStore.setLastLoadedModelId(modelId)
                     container.modelProfileStore.setLastUsedProfileId(profile.id)
                 }
+                // Deferred tasks wait on a loaded model; the queue can start them now.
+                container.taskRunner.processNow()
                 mutableState.update {
                     it.copy(
                         loadedModelId = modelId,
@@ -1472,6 +1759,86 @@ class MainViewModel(
         viewModelScope.launch { unloadModelInternal() }
     }
 
+    /**
+     * Loads a LiteRT package onto the resident engine's backend — CPU or GPU as the package was
+     * imported with, so a package imported for its accelerator stays on it.
+     *
+     * Engine initialization is the whole validation: if the package's native libraries or kernels
+     * cannot run here, load throws and nothing is marked loaded. Compilation for a first-time GPU
+     * package can take a while, hence the loading status line.
+     */
+    fun loadLiteRtModel(modelId: String) {
+        val record = mutableState.value.litertlmModels.firstOrNull { it.id.value == modelId } ?: return
+        if (mutableState.value.isLoadingLiteRt || mutableState.value.isGenerating) return
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(
+                    selectedRuntimeId = modelId,
+                    isLoadingLiteRt = true,
+                    status = "Loading ${record.displayName} on ${record.backend.label}…",
+                    error = null,
+                    liteRtLoadDetail = null,
+                )
+            }
+            runCatching { container.liteRtEngineManager.load(record) }
+                .onSuccess {
+                    viewModelScope.launch { container.liteRtLmStore.setLastLoadedPackageId(modelId) }
+                    // Deferred tasks wait on a loaded model; the queue can start them now.
+                    container.taskRunner.processNow()
+                    mutableState.update {
+                        it.copy(
+                            litertlmLoadedId = modelId,
+                            litertlmLoadedBackend = record.backend,
+                            liteRtLoadDetail = "${record.displayName} · ${record.backend.label} · " +
+                                "$LITE_RT_CONTEXT_TOKENS context",
+                        )
+                    }
+                    pushModelStatus(ModelPhase.IDLE)
+                    refreshDeviceProfile()
+                }
+                .onFailure { error ->
+                    mutableState.update {
+                        it.copy(
+                            litertlmLoadedId = null,
+                            litertlmLoadedBackend = null,
+                            error = error.message ?: "Could not load the LiteRT package",
+                        )
+                    }
+                    AgentTaskService.stop(container.appContext)
+                    refreshDeviceProfile()
+                }
+            mutableState.update { it.copy(isLoadingLiteRt = false, status = null) }
+        }
+    }
+
+    /** Unloads the LiteRT engine. The llama.cpp service, if it holds a model, is untouched. */
+    fun unloadLiteRt() {
+        if (mutableState.value.isGenerating) return
+        container.liteRtEngineManager.unload()
+        mutableState.update {
+            it.copy(litertlmLoadedId = null, litertlmLoadedBackend = null, liteRtLoadDetail = null)
+        }
+        AgentTaskService.stop(container.appContext)
+    }
+
+    /** Removes an imported LiteRT package, unloading it first if it holds the engine. */
+    fun removeLiteRt(modelId: String) {
+        if (mutableState.value.litertlmLoadedId == modelId) {
+            container.liteRtEngineManager.unload()
+        }
+        viewModelScope.launch {
+            runCatching { container.liteRtLmStore.remove(ModelId(modelId)) }
+            mutableState.update {
+                it.copy(
+                    litertlmLoadedId = if (it.litertlmLoadedId == modelId) null else it.litertlmLoadedId,
+                    litertlmLoadedBackend = if (it.litertlmLoadedId == modelId) null else it.litertlmLoadedBackend,
+                    liteRtLoadDetail = null,
+                )
+            }
+            reloadLiteRtModels()
+        }
+    }
+
     fun saveEndpoint(draft: EndpointDraft) {
         viewModelScope.launch {
             val validation = validate(draft)
@@ -1484,7 +1851,7 @@ class MainViewModel(
                 displayName = draft.displayName.trim(),
                 baseUrl = draft.baseUrl.trim().trimEnd('/'),
                 modelName = draft.modelName.trim(),
-                apiKind = RemoteApiKind.CHAT_COMPLETIONS,
+                apiKind = draft.apiKind,
                 contextWindowTokens = draft.contextWindowTokens,
                 supportsToolCalling = true,
                 allowInsecureHttp = draft.allowInsecureHttp,
@@ -1499,6 +1866,215 @@ class MainViewModel(
             container.endpointStore.remove(endpointId)
             reloadEndpoints()
         }
+    }
+
+    /**
+     * Connects to every configured MCP server, lists its tools, and swaps them into the tool
+     * registry. A server that cannot be reached drops its tools instead of leaving stale ones that
+     * would fail mid-run; the card under it says why.
+     */
+    fun refreshMcpServers() {
+        if (mutableState.value.mcpRefreshing) return
+        viewModelScope.launch {
+            mutableState.update { it.copy(mcpRefreshing = true) }
+            val servers = runCatching { container.mcpServerStore.list() }.getOrDefault(emptyList())
+            val results = servers.map { server ->
+                val token = container.mcpServerStore.resolveToken(server.id)
+                val client = McpClient(server, token)
+                runCatching {
+                    client.connect()
+                    client.listTools()
+                }.fold(
+                    onSuccess = { tools ->
+                        container.toolRegistry.setServerTools(
+                            server.id,
+                            tools.map { McpToolHandler(server, it, token) },
+                        )
+                        McpServerUi(server, tools.size)
+                    },
+                    onFailure = { failure ->
+                        container.toolRegistry.removeServerTools(server.id)
+                        McpServerUi(
+                            server,
+                            toolCount = 0,
+                            error = failure.message
+                                ?: "The server did not answer (${failure::class.java.simpleName})",
+                        )
+                    },
+                )
+            }
+            mutableState.update { it.copy(mcpServers = results, mcpRefreshing = false) }
+        }
+    }
+
+    fun saveMcpServer(draft: McpServerDraft) {
+        viewModelScope.launch {
+            val url = runCatching { java.net.URI(draft.baseUrl.trim()) }.getOrNull()
+            when {
+                draft.displayName.isBlank() ->
+                    mutableState.update { it.copy(error = "An MCP server needs a name") }
+                url == null || (url.scheme != "http" && url.scheme != "https") || url.host.isNullOrBlank() ->
+                    mutableState.update { it.copy(error = "The MCP server URL must start with http:// or https://") }
+                url.scheme == "http" && !draft.allowInsecureHttp ->
+                    mutableState.update {
+                        it.copy(error = "Plain HTTP is refused for MCP servers; check the box to allow it for this server")
+                    }
+                else -> {
+                    val server = McpServer(
+                        id = UUID.randomUUID().toString(),
+                        displayName = draft.displayName.trim(),
+                        baseUrl = draft.baseUrl.trim().trimEnd('/'),
+                        allowInsecureHttp = draft.allowInsecureHttp,
+                    )
+                    container.mcpServerStore.upsert(server, draft.token)
+                    refreshMcpServers()
+                }
+            }
+        }
+    }
+
+    fun removeMcpServer(serverId: String) {
+        viewModelScope.launch {
+            container.mcpServerStore.remove(serverId)
+            container.toolRegistry.removeServerTools(serverId)
+            refreshMcpServers()
+        }
+    }
+
+    fun refreshSkills() {
+        viewModelScope.launch {
+            val skills = runCatching { container.skillStore.packages() }.getOrDefault(emptyList())
+            mutableState.update { it.copy(skills = skills) }
+        }
+    }
+
+    /** Reads a picked skill file and imports it; the file picker hands over the URI, like models. */
+    fun importSkillDocument(uri: Uri) {
+        viewModelScope.launch {
+            val document = runCatching {
+                container.appContext.contentResolver.openInputStream(uri)
+                    ?.use { it.readBytes().toString(Charsets.UTF_8) }
+            }.getOrNull()
+            if (document == null) {
+                mutableState.update { it.copy(skillStatus = "Could not read the picked file.") }
+            } else {
+                importSkill(document)
+            }
+        }
+    }
+
+    fun importSkill(document: String) {
+        viewModelScope.launch {
+            val message = when (val outcome = container.skillStore.importDocument(document)) {
+                is SkillImportOutcome.Imported ->
+                    if (outcome.stagedAsDraft) {
+                        "Staged ${outcome.version} of ${outcome.packageId} as a draft. Activate it to make it available to the agent."
+                    } else {
+                        "Imported ${outcome.packageId} ${outcome.version}; it is active."
+                    }
+                is SkillImportOutcome.Rejected -> "Skill not imported: ${outcome.reason}"
+            }
+            mutableState.update { it.copy(skillStatus = message) }
+            refreshSkills()
+        }
+    }
+
+    fun activateSkillDraft(skillId: String) {
+        viewModelScope.launch {
+            val message = when (val outcome = container.skillStore.activateDraft(skillId)) {
+                is SkillActionOutcome.Ok -> "Draft activated."
+                is SkillActionOutcome.Failed -> "Could not activate: ${outcome.reason}"
+            }
+            mutableState.update { it.copy(skillStatus = message) }
+            refreshSkills()
+        }
+    }
+
+    fun rollbackSkill(skillId: String) {
+        viewModelScope.launch {
+            val message = when (val outcome = container.skillStore.rollback(skillId)) {
+                is SkillActionOutcome.Ok -> "Rolled back to the previous version."
+                is SkillActionOutcome.Failed -> "Could not roll back: ${outcome.reason}"
+            }
+            mutableState.update { it.copy(skillStatus = message) }
+            refreshSkills()
+        }
+    }
+
+    fun removeSkill(skillId: String) {
+        viewModelScope.launch {
+            val message = when (val outcome = container.skillStore.remove(skillId)) {
+                is SkillActionOutcome.Ok -> "Skill removed."
+                is SkillActionOutcome.Failed -> "Could not remove: ${outcome.reason}"
+            }
+            mutableState.update { it.copy(skillStatus = message) }
+            refreshSkills()
+        }
+    }
+
+    /** The profile's instructions with the active skills appended, read fresh for every run. */
+    private suspend fun runInstructions(snapshot: AppUiState): String {
+        val base = snapshot.activeProfile?.systemPrompt.orEmpty()
+        val skills = runCatching { container.skillStore.activeSkills() }.getOrDefault(emptyList())
+        return SkillPrompt.append(base, skills)
+    }
+
+    fun refreshAutomations() {
+        viewModelScope.launch {
+            val automations = runCatching { container.automationStore.automations() }
+                .getOrDefault(emptyList())
+                .sortedByDescending { it.updatedAtEpochMillis }
+            mutableState.update { it.copy(automations = automations) }
+        }
+    }
+
+    fun saveAutomation(name: String, cron: String, prompt: String) {
+        viewModelScope.launch {
+            when {
+                name.isBlank() -> status("An automation needs a name")
+                prompt.isBlank() -> status("An automation needs a prompt to run")
+                Cron.parse(cron) is Cron.Result.Rejected ->
+                    status("The schedule \"$cron\" is not a valid cron expression: minute hour day-of-month month day-of-week")
+                else -> {
+                    val now = System.currentTimeMillis()
+                    container.automationStore.save(
+                        Automation(
+                            id = UUID.randomUUID().toString(),
+                            name = name.trim(),
+                            cron = cron.trim(),
+                            prompt = prompt.trim(),
+                            enabled = true,
+                            updatedAtEpochMillis = now,
+                        ),
+                    )
+                    container.automationRunner.rescheduleAll()
+                    status("Automation saved; it fires on its schedule from now on.")
+                    refreshAutomations()
+                }
+            }
+        }
+    }
+
+    fun removeAutomation(automationId: String) {
+        viewModelScope.launch {
+            container.automationStore.remove(automationId)
+            container.automationRunner.rescheduleAll()
+            refreshAutomations()
+        }
+    }
+
+    fun setAutomationEnabled(automationId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            val existing = container.automationStore.automations().firstOrNull { it.id == automationId }
+                ?: return@launch
+            container.automationStore.save(existing.copy(enabled = enabled))
+            container.automationRunner.rescheduleAll()
+            refreshAutomations()
+        }
+    }
+
+    private fun status(message: String) {
+        mutableState.update { it.copy(automationStatus = message) }
     }
 
     /** The assistant bubble as it stands mid-turn, so tool steps appear as they happen. */
@@ -1525,10 +2101,13 @@ class MainViewModel(
         val s = mutableState.value
         val name = s.loadedModelId
             ?.let { id -> s.localModels.firstOrNull { it.id.value == id }?.displayName }
+            ?: s.litertlmLoadedId
+                ?.let { id -> s.litertlmModels.firstOrNull { it.id.value == id }?.displayName }
             ?: s.selectedEndpoint?.displayName
             ?: return
         val backend = s.loadedBackend?.label
-            ?: if (s.selectedRuntimeId?.startsWith(REMOTE_PREFIX) == true) "Remote" else "CPU"
+            ?: s.litertlmLoadedBackend?.label
+            ?: if (s.lastRoutedRuntimeLabel != null && s.loadedModelId == null) "Remote" else "CPU"
         AgentTaskService.update(
             container.appContext,
             model = name,
@@ -1553,6 +2132,16 @@ class MainViewModel(
     /** The activity acted on the one-shot permission request; clear it so it does not re-fire. */
     fun consumedPermissionRequest() {
         mutableState.update { it.copy(requestNotificationPermission = false) }
+    }
+
+    /** The system dialog answered; tell the broker, which resumes the waiting tool call. */
+    fun resolvedRuntimePermission(granted: Boolean) {
+        container.runtimePermissionBroker.resolve(granted)
+    }
+
+    /** The activity launched the dialog for the pending request; clear it so it does not re-fire. */
+    fun consumedRuntimePermissionRequest() {
+        mutableState.update { it.copy(runtimePermissionRequest = null, runtimePermissionLabel = null) }
     }
 
     fun send(text: String) {
@@ -1588,13 +2177,11 @@ class MainViewModel(
         val snapshot = mutableState.value
         if (snapshot.isGenerating) return
 
-        val selection = selectedRuntime(snapshot)
-        if (selection == null) {
-            mutableState.update { it.copy(error = "Import and load a GGUF, or select an optional remote provider.") }
-            return
-        }
-        if (selection.localModel != null && !snapshot.selectedLocalModelIsLoaded) {
-            mutableState.update { it.copy(error = "Load ${selection.localModel.displayName} before chatting.") }
+        val plan = routeSelection(snapshot, snapshot.privacyClass)
+        if (plan.isEmpty()) {
+            mutableState.update {
+                it.copy(error = "No eligible runtime: load a GGUF, configure a remote provider, or relax the routing policy.")
+            }
             return
         }
         val prompt = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
@@ -1612,37 +2199,98 @@ class MainViewModel(
             )
         }
 
-        // The status service already runs for a loaded model; remote turns start it now and it is
-        // stopped again in the finally. Either way the notification says what is happening.
-        pushModelStatus(ModelPhase.PREPARING)
         // Run on the application scope, not the ViewModel's: agent work is expected to continue
         // while the user is elsewhere, and a run tied to the screen would be cancelled the moment
         // the ViewModel is cleared. AgentTaskService keeps the process alive for the duration.
         generationJob = container.appScope.launch {
-            val agent = container.agent()
-            // Reported by the runtime before any text arrives, since only it knows what the loaded
-            // chat template uses. Until it does, an empty format leaves the stream alone rather
-            // than splitting it on tags that may not be this model's.
-            var reasoningFormat = ReasoningFormat()
-            var assistantText = ""
-            var completedMessage: ConversationMessage? = null
-            val activity = mutableListOf<AgentActivity>()
-            var thinkingStartedAt = 0L
-            val finishedThinking = mutableListOf<AgentActivity.Thinking>()
-            var thinkingMillisTotal = 0L
-            var thinking = false
-            try {
-                agent.run(
-                    request = AgentRunRequest(
-                        conversationId = conversationId,
-                        messages = requestMessages,
-                        identity = BramDefaults.IDENTITY,
-                        maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
-                        sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
-                        profileInstructions = snapshot.activeProfile?.systemPrompt.orEmpty(),
-                    ),
-                    runtime = selection.runtime,
-                ).collect { event ->
+            var failure: String? = null
+            var stopped = false
+            for ((index, selection) in plan.withIndex()) {
+                if (index > 0) {
+                    mutableState.update { it.copy(status = "Falling back to ${selection.runtime.model.displayName}…") }
+                }
+                when (val outcome = runTurnAttempt(selection, snapshot, requestMessages)) {
+                    is TurnOutcome.Completed -> { stopped = false; break }
+                    is TurnOutcome.Failed -> {
+                        failure = outcome.reason
+                        if (outcome.localAttemptFailed) {
+                            // A local failure means the model is suspect even when the fallback
+                            // succeeds; treat it as unloaded rather than showing a stale warm model.
+                            val failedId = outcome.localRuntimeId
+                            mutableState.update { current ->
+                                if (failedId != null && current.litertlmLoadedId == failedId) {
+                                    current.copy(
+                                        litertlmLoadedId = null,
+                                        litertlmLoadedBackend = null,
+                                        liteRtLoadDetail = null,
+                                    )
+                                } else {
+                                    current.copy(
+                                        loadedModelId = if (failedId == null || current.loadedModelId == failedId) {
+                                            null
+                                        } else {
+                                            current.loadedModelId
+                                        },
+                                        cpuValidated = if (failedId == null || current.loadedModelId == failedId) {
+                                            false
+                                        } else {
+                                            current.cpuValidated
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    is TurnOutcome.Cancelled -> { stopped = true; break }
+                }
+            }
+            if (stopped) {
+                mutableState.update { it.copy(status = "Generation stopped") }
+            } else if (failure != null) {
+                mutableState.update {
+                    it.copy(error = failure, status = "You can reload or choose another runtime.")
+                }
+            }
+        }
+    }
+
+    /**
+     * One agent run on one runtime, to an outcome. A failure ends the turn here cleanly — the
+     * caller decides whether a policy-allowed fallback runtime gets the same messages.
+     */
+    private suspend fun runTurnAttempt(
+        selection: RuntimeSelection,
+        snapshot: AppUiState,
+        requestMessages: List<ConversationMessage>,
+    ): TurnOutcome {
+        // The status service already runs for a loaded model; remote turns start it now and it is
+        // stopped again in the finally. Either way the notification says what is happening.
+        pushModelStatus(ModelPhase.PREPARING)
+        val agent = container.agent()
+        // Reported by the runtime before any text arrives, since only it knows what the loaded
+        // chat template uses. Until it does, an empty format leaves the stream alone rather
+        // than splitting it on tags that may not be this model's.
+        var reasoningFormat = ReasoningFormat()
+        var assistantText = ""
+        var completedMessage: ConversationMessage? = null
+        val activity = mutableListOf<AgentActivity>()
+        var thinkingStartedAt = 0L
+        val finishedThinking = mutableListOf<AgentActivity.Thinking>()
+        var thinkingMillisTotal = 0L
+        var thinking = false
+        var failure: String? = null
+        return try {
+            agent.run(
+                request = AgentRunRequest(
+                    conversationId = conversationId,
+                    messages = requestMessages,
+                    identity = BramDefaults.IDENTITY,
+                    maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
+                    sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
+                    profileInstructions = runInstructions(snapshot),
+                ),
+                runtime = selection.runtime,
+            ).collect { event ->
                     when (event) {
                         is AgentEvent.Status -> {
                             mutableState.update { it.copy(status = event.text) }
@@ -1745,26 +2393,23 @@ class MainViewModel(
                             )
                         }
                         is AgentEvent.Completed -> completedMessage = event.message
-                        is AgentEvent.Failed -> mutableState.update {
-                            val localPlanFailed = selection.localModel != null
-                            it.copy(
-                                error = event.message,
-                                status = if (event.recoverable) "You can reload or choose another runtime." else null,
-                                loadedModelId = if (localPlanFailed) null else it.loadedModelId,
-                                cpuValidated = if (localPlanFailed) false else it.cpuValidated,
-                            )
-                        }
+                        is AgentEvent.Failed -> failure = event.message
                     }
                 }
-            } catch (_: CancellationException) {
-                mutableState.update { it.copy(status = "Generation stopped") }
-            } catch (error: Throwable) {
-                mutableState.update { it.copy(error = error.message ?: error::class.java.simpleName) }
-            } finally {
+            when {
+                completedMessage != null -> TurnOutcome.Completed
+                failure != null -> TurnOutcome.Failed(failure, selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
+                else -> TurnOutcome.Failed("The run ended without producing a reply.", selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
+            }
+        } catch (_: CancellationException) {
+            TurnOutcome.Cancelled
+        } catch (error: Throwable) {
+            TurnOutcome.Failed(error.message ?: error::class.java.simpleName, selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
+        } finally {
                 // Separate reasoning from the answer once the reply is complete: the transcript
                 // shows thinking collapsed, and mid-stream the split is not yet determinable.
                 val rawReply = completedMessage?.content ?: assistantText
-                val reply = if (rawReply.isBlank() || selection.localModel == null) {
+                val reply = if (rawReply.isBlank() || !selection.isLocal) {
                     rawReply to ""
                 } else {
                     runCatching {
@@ -1811,7 +2456,7 @@ class MainViewModel(
                 // so the thread on disk matches what is on screen.
                 persistActiveConversation(settled)
                 generationJob = null
-                if (mutableState.value.loadedModelId != null) {
+                if (mutableState.value.loadedModelId != null || mutableState.value.litertlmLoadedId != null) {
                     // A loaded model keeps the status service alive; the turn just went idle.
                     pushModelStatus(ModelPhase.IDLE)
                 } else {
@@ -1820,14 +2465,28 @@ class MainViewModel(
                 }
                 if (!appForeground && container.notificationSettings.completionAlertsEnabled()) {
                     val turnName = selection.localModel?.displayName
-                        ?: snapshot.selectedEndpoint?.displayName
-                        ?: BramDefaults.IDENTITY.displayName
+                        ?: selection.runtime.model.displayName
                     val summary = reply.first.ifBlank { turnName }
                     AgentTaskService.postCompletion(container.appContext, model = turnName, summary = summary)
                 }
                 refreshDeviceProfile()
             }
         }
+
+    /**
+     * The result of one agent run on one runtime. [Failed.localAttemptFailed] lets the caller
+     * treat a crashed local model as unloaded even when a fallback runtime finished the turn.
+     * [Failed.localRuntimeId] says which local record failed, so the right one of the llama.cpp
+     * model and the LiteRT package is dropped.
+     */
+    private sealed interface TurnOutcome {
+        data object Completed : TurnOutcome
+        data class Failed(
+            val reason: String,
+            val localAttemptFailed: Boolean,
+            val localRuntimeId: String? = null,
+        ) : TurnOutcome
+        data object Cancelled : TurnOutcome
     }
 
     /**
@@ -1855,15 +2514,19 @@ class MainViewModel(
     private fun reloadCatalogs() {
         viewModelScope.launch {
             val models = container.localModelStore.list()
+            val litertlm = container.liteRtLmStore.list()
             val endpoints = container.endpointStore.list()
             mutableState.update { current ->
                 val selected = current.selectedRuntimeId?.takeIf { id ->
                     models.any { it.id.value == id } ||
+                        litertlm.any { it.id.value == id } ||
                         endpoints.any { remoteRuntimeId(it.id) == id }
                 } ?: models.firstOrNull()?.id?.value
+                    ?: litertlm.firstOrNull()?.id?.value
                     ?: endpoints.firstOrNull()?.let { remoteRuntimeId(it.id) }
                 current.copy(
                     localModels = models,
+                    litertlmModels = litertlm,
                     endpoints = endpoints,
                     selectedRuntimeId = selected,
                     error = null,
@@ -1889,7 +2552,11 @@ class MainViewModel(
     private fun restoreLastModel() {
         viewModelScope.launch {
             val current = mutableState.value
-            if (current.loadedModelId != null || current.isLoadingModel) return@launch
+            if (current.loadedModelId != null || current.litertlmLoadedId != null ||
+                current.isLoadingModel || current.isLoadingLiteRt
+            ) {
+                return@launch
+            }
             // Prefer the profile: it restores the context size, processor, and sampling as well as
             // the file. The model id remains the fallback for a catalog written before profiles.
             val lastProfileId = runCatching { container.modelProfileStore.lastUsedProfileId() }
@@ -1901,10 +2568,20 @@ class MainViewModel(
                 return@launch
             }
             val lastId = runCatching { container.localModelStore.lastLoadedModelId() }.getOrNull()
-                ?: return@launch
-            val model = current.localModels.firstOrNull { it.id.value == lastId } ?: return@launch
-            selectLocalModel(model.id.value)
-            loadModel(model.id.value)
+            val model = lastId?.let { id -> current.localModels.firstOrNull { it.id.value == id } }
+            if (model != null) {
+                selectLocalModel(model.id.value)
+                loadModel(model.id.value)
+                return@launch
+            }
+            // A LiteRT package holds no profile; the package's own last-loaded id is all there is.
+            val liteRtLastId = runCatching { container.liteRtLmStore.lastLoadedPackageId() }.getOrNull()
+            val liteRtPackage = liteRtLastId
+                ?.let { id -> current.litertlmModels.firstOrNull { it.id.value == id } }
+            if (liteRtPackage != null) {
+                selectLocalModel(liteRtPackage.id.value)
+                loadLiteRtModel(liteRtPackage.id.value)
+            }
         }
     }
 
@@ -1913,13 +2590,34 @@ class MainViewModel(
             val models = container.localModelStore.list()
             mutableState.update { current ->
                 val selected = selectId
-                    ?: current.selectedRuntimeId?.takeIf { id -> models.any { it.id.value == id } }
-                    ?: current.selectedRuntimeId?.takeIf { it.startsWith(REMOTE_PREFIX) }
+                    ?: current.selectedRuntimeId?.takeIf { id ->
+                        models.any { it.id.value == id } ||
+                            current.litertlmModels.any { it.id.value == id } ||
+                            id.startsWith(REMOTE_PREFIX)
+                    }
                     ?: models.firstOrNull()?.id?.value
                 current.copy(localModels = models, selectedRuntimeId = selected, error = null)
             }
             refreshModelStorage()
             syncProfiles(models)
+            restoreLastModel()
+        }
+    }
+
+    private fun reloadLiteRtModels(selectId: String? = null) {
+        viewModelScope.launch {
+            val packages = container.liteRtLmStore.list()
+            mutableState.update { current ->
+                val selected = selectId
+                    ?: current.selectedRuntimeId?.takeIf { id ->
+                        current.localModels.any { it.id.value == id } ||
+                            packages.any { it.id.value == id } ||
+                            id.startsWith(REMOTE_PREFIX)
+                    }
+                    ?: packages.firstOrNull()?.id?.value
+                current.copy(litertlmModels = packages, selectedRuntimeId = selected, error = null)
+            }
+            refreshModelStorage()
             restoreLastModel()
         }
     }
@@ -1939,10 +2637,58 @@ class MainViewModel(
         }
     }
 
-    private fun selectedRuntime(snapshot: AppUiState): RuntimeSelection? {
-        snapshot.selectedLocalModel?.let { return RuntimeSelection(container.runtime(it), it) }
-        snapshot.selectedEndpoint?.let { return RuntimeSelection(container.runtime(it), null) }
-        return null
+    /**
+     * Routes one run: builds a candidate for every usable runtime (the loaded GGUF, and each remote
+     * endpoint), asks the rule-based router for the best pick given the routing mode and this
+     * conversation's privacy class, and returns the ordered list of runtimes — first choice, then
+     * policy-allowed fallbacks. Empty when nothing passed the hard gates.
+     */
+    private fun routeSelection(snapshot: AppUiState, privacyClass: PrivacyClass): List<RuntimeSelection> {
+        val pairs = buildList {
+            snapshot.localModels.forEach { model ->
+                val available = snapshot.cpuValidated && model.id.value == snapshot.loadedModelId
+                add(
+                    RuntimeSelection(container.runtime(model), model) to
+                        RoutingEstimates.localCandidate(model, available, snapshot.loadedBackend != null && snapshot.loadedBackend != RuntimeBackend.CPU),
+                )
+            }
+            snapshot.litertlmModels.forEach { record ->
+                val available = record.id.value == snapshot.litertlmLoadedId
+                add(
+                    RuntimeSelection(container.runtime(record), null, record) to
+                        RoutingEstimates.localCandidate(record, available, snapshot.litertlmLoadedBackend == LiteRtBackend.GPU),
+                )
+            }
+            snapshot.endpoints.forEach { endpoint ->
+                add(RuntimeSelection(container.runtime(endpoint), null) to RoutingEstimates.remoteCandidate(endpoint))
+            }
+        }
+        if (pairs.isEmpty()) return emptyList()
+
+        val decision = router.route(
+            request = RoutingRequest(
+                mode = snapshot.routingMode,
+                privacyClass = privacyClass,
+                requiredCapabilities = setOf(ModelCapability.TEXT),
+                minimumContextTokens = MINIMUM_CONTEXT_TOKENS,
+                preferQuality = snapshot.routingMode == RoutingMode.AUTO,
+                localBias = if (privacyClass == PrivacyClass.PRIVATE_REMOTE_ALLOWED) 2.0 else 1.0,
+            ),
+            candidates = pairs.map { it.second },
+        )
+        val ordered = buildList {
+            decision.selected?.let { selected ->
+                pairs.firstOrNull { it.second.model.id == selected.model.id }?.let { add(it.first) }
+            }
+            decision.fallbacks.forEach { fallback ->
+                pairs.firstOrNull { it.second.model.id == fallback.model.id }?.let { add(it.first) }
+            }
+        }
+        val label = ordered.firstOrNull()?.runtime?.model?.displayName
+        if (label != null) {
+            mutableState.update { it.copy(lastRoutedRuntimeLabel = label) }
+        }
+        return ordered
     }
 
     private fun validate(draft: EndpointDraft): String? {
@@ -1971,7 +2717,12 @@ class MainViewModel(
     private data class RuntimeSelection(
         val runtime: ModelRuntime,
         val localModel: LocalModelRecord?,
-    )
+        val litertlmModel: LiteRtModelRecord? = null,
+    ) {
+        /** Whether this candidate runs on-device, which changes how a failure is treated. */
+        val isLocal: Boolean
+            get() = localModel != null || litertlmModel != null
+    }
 }
 
 internal const val REMOTE_PREFIX = "remote:"

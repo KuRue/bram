@@ -359,6 +359,37 @@ class StaticToolRegistry(
     override fun find(name: String): ToolHandler? = byName[name]
 }
 
+/**
+ * The built-in tools plus whatever remote servers contribute, keyed per server so a server can be
+ * removed without touching the others. Built-ins win name collisions: a server tool named the same
+ * as a built-in would otherwise shadow a tool whose behavior the user knows, on a server they just
+ * configured.
+ */
+class MutableToolRegistry(
+    base: ToolRegistry,
+) : ToolRegistry {
+    private val builtin = base
+    private var serverTools: Map<String, List<ToolHandler>> = emptyMap()
+
+    @Synchronized
+    fun setServerTools(serverId: String, handlers: List<ToolHandler>) {
+        serverTools = serverTools + (serverId to handlers)
+    }
+
+    @Synchronized
+    fun removeServerTools(serverId: String) {
+        serverTools = serverTools - serverId
+    }
+
+    @Synchronized
+    override fun definitions(): List<ToolDefinition> =
+        builtin.definitions() + serverTools.values.flatten().map { it.definition }
+
+    @Synchronized
+    override fun find(name: String): ToolHandler? =
+        builtin.find(name) ?: serverTools.values.flatten().firstOrNull { it.definition.name == name }
+}
+
 class ReadOnlyApprovalGate : ToolApprovalGate {
     override suspend fun decide(
         tool: ToolDefinition,

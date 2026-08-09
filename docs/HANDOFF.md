@@ -86,18 +86,25 @@ is the one tool a local model can call end to end. (More tools live on
 
 ## What is not implemented
 
-- **Task queue and scheduling.** One run is tracked at a time. There is no
-  queue, no scheduled work, and no per-task UI. `AgentTaskService` is the
-  foundation, not the finished thing.
 - **Resumable or queued downloads.** One verified, cancellable transfer at a
   time; a dropped connection restarts the file rather than resuming it.
-- **Task queue and scheduling.** One run is tracked at a time. There is no
-  queue, no scheduled work, and no per-task UI. `AgentTaskService` is the
-  foundation, not the finished thing.
 - **Tools beyond `device_status` and `write_note`.** `web_search`/`web_fetch`
   are on `agent-tools`, not main.
-- **Memory, skills, automations.** Interfaces only.
-- **LiteRT.** Not started.
+- **Automation and scheduling gaps.** The task queue, cron automations, and
+  per-task UI are shipped (M13/M16), but automations do not survive a reboot
+  (no `BOOT_COMPLETED` receiver), cron is the only schedule kind, and there are
+  no network/charging constraints or per-run budgets.
+- **Memory gaps.** Working-summary compaction and `SEMANTIC_FACT` /
+  `USER_INSTRUCTION` extraction (run after each completed turn) are wired and
+  FTS-retrieved, but `EPISODE` records are never produced, there is no UI for
+  browsing or curating memories, no embeddings/vector index, and extracted
+  facts are conversation-scoped (cross-conversation recall is via the
+  `memory_search` tool only).
+- **Skills gaps.** The SKILL.md lifecycle is shipped (M16); the remaining gap is
+  agent-authored drafts (the `QUARANTINED` lifecycle path is unimplemented).
+- **LiteRT.** The `:runtime:litertlm` module is wired end-to-end (import, store,
+  routing, UI card) but is blocked from shipping by an upstream AAR crash — see
+  Known issues. It is not a usable runtime yet.
 - **Remote endpoints.** Optional and non-streaming.
 
 ## Known issues
@@ -137,6 +144,18 @@ paragraphs deliberating. Reasoning is off by default, per model.
 **Vulkan's failure is in a shared operation, not a layer.** Bisection on the
 Adreno 830 shows even one offloaded layer disagreeing. Nothing has been attempted
 to fix it; the backend is offered and reported as unvalidated.
+
+**litertlm turns crash on completion.** `com.google.ai.edge.litertlm:litertlm-android`
+0.15.0 (the latest release) loads and generates on-device — the native libs init
+and the CPU engine reaches `onDone` — but its compiled `Conversation.sendMessageAsync`
+bytecode calls `SendChannel.close$default`, a static no shipped kotlinx-coroutines
+provides (verified absent in 1.7.3 / 1.8.1 / 1.9.0 / 1.10.2), so every turn throws
+`NoSuchMethodError` as it finishes and the process dies. The GPU path fails earlier
+on a generic (non-device-matched) package with `embedding_lookup != nullptr`. The
+crash is in the AAR's own teardown, reachable through `LiteRtEngineManager.generate`,
+so the app is affected, not just tests. Reproduced by
+`LiteRtLmOnDeviceTest` (`@Ignore`d, with the full detail in its kdoc). Revisit when a
+corrected AAR ships; until then litertlm is inert code.
 
 ## Build
 

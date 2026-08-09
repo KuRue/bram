@@ -6,6 +6,23 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Milestone 11 tool surface: the runtime permissions the platform tools ask for. Each is
+         requested through the system dialog when a tool call is approved and the permission is
+         missing; none is required to install or run. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- Exact alarms are a special app-op on API 31+. Declared so the reminder tool can schedule
+         exactly when the user has granted it; otherwise it falls back to inexact timing. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- Termux declares this permission for third-party apps that run commands in its context.
+         The user grants it on the App Info > Permissions > Additional permissions screen. -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <!-- Package visibility: targeting API 30+ hides other packages unless declared, and Termux's
+         RUN_COMMAND service cannot be reached without this. -->
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
 
     <application
         android:name=".BramApplication"
@@ -30,6 +47,22 @@
             android:name=".AgentTaskService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Receives the result bundle Termux sends for a termux_exec call. Exported to nobody:
+             the PendingIntent Bram hands to Termux is what delivers the result. -->
+        <service
+            android:name=".TermuxResultService"
+            android:exported="false" />
+
+        <!-- Turns a scheduled reminder alarm into the notification it was asked for. -->
+        <receiver
+            android:name=".ScheduledNotificationReceiver"
+            android:exported="false" />
+
+        <!-- Wakes the app process when a scheduled task comes due, so the queue can start it. -->
+        <receiver
+            android:name=".TaskAlarmReceiver"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"

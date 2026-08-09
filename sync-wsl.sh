@@ -7,5 +7,6 @@ cd "$(dirname "$0")"
 for module in app core runtime platform gradle; do
     wsl.exe -d Ubuntu -e bash -lc "rm -rf ~/bram-src/$module/*/src ~/bram-src/$module/src 2>/dev/null; true"
 done
-tar cf - --exclude=.cxx --exclude=build --exclude=.gradle app core runtime platform gradle \
+tar cf - --exclude=.cxx --exclude=build --exclude=.gradle settings.gradle.kts build.gradle.kts \
+    app core runtime platform gradle \
     | wsl.exe -d Ubuntu -e bash -lc 'cd ~/bram-src && tar xf -'

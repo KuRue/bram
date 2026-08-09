@@ -12,6 +12,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -72,6 +73,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -104,17 +106,27 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import io.github.kurue.bram.core.domain.AcceleratorCapability
 import io.github.kurue.bram.core.domain.AgentActivity
+import io.github.kurue.bram.core.domain.Automation
 import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.FlashAttentionMode
 import io.github.kurue.bram.core.domain.KvCacheType
+import io.github.kurue.bram.core.domain.LITE_RT_CONTEXT_TOKENS
+import io.github.kurue.bram.core.domain.LiteRtBackend
+import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.PermissionMode
+import io.github.kurue.bram.core.domain.PrivacyClass
+import io.github.kurue.bram.core.domain.RemoteApiKind
+import io.github.kurue.bram.core.domain.RoutingMode
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import io.github.kurue.bram.core.domain.RunJournalEntry
+import io.github.kurue.bram.core.domain.RunStatus
+import io.github.kurue.bram.core.domain.SkillPackage
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.displayName
 import io.github.kurue.bram.runtime.llamacpp.downloads.RemoteModelFile
@@ -131,7 +143,7 @@ private enum class AppSection(val label: String, val glyph: String) {
 }
 
 /** Panels reachable from the menu, each shown as a sheet over the conversation. */
-private enum class AppPanel { MODELS, SETTINGS, SESSION }
+private enum class AppPanel { MODELS, SETTINGS, SESSION, TASKS }
 
 @Composable
 fun BramApp(viewModel: MainViewModel) {
@@ -141,16 +153,32 @@ fun BramApp(viewModel: MainViewModel) {
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
     }
+    val skillPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::importSkillDocument)
+    }
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) {
         // The toggle works either way; without the permission the completion alert is simply
         // never posted, which the settings screen says.
     }
+    val runtimePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        viewModel.resolvedRuntimePermission(granted)
+    }
     LaunchedEffect(state.requestNotificationPermission) {
         if (state.requestNotificationPermission) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             viewModel.consumedPermissionRequest()
+        }
+    }
+    // A tool call that was approved but needs a runtime permission shows the system dialog here;
+    // the answer is fed back through the broker so the tool either runs or returns a denial.
+    LaunchedEffect(state.runtimePermissionRequest) {
+        state.runtimePermissionRequest?.let { permission ->
+            runtimePermission.launch(permission)
+            viewModel.consumedRuntimePermissionRequest()
         }
     }
 
@@ -266,6 +294,9 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onImport = { modelPicker.launch(arrayOf("*/*")) },
                                 onUnload = viewModel::unloadModel,
+                                onLoadLiteRt = viewModel::loadLiteRtModel,
+                                onUnloadLiteRt = viewModel::unloadLiteRt,
+                                onRemoveLiteRt = viewModel::removeLiteRt,
                                 onValidateAccelerator = viewModel::validateAccelerator,
                                 onBisectAccelerator = viewModel::bisectAccelerator,
                                 onReclaimStorage = viewModel::reclaimModelStorage,
@@ -284,13 +315,33 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onSaveEndpoint = viewModel::saveEndpoint,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
+                                onSaveMcpServer = viewModel::saveMcpServer,
+                                onRemoveMcpServer = viewModel::removeMcpServer,
+                                onRefreshMcpServers = viewModel::refreshMcpServers,
+                                onImportSkill = { skillPicker.launch(arrayOf("text/markdown", "text/plain", "application/octet-stream", "*/*")) },
+                                onActivateSkillDraft = viewModel::activateSkillDraft,
+                                onRollbackSkill = viewModel::rollbackSkill,
+                                onRemoveSkill = viewModel::removeSkill,
+                                onSaveAutomation = viewModel::saveAutomation,
+                                onRemoveAutomation = viewModel::removeAutomation,
+                                onSetAutomationEnabled = viewModel::setAutomationEnabled,
                                 onRefreshDiagnostics = viewModel::refreshDeviceProfile,
                                 onWithdrawToolPermission = viewModel::withdrawToolPermission,
                                 onSetCompletionAlerts = viewModel::setCompletionAlerts,
+                                onSetRoutingMode = viewModel::setRoutingMode,
+                                onSetDefaultPrivacyClass = viewModel::setDefaultPrivacyClass,
                             )
                             AppPanel.SESSION -> SessionScreen(
                                 state = state,
                                 onSetMode = viewModel::updatePermissionMode,
+                                onSetPrivacyClass = viewModel::updateConversationPrivacyClass,
+                            )
+                            AppPanel.TASKS -> TasksScreen(
+                                state = state,
+                                onEnqueue = viewModel::enqueueTask,
+                                onCancel = viewModel::cancelTask,
+                                onRetry = viewModel::retryTask,
+                                onDelete = viewModel::deleteTask,
                             )
                         }
                     }
@@ -377,6 +428,11 @@ private fun modelStatusLine(state: AppUiState): String = when {
     state.selectedLocalModelIsLoaded -> buildString {
         append(state.loadedBackend?.label ?: "loaded")
         state.selectedLocalModel?.let { append(" · ${formatTokens(it.preferredContextTokens)}") }
+        state.lastMetrics?.decodeTokensPerSecond?.let { append(" · ${formatRate(it)}") }
+    }
+    state.selectedLiteRtIsLoaded -> buildString {
+        append(state.litertlmLoadedBackend?.label ?: "loaded")
+        append(" · ${formatTokens(LITE_RT_CONTEXT_TOKENS)}")
         state.lastMetrics?.decodeTokensPerSecond?.let { append(" · ${formatRate(it)}") }
     }
     state.selectedEndpoint != null -> "Remote provider"
@@ -490,6 +546,7 @@ private fun BramDrawer(
             ) {
                 listOf(
                     "Models" to AppPanel.MODELS,
+                    "Tasks" to AppPanel.TASKS,
                     "Settings" to AppPanel.SETTINGS,
                 ).forEach { (label, target) ->
                     GlassSurface(
@@ -787,6 +844,9 @@ private fun ModelsScreen(
     state: AppUiState,
     onImport: () -> Unit,
     onUnload: () -> Unit,
+    onLoadLiteRt: (String) -> Unit,
+    onUnloadLiteRt: () -> Unit,
+    onRemoveLiteRt: (String) -> Unit,
     onValidateAccelerator: (String, AcceleratorTarget) -> Unit,
     onBisectAccelerator: (String, AcceleratorTarget) -> Unit,
     onReclaimStorage: () -> Unit,
@@ -913,6 +973,41 @@ private fun ModelsScreen(
                 }
             }
         }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionHeader("LiteRT packages", modifier = Modifier.weight(1f))
+            }
+        }
+        if (state.litertlmModels.isEmpty() && !state.isImporting) {
+            item {
+                GlassSurface(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("No LiteRT packages yet", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "A LiteRT package (a \".litertlm\" file) is a compiled on-device model " +
+                                "for Google's LiteRT-LM runtime. Pick one from this device and Bram " +
+                                "will run it in-process — a GPU package compiles kernels on its " +
+                                "first load, which takes a while.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Button(onClick = onImport) { Text("Choose a .litertlm package") }
+                    }
+                }
+            }
+        }
+        items(state.litertlmModels, key = { it.id.value }) { record ->
+            LiteRtPackageCard(
+                record = record,
+                loaded = state.litertlmLoadedId == record.id.value,
+                loading = state.isLoadingLiteRt && state.selectedLiteRtModel?.id?.value == record.id.value,
+                busy = state.isGenerating,
+                onLoad = { onLoadLiteRt(record.id.value) },
+                onUnload = onUnloadLiteRt,
+                onRemove = { onRemoveLiteRt(record.id.value) },
+            )
+        }
+        state.liteRtLoadDetail?.let { detail -> item { InfoCard("LiteRT runtime", detail) } }
         state.selectedLocalModel?.let { model ->
             item {
                 AcceleratorValidationCard(
@@ -923,12 +1018,65 @@ private fun ModelsScreen(
             }
         }
         state.error?.let { error -> item { ErrorCard(error) } }
-        item {
-            Text(
-                "LiteRT, model downloads, and storage-assisted oversized models are not implemented yet.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    }
+}
+
+/**
+ * One imported LiteRT package: what it is, what it loads onto, and the load/unload/remove actions.
+ *
+ * The backend chip is read-only because the backend is a property of the package itself — a GPU
+ * package was compiled for its accelerator and loads there, CPU packages run on CPU. Load is
+ * exactly engine initialization, so it can take a while on a first GPU load while kernels compile.
+ */
+@Composable
+private fun LiteRtPackageCard(
+    record: LiteRtModelRecord,
+    loaded: Boolean,
+    loading: Boolean,
+    busy: Boolean,
+    onLoad: () -> Unit,
+    onUnload: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    GlassSurface(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(record.displayName, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "${record.backend.label} · ${formatBytes(record.fileSizeBytes)} · " +
+                            "${formatTokens(LITE_RT_CONTEXT_TOKENS)} context",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (loaded) {
+                    Text(
+                        "Loaded",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (loaded) {
+                    OutlinedButton(onClick = onUnload, enabled = !busy) { Text("Unload") }
+                } else {
+                    Button(onClick = onLoad, enabled = !loading && !busy) {
+                        if (loading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Loading…")
+                        } else {
+                            Text("Load")
+                        }
+                    }
+                }
+                TextButton(onClick = onRemove, enabled = !busy) { Text("Remove") }
+            }
         }
     }
 }
@@ -1834,6 +1982,7 @@ private fun AutoConfigureRow(label: String, status: String, color: Color) {
 private fun SessionScreen(
     state: AppUiState,
     onSetMode: (PermissionMode) -> Unit,
+    onSetPrivacyClass: (PrivacyClass) -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -1862,6 +2011,31 @@ private fun SessionScreen(
                 PermissionMode.AUTO -> "Read-only tools run without asking; anything with side effects is confirmed first."
                 PermissionMode.MANUAL -> "Every tool call is confirmed, including read-only ones."
                 PermissionMode.BYPASS -> "Every tool runs without asking. Use only for runs you trust outright."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        // Privacy is where routing meets trust: which runtimes this conversation's content may go
+        // to. It lives beside the permission mode because both are per-conversation decisions.
+        SectionLabel("Privacy")
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            PrivacyClass.entries.forEach { privacyClass ->
+                FilterChip(
+                    selected = privacyClass == state.privacyClass,
+                    onClick = { onSetPrivacyClass(privacyClass) },
+                    label = { Text(privacyClass.label) },
+                )
+            }
+        }
+        Text(
+            when (state.privacyClass) {
+                PrivacyClass.STANDARD -> "No preference; routing weighs quality, latency, and battery as usual."
+                PrivacyClass.PRIVATE_REMOTE_ALLOWED -> "Remote processing is acceptable, but local is preferred when it can do the job."
+                PrivacyClass.LOCAL_ONLY -> "Nothing in this conversation leaves the device, whatever the routing mode says."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1917,6 +2091,63 @@ private fun StatRow(label: String, value: String) {
     }
 }
 
+/** One line of the run journal: when, how it ended, and what it did and cost. */
+@Composable
+private fun RunJournalRow(entry: RunJournalEntry) {
+    Column {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                when (entry.status) {
+                    RunStatus.RUNNING -> "Running"
+                    RunStatus.SUCCEEDED -> "Succeeded"
+                    RunStatus.FAILED -> "Failed"
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = when (entry.status) {
+                    RunStatus.FAILED -> MaterialTheme.colorScheme.error
+                    RunStatus.SUCCEEDED -> MaterialTheme.colorScheme.primary
+                    RunStatus.RUNNING -> MaterialTheme.colorScheme.tertiary
+                },
+            )
+            Text(
+                java.text.SimpleDateFormat(
+                    "MMM d, HH:mm",
+                    LocalLocale.current.platformLocale,
+                ).format(java.util.Date(entry.startedAtEpochMillis)),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            buildString {
+                if (entry.toolTurns > 0) append("${entry.toolTurns} tool turns")
+                val tokens = listOf(entry.inputTokens?.let { "in: $it" }, entry.outputTokens?.let { "out: $it" })
+                    .filterNotNull()
+                    .joinToString(" · ")
+                if (tokens.isNotEmpty()) {
+                    if (entry.toolTurns > 0) append(" · ")
+                    append(tokens)
+                }
+                if (entry.toolTurns == 0 && tokens.isEmpty()) append("—")
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        entry.error?.let { error ->
+            Text(
+                error,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
 /**
  * A count for the stats card. Unlike [formatTokens], zero is shown as 0 rather than "unknown",
  * because a fresh session genuinely has generated nothing — "unknown" would read as a missing
@@ -1930,9 +2161,21 @@ private fun SettingsScreen(
     state: AppUiState,
     onSaveEndpoint: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
+    onSaveMcpServer: (McpServerDraft) -> Unit,
+    onRemoveMcpServer: (String) -> Unit,
+    onRefreshMcpServers: () -> Unit,
+    onImportSkill: () -> Unit,
+    onActivateSkillDraft: (String) -> Unit,
+    onRollbackSkill: (String) -> Unit,
+    onRemoveSkill: (String) -> Unit,
+    onSaveAutomation: (String, String, String) -> Unit,
+    onRemoveAutomation: (String) -> Unit,
+    onSetAutomationEnabled: (String, Boolean) -> Unit,
     onRefreshDiagnostics: () -> Unit,
     onWithdrawToolPermission: (String) -> Unit,
     onSetCompletionAlerts: (Boolean) -> Unit,
+    onSetRoutingMode: (RoutingMode) -> Unit,
+    onSetDefaultPrivacyClass: (PrivacyClass) -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
@@ -1940,6 +2183,16 @@ private fun SettingsScreen(
     var context by rememberSaveable { mutableStateOf("32768") }
     var apiKey by rememberSaveable { mutableStateOf("") }
     var allowHttp by rememberSaveable { mutableStateOf(false) }
+    var apiKind by rememberSaveable { mutableStateOf(RemoteApiKind.CHAT_COMPLETIONS) }
+
+    var mcpName by rememberSaveable { mutableStateOf("") }
+    var mcpBaseUrl by rememberSaveable { mutableStateOf("http://") }
+    var mcpToken by rememberSaveable { mutableStateOf("") }
+    var mcpAllowHttp by rememberSaveable { mutableStateOf(false) }
+
+    var automationName by rememberSaveable { mutableStateOf("") }
+    var automationCron by rememberSaveable { mutableStateOf("0 9 * * *") }
+    var automationPrompt by rememberSaveable { mutableStateOf("") }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -1966,6 +2219,27 @@ private fun SettingsScreen(
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
         )
+        SectionLabel("API")
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            RemoteApiKind.entries.forEach { kind ->
+                FilterChip(
+                    selected = kind == apiKind,
+                    onClick = { apiKind = kind },
+                    label = { Text(if (kind == RemoteApiKind.RESPONSES) "Responses API" else "Chat Completions") },
+                )
+            }
+        }
+        Text(
+            when (apiKind) {
+                RemoteApiKind.CHAT_COMPLETIONS -> "The broadest compatibility: Ollama, LM Studio, vLLM, llama.cpp server, and most OpenAI-compatible hosts."
+                RemoteApiKind.RESPONSES -> "The OpenAI Responses API (2025-03-26). Use for hosts that expose /responses rather than /chat/completions."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(allowHttp, { allowHttp = it })
             Column {
@@ -1980,11 +2254,183 @@ private fun SettingsScreen(
         Button(
             onClick = {
                 onSaveEndpoint(
-                    EndpointDraft(name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp),
+                    EndpointDraft(name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind),
                 )
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Save provider") }
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        SectionHeader(
+            "MCP servers",
+            "Tools from a Model Context Protocol server, reached over HTTP(S). Each tool is gated " +
+                "like any other; tools are only what the server advertises, so nothing is approved " +
+                "by trusting the server.",
+        )
+        if (state.mcpServers.isEmpty()) {
+            Text("None configured. Servers on your own network are the intended use.")
+        }
+        state.mcpServers.forEach { McpServerCard(it, onRemoveMcpServer) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Add MCP server", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            if (state.mcpRefreshing) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            } else {
+                TextButton(onClick = onRefreshMcpServers) { Text("Refresh") }
+            }
+        }
+        OutlinedTextField(
+            mcpName,
+            { mcpName = it },
+            label = { Text("Name") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            mcpBaseUrl,
+            { mcpBaseUrl = it },
+            label = { Text("Base URL (http://host:port/mcp)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            mcpToken,
+            { mcpToken = it },
+            label = { Text("Bearer token (optional)") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(mcpAllowHttp, { mcpAllowHttp = it })
+            Column {
+                Text("Allow insecure HTTP")
+                Text(
+                    "Only for a trusted local network; tool names and results travel unencrypted.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Button(
+            onClick = { onSaveMcpServer(McpServerDraft(mcpName, mcpBaseUrl, mcpToken, mcpAllowHttp)) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Connect and list tools") }
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        SectionHeader(
+            "Skills",
+            "Versioned procedures the agent follows when their description matches the task. " +
+                "A skill is text, not code: it can never do anything itself or override what you " +
+                "directly ask.",
+        )
+        state.skillStatus?.let { status ->
+            Text(
+                status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        if (state.skills.isEmpty()) {
+            Text(
+                "No skills imported. A skill file starts with name, version, and description " +
+                    "between --- lines, then the instructions. A new version of a known skill lands " +
+                    "as a draft until you activate it.",
+            )
+        }
+        state.skills.forEach { SkillCard(it, onActivateSkillDraft, onRollbackSkill, onRemoveSkill) }
+        Button(
+            onClick = onImportSkill,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Import a skill file") }
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        SectionHeader(
+            "Automations",
+            "Recurring schedules that enqueue a task at their cron time (minute hour day-of-month " +
+                "month day-of-week). The run goes through the task queue like any task, and is " +
+                "deferred until a model is loaded if none is.",
+        )
+        state.automationStatus?.let { status ->
+            Text(
+                status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        if (state.automations.isEmpty()) {
+            Text("No automations yet. A daily run at 9am is 0 9 * * *, weekdays only is 0 9 * * 1-5.")
+        }
+        state.automations.forEach { AutomationCard(it, onSetAutomationEnabled, onRemoveAutomation) }
+        Text("Add automation", fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(
+            automationName,
+            { automationName = it },
+            label = { Text("Name") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            automationCron,
+            { automationCron = it },
+            label = { Text("Schedule") },
+            supportingText = { Text("minute hour day-of-month month day-of-week, e.g. 0 9 * * 1-5") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            automationPrompt,
+            { automationPrompt = it },
+            label = { Text("Prompt to run") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            onClick = { onSaveAutomation(automationName, automationCron, automationPrompt) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Save automation") }
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        SectionHeader(
+            "Routing",
+            "How each run picks between the loaded GGUF and your remote providers. The Session " +
+                "panel overrides privacy per conversation; this is the app-wide default.",
+        )
+        SectionLabel("Routing mode")
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            RoutingMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = mode == state.routingMode,
+                    onClick = { onSetRoutingMode(mode) },
+                    label = { Text(mode.label) },
+                )
+            }
+        }
+        Text(
+            when (state.routingMode) {
+                RoutingMode.AUTO -> "Weighs quality, speed, and battery across everything eligible and takes the best."
+                RoutingMode.LOCAL_ONLY -> "Only on-device models are considered, even if a remote provider is configured."
+                RoutingMode.REMOTE_ONLY -> "Only remote providers are considered, even if a GGUF is loaded."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        SectionLabel("Default conversation privacy")
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            PrivacyClass.entries.forEach { privacyClass ->
+                FilterChip(
+                    selected = privacyClass == state.defaultPrivacyClass,
+                    onClick = { onSetDefaultPrivacyClass(privacyClass) },
+                    label = { Text(privacyClass.label) },
+                )
+            }
+        }
+        Text(
+            "Applies to conversations you start from now on, and to scheduled tasks. Existing " +
+                "conversations keep the class they had.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2016,6 +2462,22 @@ private fun SettingsScreen(
                 )
                 ReadinessRow("Durable conversation memory", "Deferred")
                 ReadinessRow("Skills and automation", "Deferred")
+            }
+        }
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        SectionHeader("Recent runs")
+        GlassSurface(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (state.recentRuns.isEmpty()) {
+                    Text(
+                        "No runs recorded yet. Every agent run — chat turns and scheduled tasks — is journaled here with what it did and how much it cost.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                state.recentRuns.forEach { run ->
+                    RunJournalRow(run)
+                }
             }
         }
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -2392,7 +2854,7 @@ private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(endpoint.displayName, fontWeight = FontWeight.SemiBold)
-                Text(endpoint.modelName)
+                Text("${endpoint.modelName} · ${endpoint.apiKind.name.replace("_", " ")}")
                 Text(
                     "${endpoint.baseUrl} · ${formatTokens(endpoint.contextWindowTokens)} context",
                     style = MaterialTheme.typography.bodySmall,
@@ -2403,6 +2865,124 @@ private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
         }
     }
 }
+
+@Composable
+private fun McpServerCard(ui: McpServerUi, onRemove: (String) -> Unit) {
+    GlassSurface(Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(ui.server.displayName, fontWeight = FontWeight.SemiBold)
+                Text(
+                    ui.server.baseUrl,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (ui.error != null) {
+                    Text(
+                        ui.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    Text(
+                        "${ui.toolCount} tool" + if (ui.toolCount == 1) "" else "s",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            TextButton(onClick = { onRemove(ui.server.id) }) { Text("Remove") }
+        }
+    }
+}
+
+@Composable
+private fun SkillCard(
+    pkg: SkillPackage,
+    onActivateDraft: (String) -> Unit,
+    onRollback: (String) -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    GlassSurface(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(pkg.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                pkg.activeVersion?.let { version ->
+                    Text(
+                        "active v$version",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            pkg.versions.firstOrNull { it.version == pkg.activeVersion }?.let { active ->
+                Text(active.description, style = MaterialTheme.typography.bodySmall)
+            }
+            pkg.draftVersion?.let { draft ->
+                Text(
+                    "Draft v$draft staged, not active yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Row {
+                if (pkg.draftVersion != null) {
+                    TextButton(onClick = { onActivateDraft(pkg.id) }) { Text("Activate draft") }
+                }
+                TextButton(onClick = { onRollback(pkg.id) }) { Text("Roll back") }
+                TextButton(onClick = { onRemove(pkg.id) }) { Text("Remove") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutomationCard(
+    automation: Automation,
+    onSetEnabled: (String, Boolean) -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    GlassSurface(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(automation.name, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        automation.cron,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = automation.enabled,
+                    onCheckedChange = { onSetEnabled(automation.id, it) },
+                )
+            }
+            Text(
+                automation.prompt.take(140),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            val schedule = listOfNotNull(
+                automation.lastRunAtEpochMillis?.let { "last: ${formatWhen(it)}" },
+                automation.nextRunAtEpochMillis?.let { "next: ${formatWhen(it)}" },
+            ).joinToString(" · ")
+            Text(
+                schedule.ifBlank { if (automation.enabled) "next: never (the schedule cannot fire)" else "paused" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row {
+                TextButton(onClick = { onRemove(automation.id) }) { Text("Remove") }
+            }
+        }
+    }
+}
+
+private fun formatWhen(epochMillis: Long): String =
+    java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+        .format(java.util.Date(epochMillis))
 
 @Composable
 private fun InfoCard(title: String, detail: String) {
@@ -2429,7 +3009,7 @@ private fun ErrorCard(error: String) {
 }
 
 @Composable
-private fun SectionHeader(title: String, subtitle: String = "", modifier: Modifier = Modifier) {
+internal fun SectionHeader(title: String, subtitle: String = "", modifier: Modifier = Modifier) {
     Column(modifier) {
         Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         // Optional: a caption under every heading is read once and then becomes noise.

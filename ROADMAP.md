@@ -394,7 +394,7 @@ The alternative remains accepting bare calls as a fallback parse, which trades c
 compatibility — a model echoing tool output containing a call-shaped string would then trigger one —
 and should be a decision taken deliberately rather than by default.
 
-## Milestone 11 — Android tool surface (not started)
+## Milestone 11 — Android tool surface (complete)
 
 The tools worth having on a phone are the platform's own, not a filesystem.
 
@@ -403,7 +403,19 @@ The tools worth having on a phone are the platform's own, not a filesystem.
 - Calendar, contacts, and notifications behind runtime permissions.
 - Alarms and scheduling, which is what makes unattended work possible at all.
 
-## Milestone 12 — Termux integration (not started)
+Result: complete. The tool surface grew to fifteen handlers: `device_status`, `scratch_note`,
+`web_search`, `web_fetch`, `files_list`, `file_read`, `clipboard_read`, `clipboard_set`,
+`notify`, `schedule_notification` (with a broadcast receiver that turns the alarm into the
+notification it was asked for), `open_uri`, `contacts_search`, `calendar_events`,
+`termux_exec` (Milestone 12), and `memory_search` (Milestone 14). The runtime-permission seam
+works end to end: a tool declares the Android permissions it needs, an approved call asks for a
+missing one through the system dialog via the permission broker, and the answer resolves the
+broker so the tool either runs or returns `permission_denied`. Calendar and contacts sit behind
+`READ_CALENDAR`/`READ_CONTACTS`, and the reminder tool falls back from exact to inexact alarms
+when the special app-op is not granted. Notifications and alarms added the `POST_NOTIFICATIONS`
+and `SCHEDULE_EXACT_ALARM` declarations to the manifest.
+
+## Milestone 12 — Termux integration (complete)
 
 Gives the agent a real toolchain — compilers, package managers, git — without Bram shipping a
 userland or fighting the execution restriction, because the restriction stays Termux's problem.
@@ -418,10 +430,16 @@ userland or fighting the execution restriction, because the restriction stays Te
   `~/.termux/termux.properties`, or when the `com.termux.permission.RUN_COMMAND` permission is
   refused. All three are normal, and none should look like a crash.
 
-This is the widest capability Bram will have: arbitrary command execution as the user. It lands
-after Milestone 9 and not before.
+Result: complete. `termux_exec` sends through the `RUN_COMMAND` intent, receives the result in a
+per-command result directory (each call gets its own subdirectory so concurrent commands do not
+collide), and reports stdout, stderr, the exit code, and the truncation state — the original
+stream lengths plus a `truncated` flag, so a result cut to the 100 KB ceiling is distinguishable
+from a complete one. The three ordinary failure modes are explicit tool results, not crashes:
+Termux not installed, `allow-external-apps` not set, and `RUN_COMMAND` permission refused each
+return a `permission_denied`-shaped error the model can read. Package visibility for `com.termux`
+is declared in the manifest.
 
-## Milestone 13 — sessions and the task queue (not started)
+## Milestone 13 — sessions and the task queue (complete)
 
 - Named sessions that outlive a turn, with scrollback the agent can page through rather than
   re-read whole.
@@ -429,17 +447,52 @@ after Milestone 9 and not before.
   and is the foundation for this, not the finished thing.
 - Per-task UI: what is running, what it has done, and how to stop it.
 
-## Milestone 14 — context compaction and memory (not started)
+Result: complete. A task is a named prompt that runs in its own conversation — the named session
+its reply lands in and that can be reopened from the library. The queue (`AgentTaskRunner`) runs
+one task at a time on the application scope, persists every state change to a single JSON file,
+and wakes the app for a scheduled task through an alarm receiver; a task whose time comes while
+no model is loaded is deferred rather than failed, and starts as soon as one loads. The Tasks
+panel (drawer > Tasks) shows the queue with per-task state, schedule, activity log, result or
+error, and Cancel/Run again/Delete; a finished task posts a result notification when the app is
+backgrounded, and a deferred task posts that it is waiting for a model. Tasks run under AUTO
+permission mode, so remembered allowances still apply and side-effecting calls without one are
+refused after the approval timeout — an unattended run ends in a recorded refusal rather than a
+hang. The scrollback-paging half of the first bullet is subsumed by Milestone 14's memory
+retrieval: the agent now recalls what fell out of a long conversation as a summary instead of
+paging through raw scrollback.
+
+## Milestone 14 — context compaction and memory (complete)
 
 - Summarise what falls out of the context window instead of dropping it. The budgeter currently
   records what it omitted but does nothing with it.
 - Room-backed run journal, memory provenance, and FTS retrieval.
 - Optional embeddings and a vector index, selected per device.
 
-Depends on Milestone 7: compaction costs a model call, and on a phone that is the same
-prompt-reprocessing cost that KV reuse exists to remove.
+Result: complete (embeddings deferred, see below). When `ContextWindowManager.plan` omits
+messages, the orchestrator now runs one bounded summarization generation — head and tail of the
+omitted stretch, 384 output tokens, greedy — and writes the result as a `WORKING_SUMMARY` memory
+record carrying the message ids it replaced (the provenance), then re-plans so the model sees the
+summary in the same turn. A failed compaction never fails the run; it simply skips the summary.
 
-## Milestone 15 — remote MCP (not started)
+Memory and the run journal moved out of RAM into a SQLite database with an FTS4 index, in
+`platform:android`. Room was deliberately set aside: the schema is what Room would generate, but
+pulling Room and KSP into the build for two tables adds a compiler-plugin dependency for nothing
+needed yet. `PersistentMemoryStore` keeps `memory_records` (kind, text, importance, source, the
+message ids a record came from) in sync with the FTS index through triggers, and serves both the
+per-conversation retrieval the orchestrator already used and a new cross-conversation
+`searchAll`. `SqliteRunJournal` records every run — chat turns and tasks alike — with its tool
+turns, token totals, and how it ended; the Settings diagnostics card lists the most recent runs.
+The agent gained a `memory_search` tool, read-only and permission-free, so a task can recall what
+earlier conversations decided. Two JVM tests cover the happy path (omission → summary in memory
+and in the next prompt, journal entry with token totals) and the failure path (a dead summarizer
+does not end the run).
+
+Deferred: on-device embeddings and a vector index. An embedding model is another multi-hundred
+megabyte download that must be validated like any other model, the FTS retrieval already covers
+keyword recall, and `searchAll` is the seam the vector index would replace — no code above it
+needs to change when one lands.
+
+## Milestone 15 — remote MCP (complete)
 
 - Streamable HTTP transport only, with `Authorization` headers and server identity pinned per
   configured server.
@@ -448,18 +501,130 @@ prompt-reprocessing cost that KV reuse exists to remove.
 - Tool descriptions from a server are untrusted input, and are subject to Milestone 9 like any
   other tool.
 
-## Milestone 16 — skills and automations (not started)
+Result: complete. A configured MCP server (`McpServer` in core:domain) is an HTTP(S) endpoint
+speaking the streamable-HTTP transport with protocol version 2025-03-26; the Settings panel adds
+one with a name, URL, optional bearer token, and an explicit opt-in for plain HTTP. The client
+(`McpClient` in the app module, plain `HttpURLConnection`, no framework) does the handshake —
+`initialize`, then the `initialized` notification, capturing the `Mcp-Session-Id` — lists tools,
+and calls them. The identity is pinned: requests only ever go to the configured origin, redirects
+to another host are refused rather than followed, and the Authorization header therefore never
+leaks to a third party; responses are capped in size and accepted as JSON or SSE. A tool call
+runs against a fresh session per invocation, so a killed process can never half-replay a stale
+one.
+
+The transport limitation is deliberate and documented at the model: stdio servers spawn a child
+process, which the Android platform cannot let an app do, so they could never run here even if
+they were wired up. What is on the wire is still a tool surface on a server the user chose, so
+server-provided names, descriptions, and schemas are parsed defensively (hostile tool names are
+dropped, descriptions and schemas capped) and each listed tool becomes an ordinary
+`McpToolHandler` that always reaches the Milestone 9 approval gate, with the arguments it was
+called about shown for approval — nothing is approved by trusting the server. Built-in tools win
+name collisions. `McpServerStore` (platform:android) persists servers with the token in the
+Android Keystore like endpoint API keys; `MutableToolRegistry` (core:agent) swaps a server's
+tools in on refresh, out on failure or removal, with the per-server card showing the tool count
+or why the last refresh failed. Nine JVM tests cover the handshake and session-id propagation,
+bearer auth, SSE responses, server-side error marking, JSON-RPC and HTTP failures, refused
+cross-host redirects, and rejected arguments.
+
+## Milestone 16 — skills and automations (complete)
 
 - Versioned skill packages with validation, drafts, activation, and rollback.
 - Automations built on the scheduling from Milestone 10 and the queue from Milestone 12.
 
-## Milestone 17 — curated runtimes and routing (not started)
+Skills result: complete. A skill is a versioned, user-authored procedure the agent follows when
+its description matches the task: a SKILL.md-style document with `name`, `version`, and
+`description` in a front-matter block and the instructions below, imported through the Settings
+panel from the file picker. The whole state machine is pure and in core:domain — `SkillDocument`
+parses and validates (name, three-part version, description, non-empty instructions, size caps;
+a bad document is rejected with the reason), `SkillLibrary` stages it, and `PersistentSkillStore`
+(platform:android) keeps one small JSON file with atomic writes, the version history capped at
+five (a pile of drafts can never evict the active version). The lifecycle is exactly what the
+milestone asks: a new skill imports active, a new version of a known skill lands as a draft,
+activation promotes the draft, and rollback restores the version that was active before, keeping
+both in the package's history. Drafts are never rendered into the prompt. Active skills are
+appended to every run's profile instructions — chat and tasks alike, read fresh at run start —
+under an ACTIVE SKILLS section that states plainly that a skill is authored text, not code, and
+is treated like any other untrusted input: it can never do anything itself or override what the
+user directly asks. Fourteen JVM tests cover parsing, the draft/activate/rollback lifecycle, the
+history cap, and the prompt rendering.
+
+Automations result: complete. An automation is a named cron schedule (five fields: minute hour
+day-of-month month day-of-week) whose prompt is enqueued as a task when the time comes — so the
+run goes through the task queue like any other task, is journaled, defers until a model loads
+when none is loaded, and lands in a conversation that can be reopened from the library. `Cron`
+(core:domain) parses the shapes a phone schedule needs — `*`, single values, ranges, steps, and
+comma lists; day-of-month and day-of-week follow standard semantics (both restricted = either
+matches) — and computes the next fire strictly after a given time. `PersistentAutomationStore`
+(platform:android) keeps `automations.json` alongside tasks and skills. `AutomationRunner` (app)
+gives every enabled automation a one-shot `setAndAllowWhileIdle` alarm for its next fire and
+chains the next one when it fires; the existing `TaskAlarmReceiver` was extended with an
+automation-id extra, so there is still exactly one manifest receiver for all of it. Alarms are
+best-effort like scheduled tasks — they do not survive a reboot, and a fire that passed while
+the phone was off happens at the next app start, because startup reschedules everything and an
+alarm set for the past fires immediately. The Settings panel lists each automation with its
+schedule, enabled switch, last and next fire times, and the add form validates the expression
+before saving. Fourteen JVM tests cover the cron parser and the next-fire math, including
+weekdays-only, quarter-hour steps, Friday-the-13th semantics, February 31st never firing, and
+the strict-after guarantee that prevents a double run.
+
+## Milestone 17 — curated runtimes and routing (routing, privacy, fallback, and the Responses adapter complete)
 
 - LiteRT-LM packages and device-specific compiled caches.
-- OpenAI Responses adapter where supported.
-- Capability/quality/latency/battery-aware routing.
-- Per-conversation privacy and remote-fallback policies.
+- ~~OpenAI Responses adapter where supported~~ (complete, below).
+- ~~Capability/quality/latency/battery-aware routing~~ (complete, below).
+- ~~Per-conversation privacy and remote-fallback policies~~ (complete, below).
 - Optional speculative decoding and task-specific worker models.
+
+Responses adapter result: complete. `OpenAiCompatibleRuntime` now speaks both wire schemas from one
+implementation, chosen per endpoint by the API kind set in the provider form (Chat Completions for
+the broadest compatibility — Ollama, LM Studio, vLLM, llama.cpp server — Responses API for hosts
+that expose `/responses`). The Responses path is non-streaming 2025-03-26: system messages fold
+into the response-level `instructions`, the conversation becomes `input` items (`message` for
+user/assistant turns, `function_call` items after an assistant message that called tools,
+`function_call_output` for the results), and tool definitions go in the same `tools`/`tool_choice`
+shape the Chat path uses. The parser is tolerant on purpose, per the testing matrix: content
+accepted as parts or a plain string, unknown output item types skipped, usage optional, and a
+`failed` status or non-2xx HTTP turns the server's `error.message` into a recoverable failure the
+routing fallback can act on. RESPONSES endpoints are no longer marked unavailable: they route,
+load, and fall back exactly like Chat endpoints, and the status notification says which kind is in
+use. Seven contract tests run against a stub HTTP server: the Chat wire shape unchanged, the
+Responses request shape (instructions/input items/tools/auth), output text parts plus function
+calls plus usage, missing and extra field tolerance, failed status, HTTP error mapping, and
+availability for both kinds.
+
+Routing result: complete. A `RuleBasedModelRouter` already existed in core:agent with the
+`RoutingCandidate`/`RoutingRequest`/`RoutingDecision` vocabulary, but nothing called it — the app
+picked one runtime per session and every turn ran on it. Now every turn is routed: each chat send
+and each queued task builds a candidate for every usable runtime (the loaded GGUF, and each
+configured remote provider) and asks the router which to use. The estimates that feed the score
+are honest about what they know (`RoutingEstimates`): quality tracks model size, latency tracks
+size and the active accelerator, battery tracks the accelerator, and a remote provider is assumed
+frontier-class with a fixed network cost — relative order is what matters, and the milestone's
+later curation can replace them with measured values. Candidates carry real state too: a local
+model that is not resident is marked unavailable, and a RESPONSES-only endpoint cannot run yet and
+is marked so. The routing mode is a global setting (Auto, Local only, Remote only) with hard-gate
+semantics; Auto weighs quality, latency, and battery together. `RoutingDecision` now carries the
+rest of the eligible candidates in score order as fallbacks, and the run loop uses them: a chat
+turn or task that fails on its first pick — a dead remote, a crashed local — retries down the
+fallback order instead of ending, with the status line saying which runtime took over. A failed
+local attempt marks the model suspect even when the fallback succeeds.
+
+Privacy result: complete. Each conversation now has a privacy class — Standard, Prefer local, or
+Local only — persisted on the conversation file like the tool-permission mode, chosen in the
+Session panel, and read fresh on every open. Local only is a hard gate: remote candidates are
+rejected with "Content may not leave the device" whatever the routing mode says, and a local-only
+conversation's failure never falls back to a remote provider. Prefer local raises the router's
+local bias instead of banning remote, and is the class for "this is sensitive, but a trusted
+remote may help". The app-wide defaults — routing mode and the privacy class new conversations
+start with — live in `RoutingSettingsStore` under a Routing section in Settings; scheduled tasks
+run under the default privacy class, which is the honest answer for a task's yet-to-exist
+conversation. One consequence of routing: "selecting" a model still loads it, but it no longer
+forces every turn onto it — a loaded GGUF competes on merit, which is the point.
+
+Tests: six router tests (privacy gate, remote-only gate, prefer-quality, fallback ordering,
+fallbacks never crossing a hard gate, local bias outranking a fast remote) and five estimate
+tests (loaded-only availability, size ordering, accelerator effect on latency and battery,
+RESPONSES endpoints unavailable, remote quality/battery assumptions).
 
 ## Milestone 18 — a live status notification for the loaded model (complete)
 
