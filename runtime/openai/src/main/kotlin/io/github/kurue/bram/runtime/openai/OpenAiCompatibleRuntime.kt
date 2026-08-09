@@ -30,14 +30,6 @@ class OpenAiCompatibleRuntime(
     private val activeConnections = ConcurrentHashMap<String, HttpURLConnection>()
 
     override suspend fun availability(): RuntimeAvailability {
-        if (endpoint.apiKind != RemoteApiKind.CHAT_COMPLETIONS) {
-            return RuntimeAvailability(
-                available = false,
-                summary = "Responses adapter not implemented",
-                detail = "This scaffold currently supports OpenAI-compatible Chat Completions endpoints.",
-            )
-        }
-
         val uri = runCatching { URI(endpoint.baseUrl) }.getOrNull()
             ?: return RuntimeAvailability(false, "Invalid endpoint URL")
         val scheme = uri.scheme?.lowercase()
@@ -51,7 +43,11 @@ class OpenAiCompatibleRuntime(
                 detail = "Edit the endpoint and explicitly allow HTTP if this is a trusted local server.",
             )
         }
-        return RuntimeAvailability(true, "Configured", "Connectivity is checked on the first request")
+        val kind = when (endpoint.apiKind) {
+            RemoteApiKind.CHAT_COMPLETIONS -> "Chat Completions"
+            RemoteApiKind.RESPONSES -> "Responses API"
+        }
+        return RuntimeAvailability(true, "Configured ($kind)", "Connectivity is checked on the first request")
     }
 
     override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
@@ -79,7 +75,7 @@ class OpenAiCompatibleRuntime(
 
     private suspend fun execute(request: GenerationRequest): ParsedResponse = withContext(Dispatchers.IO) {
         val apiKey = credentialResolver.resolve(endpoint.id, endpoint.credentialAlias).orEmpty()
-        val connection = (URL(chatCompletionsUrl()).openConnection() as HttpURLConnection).apply {
+        val connection = (URL(targetUrl()).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15_000
             readTimeout = 0 // Local servers and storage-assisted models can legitimately take minutes.
@@ -92,7 +88,7 @@ class OpenAiCompatibleRuntime(
         activeConnections[request.requestId] = connection
 
         try {
-            val payload = request.toChatJson().toString().toByteArray(Charsets.UTF_8)
+            val payload = request.toApiJson().toString().toByteArray(Charsets.UTF_8)
             connection.setFixedLengthStreamingMode(payload.size)
             connection.outputStream.use { it.write(payload) }
 
@@ -106,17 +102,37 @@ class OpenAiCompatibleRuntime(
                     ?: body.take(4_096).ifBlank { "HTTP $status" }
                 throw RemoteEndpointException(status, message)
             }
-            parseResponse(JSONObject(body))
+            request.parseApiResponse(JSONObject(body))
         } finally {
             activeConnections.remove(request.requestId)
             connection.disconnect()
         }
     }
 
-    private fun chatCompletionsUrl(): String {
+    private fun targetUrl(): String {
         val base = endpoint.baseUrl.trimEnd('/')
-        return if (base.endsWith("/chat/completions")) base else "$base/chat/completions"
+        return when (endpoint.apiKind) {
+            RemoteApiKind.CHAT_COMPLETIONS ->
+                if (base.endsWith("/chat/completions")) base else "$base/chat/completions"
+            RemoteApiKind.RESPONSES ->
+                if (base.endsWith("/responses")) base else "$base/responses"
+        }
     }
+
+    /**
+     * Each API kind gets its own wire schema, but the semantics the orchestrator needs are the
+     * same: the conversation in, text and tool calls out.
+     */
+    private fun GenerationRequest.toApiJson(): JSONObject = when (endpoint.apiKind) {
+        RemoteApiKind.CHAT_COMPLETIONS -> toChatJson()
+        RemoteApiKind.RESPONSES -> toResponsesJson()
+    }
+
+    private fun GenerationRequest.parseApiResponse(root: JSONObject): ParsedResponse =
+        when (endpoint.apiKind) {
+            RemoteApiKind.CHAT_COMPLETIONS -> parseChatResponse(root)
+            RemoteApiKind.RESPONSES -> parseResponsesResponse(root)
+        }
 
     private fun GenerationRequest.toChatJson(): JSONObject = JSONObject()
         .put("model", endpoint.modelName)
@@ -156,6 +172,93 @@ class OpenAiCompatibleRuntime(
             }
         }
 
+    /**
+     * The Responses API folds system messages into the response-level `instructions` and carries
+     * the conversation as `input` items: messages for user/assistant turns, `function_call` items
+     * for assistant tool calls, and `function_call_output` items for the tool results.
+     */
+    private fun GenerationRequest.toResponsesJson(): JSONObject {
+        val system = messages
+            .filter { it.role == MessageRole.SYSTEM }
+            .joinToString("\n\n") { it.content }
+        val root = JSONObject()
+            .put("model", endpoint.modelName)
+            .put(
+                "input",
+                JSONArray().also { array ->
+                    messages.forEach { message ->
+                        message.toResponsesItems().forEach(array::put)
+                    }
+                },
+            )
+            .put("max_output_tokens", maxOutputTokens)
+            .put("temperature", sampler.temperature)
+            .put("top_p", sampler.topP)
+            .put("stream", false)
+        if (system.isNotBlank()) root.put("instructions", system)
+        if (tools.isNotEmpty()) {
+            root.put(
+                "tools",
+                JSONArray().also { array ->
+                    tools.forEach { tool ->
+                        val schema = runCatching { JSONObject(tool.inputSchemaJson) }
+                            .getOrElse { JSONObject().put("type", "object") }
+                        array.put(
+                            JSONObject()
+                                .put("type", "function")
+                                .put("name", tool.name)
+                                .put("description", tool.description)
+                                .put("parameters", schema),
+                        )
+                    }
+                },
+            )
+            root.put("tool_choice", "auto")
+        }
+        return root
+    }
+
+    private fun ConversationMessage.toResponsesItems(): List<JSONObject> = when (role) {
+        MessageRole.SYSTEM -> emptyList() // folded into instructions above
+        MessageRole.TOOL -> listOf(
+            JSONObject()
+                .put("type", "function_call_output")
+                .put("call_id", requireNotNull(toolCallId) { "Tool messages require toolCallId" })
+                .put("output", content),
+        )
+        else -> buildList {
+            add(
+                JSONObject()
+                    .put("type", "message")
+                    .put("role", role.name.lowercase())
+                    .put(
+                        "content",
+                        JSONArray().also { parts ->
+                            if (content.isNotBlank()) {
+                                parts.put(
+                                    JSONObject()
+                                        .put(
+                                            "type",
+                                            if (role == MessageRole.ASSISTANT) "output_text" else "input_text",
+                                        )
+                                        .put("text", content),
+                                )
+                            }
+                        },
+                    ),
+            )
+            toolCalls.forEach { call ->
+                add(
+                    JSONObject()
+                        .put("type", "function_call")
+                        .put("call_id", call.id)
+                        .put("name", call.name)
+                        .put("arguments", call.argumentsJson),
+                )
+            }
+        }
+    }
+
     private fun ConversationMessage.toChatJson(): JSONObject {
         val root = JSONObject().put("role", role.name.lowercase())
         when (role) {
@@ -190,7 +293,7 @@ class OpenAiCompatibleRuntime(
         return root
     }
 
-    private fun parseResponse(root: JSONObject): ParsedResponse {
+    private fun parseChatResponse(root: JSONObject): ParsedResponse {
         val choice = root.optJSONArray("choices")?.optJSONObject(0)
             ?: throw RemoteEndpointException(200, "Response did not contain choices[0]")
         val message = choice.optJSONObject("message")
@@ -224,6 +327,66 @@ class OpenAiCompatibleRuntime(
             toolCalls = calls,
             usage = usage,
             finishReason = choice.optString("finish_reason", null),
+        )
+    }
+
+    /**
+     * Parses a non-streaming Responses API reply. Tolerant by design: content may be parts or a
+     * plain string, unknown output types are skipped, and a missing usage stays null — the server
+     * may implement the 2025-03-26 schema loosely.
+     */
+    private fun parseResponsesResponse(root: JSONObject): ParsedResponse {
+        val status = root.optString("status", "completed")
+        if (status == "failed") {
+            val message = root.optJSONObject("error")?.optString("message")
+                ?.takeIf(String::isNotBlank)
+                ?: "The response ended with status failed"
+            throw RemoteEndpointException(200, message)
+        }
+
+        val output = root.optJSONArray("output") ?: JSONArray()
+        val text = buildString {
+            for (index in 0 until output.length()) {
+                val item = output.optJSONObject(index) ?: continue
+                if (item.optString("type") != "message") continue
+                when (val content = item.opt("content")) {
+                    is String -> append(content)
+                    is JSONArray -> {
+                        for (partIndex in 0 until content.length()) {
+                            val part = content.optJSONObject(partIndex) ?: continue
+                            if (part.optString("type") == "output_text") append(part.optString("text"))
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+        }
+
+        val calls = buildList {
+            for (index in 0 until output.length()) {
+                val item = output.optJSONObject(index) ?: continue
+                if (item.optString("type") != "function_call") continue
+                add(
+                    ToolCall(
+                        id = item.optString("call_id", "call-$index"),
+                        name = item.optString("name").takeIf(String::isNotBlank) ?: "unknown",
+                        argumentsJson = item.optString("arguments", "{}"),
+                    ),
+                )
+            }
+        }
+
+        val usage = root.optJSONObject("usage")?.let {
+            TokenUsage(
+                inputTokens = it.optionalInt("input_tokens"),
+                outputTokens = it.optionalInt("output_tokens"),
+            )
+        }
+        return ParsedResponse(
+            text = text.toString(),
+            toolCalls = calls,
+            usage = usage,
+            finishReason = status,
         )
     }
 
