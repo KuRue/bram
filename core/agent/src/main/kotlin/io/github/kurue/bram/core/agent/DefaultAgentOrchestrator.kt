@@ -6,11 +6,13 @@ import io.github.kurue.bram.core.domain.AgentRunRequest
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.GenerationEvent
 import io.github.kurue.bram.core.domain.GenerationRequest
+import io.github.kurue.bram.core.domain.MemoryExtractor
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.MemoryStore
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.ModelRuntime
+import io.github.kurue.bram.core.domain.NoopMemoryExtractor
 import io.github.kurue.bram.core.domain.NoopRunJournal
 import io.github.kurue.bram.core.domain.RunJournal
 import io.github.kurue.bram.core.domain.RunJournalEntry
@@ -21,6 +23,7 @@ import io.github.kurue.bram.core.domain.ToolCall
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import io.github.kurue.bram.core.domain.ToolRegistry
+import io.github.kurue.bram.core.domain.toRecord
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
@@ -32,6 +35,7 @@ class DefaultAgentOrchestrator(
     private val toolRegistry: ToolRegistry,
     private val approvalGate: ToolApprovalGate,
     private val journal: RunJournal = NoopRunJournal,
+    private val memoryExtractor: MemoryExtractor = NoopMemoryExtractor,
 ) : AgentOrchestrator {
 
     override fun run(request: AgentRunRequest, runtime: ModelRuntime): Flow<AgentEvent> = flow {
@@ -172,6 +176,24 @@ class DefaultAgentOrchestrator(
             )
 
             if (toolCalls.isEmpty()) {
+                // The reply has fully streamed above. Before declaring the turn done, pull durable
+                // memories out of this exchange so they are retrievable next turn. Best-effort at
+                // every layer: a failed extraction or a failed write is dropped, never surfaced —
+                // recall is an enhancement, not a step the run depends on.
+                request.messages.lastOrNull { it.role == MessageRole.USER }?.let { userMessage ->
+                    runCatching {
+                        memoryExtractor.extract(
+                            conversationId = request.conversationId,
+                            userMessage = userMessage,
+                            assistantReply = responseText.toString(),
+                            runtime = runtime,
+                        )
+                    }.getOrDefault(emptyList()).forEach { extracted ->
+                        runCatching {
+                            memoryStore.put(request.conversationId, extracted.toRecord(userMessage.id))
+                        }
+                    }
+                }
                 emit(AgentEvent.Completed(assistantMessage))
                 upsertJournal(RunStatus.SUCCEEDED)
                 return@flow
