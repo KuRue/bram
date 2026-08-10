@@ -5,10 +5,12 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import io.github.kurue.bram.core.domain.ConversationId
+import io.github.kurue.bram.core.domain.Embedder
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.MemoryStore
 import io.github.kurue.bram.core.domain.MessageId
+import io.github.kurue.bram.core.domain.VectorSearch
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -25,7 +27,10 @@ import kotlinx.coroutines.withContext
  * documents for external-content FTS; a query runs against the index and joins the row back for
  * its conversation and provenance columns.
  */
-class PersistentMemoryStore(context: Context) : MemoryStore {
+class PersistentMemoryStore(
+    context: Context,
+    private val embedder: Embedder? = null,
+) : MemoryStore {
     private val database = MemoryDatabase(context)
 
     override suspend fun workingSummary(conversationId: ConversationId): MemoryRecord? =
@@ -48,30 +53,105 @@ class PersistentMemoryStore(context: Context) : MemoryStore {
         query: String,
         limit: Int,
     ): List<MemoryRecord> = withContext(Dispatchers.IO) {
-        val fts = fuzzyMatchQuery(query)
-        // A query with no terms longer than two characters (a common short message like "hi" or
-        // "ok") collapses to an empty MATCH expression, which SQLite rejects. Short-circuit
-        // instead of running it: a too-short query simply recalls nothing.
-        if (fts.isBlank()) return@withContext emptyList()
-        database.readableDatabase.rawQuery(
+        val ftsHits = ftsRanked(
             SEARCH_BY_CONVERSATION_SQL,
-            arrayOf(fts, conversationId.value, limit.toString()),
-        ).use { cursor ->
-            cursor.rows()
-        }
+            arrayOf(fuzzyMatchQuery(query), conversationId.value, (limit * 2).toString()),
+        )
+        recall(query, ftsHits, limit) { loadScopedVectors(conversationId.value) }
     }
 
     override suspend fun searchAll(query: String, limit: Int): List<MemoryRecord> =
         withContext(Dispatchers.IO) {
-            val fts = fuzzyMatchQuery(query)
-            if (fts.isBlank()) return@withContext emptyList()
-            database.readableDatabase.rawQuery(
+            val ftsHits = ftsRanked(
                 SEARCH_ALL_SQL,
-                arrayOf(fts, limit.toString()),
-            ).use { cursor ->
-                cursor.rows()
-            }
+                arrayOf(fuzzyMatchQuery(query), (limit * 2).toString()),
+            )
+            recall(query, ftsHits, limit) { loadScopedVectors(null) }
         }
+
+    /**
+     * Runs the keyword ranking, short-circuiting to nothing when the query has no usable terms: a
+     * too-short message collapses to an empty FTS MATCH expression that SQLite rejects.
+     */
+    private fun ftsRanked(sql: String, args: Array<String>): List<MemoryRecord> {
+        if (args.firstOrNull().isNullOrBlank()) return emptyList()
+        return database.readableDatabase.rawQuery(sql, args).use { cursor -> cursor.rows() }
+    }
+
+    /**
+     * Fuses the keyword ranking with an embedding ranking when an embedder is configured, falling
+     * back to keyword recall alone otherwise. The embedding pass is best-effort throughout: a
+     * failed query embed keeps the run going on keywords rather than taking the turn down.
+     */
+    private suspend fun recall(
+        query: String,
+        ftsHits: List<MemoryRecord>,
+        limit: Int,
+        candidates: () -> List<Pair<MemoryRecord, FloatArray>>,
+    ): List<MemoryRecord> {
+        val active = embedder ?: return ftsHits.take(limit)
+        val queryVector = runCatching { active.embed(query) }.getOrNull()
+            ?: return ftsHits.take(limit)
+        val vectorHits = candidates()
+            .sortedByDescending { (_, vector) -> VectorSearch.cosine(queryVector, vector) }
+            .map { (record, _) -> record }
+        return VectorSearch.fuseRanked(listOf(ftsHits, vectorHits)).take(limit)
+    }
+
+    /** Loads every memory in scope that has a stored embedding, for the cosine pass. */
+    private fun loadScopedVectors(conversationId: String?): List<Pair<MemoryRecord, FloatArray>> {
+        val sql = if (conversationId != null) {
+            "SELECT r.id, r.conversation_id, r.kind, r.text, r.importance, r.created_at, " +
+                "r.source, r.source_message_ids, v.embedding FROM memory_records r " +
+                "JOIN memory_vectors v ON r.id = v.memory_id " +
+                "WHERE r.conversation_id = ? AND r.kind != ?"
+        } else {
+            "SELECT r.id, r.conversation_id, r.kind, r.text, r.importance, r.created_at, " +
+                "r.source, r.source_message_ids, v.embedding FROM memory_records r " +
+                "JOIN memory_vectors v ON r.id = v.memory_id WHERE r.kind != ?"
+        }
+        val args = if (conversationId != null) {
+            arrayOf(conversationId, MemoryKind.WORKING_SUMMARY.name)
+        } else {
+            arrayOf(MemoryKind.WORKING_SUMMARY.name)
+        }
+        return database.readableDatabase.rawQuery(sql, args).use { cursor ->
+            val out = mutableListOf<Pair<MemoryRecord, FloatArray>>()
+            while (cursor.moveToNext()) {
+                val record = cursor.toMemoryRecord()
+                val vector = runCatching { decodeVector(cursor.getBlob(cursor.getColumnIndexOrThrow("embedding"))) }
+                    .getOrDefault(FloatArray(0))
+                if (vector.isNotEmpty()) out += record to vector
+            }
+            out
+        }
+    }
+
+    private fun storeVector(id: String, vector: FloatArray) {
+        database.writableDatabase.insertWithOnConflict(
+            "memory_vectors",
+            null,
+            android.content.ContentValues().apply {
+                put("memory_id", id)
+                put("embedding", encodeVector(vector))
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    private fun encodeVector(vector: FloatArray): ByteArray {
+        val buffer = java.nio.ByteBuffer.allocate(vector.size * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        buffer.asFloatBuffer().put(vector)
+        return buffer.array()
+    }
+
+    private fun decodeVector(blob: ByteArray): FloatArray {
+        if (blob.isEmpty() || blob.size % 4 != 0) return FloatArray(0)
+        val buffer = java.nio.ByteBuffer.wrap(blob).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val out = FloatArray(blob.size / 4)
+        buffer.asFloatBuffer().get(out)
+        return out
+    }
 
     override suspend fun put(conversationId: ConversationId, memory: MemoryRecord) =
         withContext(Dispatchers.IO) {
@@ -93,6 +173,15 @@ class PersistentMemoryStore(context: Context) : MemoryStore {
                 },
                 SQLiteDatabase.CONFLICT_REPLACE,
             )
+            // Working summaries are a per-conversation scratchpad excluded from recall, so spending
+            // an embedding on them is wasted work — search filters them out regardless.
+            embedder?.let { active ->
+                if (memory.kind != MemoryKind.WORKING_SUMMARY) {
+                    runCatching { active.embed(memory.text) }.getOrNull()?.let { vector ->
+                        if (vector.isNotEmpty()) runCatching { storeVector(memory.id, vector) }
+                    }
+                }
+            }
             Unit
         }
 
@@ -129,6 +218,7 @@ class PersistentMemoryStore(context: Context) : MemoryStore {
     override suspend fun remove(id: String) = withContext(Dispatchers.IO) {
         // The AFTER DELETE trigger on memory_records keeps the FTS index in sync.
         database.writableDatabase.delete("memory_records", "id = ?", arrayOf(id))
+        database.writableDatabase.delete("memory_vectors", "memory_id = ?", arrayOf(id))
         Unit
     }
 
@@ -227,12 +317,34 @@ internal class MemoryDatabase(context: Context) : SQLiteOpenHelper(context, DB_N
             )
             """.trimIndent(),
         )
+        // One embedding per memory (L2-normalized floats, little-endian). Joined to memory_records
+        // by id for the cosine pass; kept out of the FTS/content table so keyword and semantic
+        // retrieval are independent.
+        db.execSQL(
+            """
+            CREATE TABLE memory_vectors (
+                memory_id TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL
+            )
+            """.trimIndent(),
+        )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL(
+                """
+                CREATE TABLE memory_vectors (
+                    memory_id TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL
+                )
+                """.trimIndent(),
+            )
+        }
+    }
 
     private companion object {
         const val DB_NAME = "bram_memory.db"
-        const val DB_VERSION = 1
+        const val DB_VERSION = 2
     }
 }

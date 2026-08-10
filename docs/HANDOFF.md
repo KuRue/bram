@@ -51,6 +51,11 @@ build tree is a synced copy of the same working tree.
   scheduled) run fast-denies a tool that needs approval instead of holding the gate open for ten
   minutes per call. (4) `web_fetch` caps the read and refuses non-text content types, so a huge or
   binary response cannot OOM the tool.
+- **Embedding recall foundation** — the memory store now carries a vector index (`memory_vectors`,
+  DB v2) with cosine ranking, fused into the keyword (FTS) results via reciprocal-rank fusion
+  behind a pluggable `Embedder` interface (`core/domain`). No native embedder is wired yet, so
+  recall is still FTS-only end-to-end; the native llama.cpp embedding path (a second model context
+  + `llama_encode` through JNI/AIDL) drops in next without touching the store.
 
 ## What works (on main)
 
@@ -106,9 +111,12 @@ servers contribute more at runtime.
   FTS-retrieved, a Settings panel lists recent memories and lets the user forget
   wrong ones, and the highest-importance memories are auto-injected into the
   system prompt each turn (char-budgeted) so the agent has standing context
-  without calling `memory_search`. Still missing: `EPISODE` records are never
-  produced, there is no embeddings/vector index (recall is FTS only), and
-  per-conversation working summaries are separate from the cross-conversation
+  without calling `memory_search`. The recall path now has a vector index
+  (`memory_vectors`) with cosine ranking fused into the keyword results via
+  reciprocal-rank fusion behind a pluggable `Embedder` interface; no native
+  embedder is wired yet, so recall is still FTS-only until the llama.cpp
+  embedding path lands. Still missing: `EPISODE` records are never produced,
+  and per-conversation working summaries are separate from the cross-conversation
   store.
 - **Skills gaps.** The SKILL.md lifecycle is shipped (M16), and the agent can now author skill
   drafts through a `propose_skill` tool — they land with no active version (kept out of the

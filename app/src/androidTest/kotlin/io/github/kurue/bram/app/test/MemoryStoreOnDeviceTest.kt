@@ -4,14 +4,30 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.kurue.bram.app.BramApplication
 import io.github.kurue.bram.core.domain.ConversationId
+import io.github.kurue.bram.core.domain.Embedder
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
+import io.github.kurue.bram.platform.android.PersistentMemoryStore
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+
+/** Maps appearance-related text to one direction and everything else to an orthogonal one. */
+private val fakeAppearanceEmbedder = object : Embedder {
+    override suspend fun embed(text: String): FloatArray {
+        val lower = text.lowercase()
+        return if ("dark mode" in lower || "display" in lower || "appearance" in lower ||
+            "settings" in lower || "theme" in lower || "reading" in lower
+        ) {
+            floatArrayOf(1f, 0f)
+        } else {
+            floatArrayOf(0f, 1f)
+        }
+    }
+}
 
 /**
  * Exercises the real on-device SQLite memory store: that [MemoryStore.recent] returns memories
@@ -98,6 +114,33 @@ class MemoryStoreOnDeviceTest {
             assertTrue("a real term still recalls", tokyoHits.any { it.id == "verify-short-fact" })
         } finally {
             store.remove("verify-short-fact")
+        }
+    }
+
+    @Test
+    fun aSemanticQueryRecallsAMemoryWithNoSharedWords() = runBlocking {
+        val store = PersistentMemoryStore(
+            ApplicationProvider.getApplicationContext<BramApplication>(),
+            fakeAppearanceEmbedder,
+        )
+        val conversation = ConversationId("memory-semantic-verification")
+        val fact = MemoryRecord(
+            "verify-semantic-fact",
+            MemoryKind.SEMANTIC_FACT,
+            "The user prefers dark mode for reading at night",
+            importance = 0.8,
+        )
+        try {
+            store.put(conversation, fact)
+            // "appearance settings" shares no words with the stored memory, so keyword (FTS) recall
+            // misses it entirely; the embedding pass must surface it instead.
+            val hits = store.search(conversation, "appearance settings", 10)
+            assertTrue(
+                "a semantic match must be recalled even with no shared words",
+                hits.any { it.id == "verify-semantic-fact" },
+            )
+        } finally {
+            store.remove("verify-semantic-fact")
         }
     }
 }
