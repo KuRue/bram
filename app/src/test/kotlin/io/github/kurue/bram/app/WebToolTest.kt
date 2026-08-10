@@ -89,15 +89,23 @@ class WebToolTest {
         val raw = "Hello, compressed world. All kinds of text that should survive a gzip round trip."
         val baos = java.io.ByteArrayOutputStream()
         java.util.zip.GZIPOutputStream(baos).use { it.write(raw.toByteArray(Charsets.UTF_8)) }
-        val decoded = decodeBody(java.io.ByteArrayInputStream(baos.toByteArray()), "gzip")
+        val decoded = decodeBody(java.io.ByteArrayInputStream(baos.toByteArray()), "gzip", 10_000)
         assertEquals(raw, decoded)
     }
 
     @Test
     fun `decodeBody passes plain bytes through when there is no content encoding`() {
         val raw = "plain text, no compression"
-        val decoded = decodeBody(java.io.ByteArrayInputStream(raw.toByteArray(Charsets.UTF_8)), null)
+        val decoded = decodeBody(java.io.ByteArrayInputStream(raw.toByteArray(Charsets.UTF_8)), null, 10_000)
         assertEquals(raw, decoded)
+    }
+
+    @Test
+    fun `decodeBody stops at maxChars rather than buffering a huge body`() {
+        val raw = "0123456789".repeat(1_000) // 10k chars
+        val decoded = decodeBody(java.io.ByteArrayInputStream(raw.toByteArray(Charsets.UTF_8)), null, 250)
+        assertEquals(250, decoded.length)
+        assertEquals("0123456789".repeat(25), decoded)
     }
 
     @Test

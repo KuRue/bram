@@ -70,8 +70,12 @@ class DefaultAgentOrchestrator(
         }
 
         val workingMessages = request.messages.toMutableList()
-        val workingSummary = memoryStore.workingSummary(request.conversationId)
-        val memories = memoryStore.search(request.conversationId, request.memoryQuery, limit = 8)
+        // Recall is an enhancement, not a step the run depends on — exactly like extraction
+        // below. A query the store cannot handle (a too-short message that collapses to an empty
+        // FTS expression, a corrupt index, etc.) must take the turn down with it, so swallow it.
+        val workingSummary = runCatching { memoryStore.workingSummary(request.conversationId) }.getOrNull()
+        val memories = runCatching { memoryStore.search(request.conversationId, request.memoryQuery, limit = 8) }
+            .getOrDefault(emptyList())
         val allowedForRun = mutableSetOf<String>()
         var compacted = false
 

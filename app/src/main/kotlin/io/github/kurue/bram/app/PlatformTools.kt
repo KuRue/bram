@@ -20,7 +20,9 @@ import androidx.core.content.ContextCompat
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -287,9 +289,9 @@ class NotificationTool(context: Context) : ToolHandler {
  * Posts a notification at a scheduled time through AlarmManager.
  *
  * Exact timing is used when the app can schedule exact alarms; otherwise the alarm is inexact and
- * the result says so, so the model does not promise precision the platform will not deliver. Alarms
- * do not survive a reboot — the result notes that the notification is lost if the phone restarts
- * before it fires.
+ * the result says so, so the model does not promise precision the platform will not deliver. The
+ * alarm is persisted, so it survives a reboot: anything whose time passed while the phone was off
+ * fires when the phone is back on.
  */
 class ScheduleNotificationTool(context: Context) : ToolHandler {
     private val appContext = context.applicationContext
@@ -327,28 +329,20 @@ class ScheduleNotificationTool(context: Context) : ToolHandler {
         val body = arguments.optString("body").take(500)
         val triggerAt = System.currentTimeMillis() + minutes * 60_000L
         runCatching {
-            val alarm = appContext.getSystemService(AlarmManager::class.java)
-            val exact = canScheduleExact(appContext)
-            val requestCode = title.hashCode() xor body.hashCode()
-            val pending = PendingIntent.getBroadcast(
-                appContext,
-                requestCode,
-                Intent(appContext, ScheduledNotificationReceiver::class.java)
-                    .putExtra(ScheduledNotificationReceiver.EXTRA_TITLE, title)
-                    .putExtra(ScheduledNotificationReceiver.EXTRA_BODY, body),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            val entry = ScheduledNotificationStore.Entry(
+                id = UUID.randomUUID().toString(),
+                triggerAtEpochMillis = triggerAt,
+                title = title,
+                body = body,
             )
-            if (exact) {
-                alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
-            } else {
-                alarm.set(AlarmManager.RTC_WAKEUP, triggerAt, pending)
-            }
+            ScheduledNotificationStore(appContext).add(entry)
+            armScheduledNotification(appContext, entry)
+            val exact = canScheduleExact(appContext)
             JSONObject()
                 .put("scheduled", title)
                 .put("fires_at_epoch_millis", triggerAt)
                 .put("exact", exact)
                 .put("note", if (exact) "" else "Inexact timing: Android did not allow an exact alarm.")
-                .put("reboot_note", "Alarms do not survive a reboot.")
                 .toString()
         }.getOrElse { failure ->
             toolError("schedule_failed", failure.message ?: failure::class.java.simpleName)
@@ -361,13 +355,132 @@ class ScheduledNotificationReceiver : android.content.BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         val body = intent.getStringExtra(EXTRA_BODY).orEmpty()
+        val id = intent.getStringExtra(EXTRA_ID)
         if (title.isBlank()) return
         postAgentNotification(context.applicationContext, title = title, body = body)
+        // The alarm is one-shot: take the entry off the store so a later reboot does not fire it
+        // again. The write is tiny but off the main thread so onReceive returns immediately.
+        if (id != null) {
+            val pendingResult = goAsync()
+            Thread {
+                try {
+                    runBlocking { ScheduledNotificationStore(context.applicationContext).remove(id) }
+                } finally {
+                    pendingResult.finish()
+                }
+            }.start()
+        }
     }
 
     companion object {
+        const val EXTRA_ID = "id"
         const val EXTRA_TITLE = "title"
         const val EXTRA_BODY = "body"
+    }
+}
+
+/**
+ * Persists the notifications [ScheduleNotificationTool] arms so they survive a reboot. Android
+ * clears alarms on restart, so [rescheduleScheduledNotifications] (called from the boot receiver)
+ * reads these back and re-arms each one, firing anything whose time passed while the phone was off.
+ */
+class ScheduledNotificationStore(context: Context) {
+    private val file = File(context.applicationContext.filesDir, FILE)
+
+    data class Entry(
+        val id: String,
+        val triggerAtEpochMillis: Long,
+        val title: String,
+        val body: String,
+    )
+
+    suspend fun load(): List<Entry> = withContext(Dispatchers.IO) {
+        if (!file.isFile) return@withContext emptyList()
+        runCatching {
+            val array = JSONArray(file.readText())
+            (0 until array.length()).mapNotNull { i -> array.optJSONObject(i)?.toEntry() }
+        }.getOrDefault(emptyList())
+    }
+
+    suspend fun add(entry: Entry) = withContext(Dispatchers.IO) {
+        save(load().filterNot { it.id == entry.id } + entry)
+    }
+
+    suspend fun remove(id: String) = withContext(Dispatchers.IO) {
+        save(load().filterNot { it.id == id })
+    }
+
+    private fun save(entries: List<Entry>) {
+        runCatching {
+            file.parentFile?.mkdirs()
+            writeAtomically(file, JSONArray().apply { entries.forEach { put(it.toJson()) } }.toString())
+        }
+    }
+
+    private fun Entry.toJson() = JSONObject()
+        .put("id", id)
+        .put("triggerAtEpochMillis", triggerAtEpochMillis)
+        .put("title", title)
+        .put("body", body)
+
+    private fun JSONObject.toEntry() = Entry(
+        id = optString("id"),
+        triggerAtEpochMillis = optLong("triggerAtEpochMillis"),
+        title = optString("title"),
+        body = optString("body"),
+    )
+
+    private fun writeAtomically(target: File, contents: String) {
+        val temporary = File(target.parentFile, "${target.name}.tmp")
+        temporary.writeText(contents)
+        if (!temporary.renameTo(target)) {
+            target.writeText(contents)
+            temporary.delete()
+        }
+    }
+
+    private companion object {
+        const val FILE = "scheduled_notifications.json"
+    }
+}
+
+/** Arms one scheduled notification's alarm, keyed on its stable id so re-arming updates in place. */
+private fun armScheduledNotification(context: Context, entry: ScheduledNotificationStore.Entry) {
+    val appContext = context.applicationContext
+    val alarm = appContext.getSystemService(AlarmManager::class.java)
+    val exact = canScheduleExact(appContext)
+    val pending = PendingIntent.getBroadcast(
+        appContext,
+        entry.id.hashCode(),
+        Intent(appContext, ScheduledNotificationReceiver::class.java)
+            .putExtra(ScheduledNotificationReceiver.EXTRA_ID, entry.id)
+            .putExtra(ScheduledNotificationReceiver.EXTRA_TITLE, entry.title)
+            .putExtra(ScheduledNotificationReceiver.EXTRA_BODY, entry.body),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+    if (exact) {
+        alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, entry.triggerAtEpochMillis, pending)
+    } else {
+        alarm.set(AlarmManager.RTC_WAKEUP, entry.triggerAtEpochMillis, pending)
+    }
+}
+
+/**
+ * Re-arms every persisted scheduled notification after a reboot or app update, firing any whose
+ * time passed while the alarms were cleared. Called from the boot receiver alongside the
+ * automation and task re-arms.
+ */
+suspend fun rescheduleScheduledNotifications(context: Context) {
+    val appContext = context.applicationContext
+    val store = ScheduledNotificationStore(appContext)
+    val now = System.currentTimeMillis()
+    store.load().forEach { entry ->
+        if (entry.triggerAtEpochMillis > now) {
+            armScheduledNotification(appContext, entry)
+        } else {
+            postAgentNotification(appContext, entry.title, entry.body)
+            store.remove(entry.id)
+        }
     }
 }
 

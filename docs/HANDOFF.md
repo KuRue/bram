@@ -43,6 +43,14 @@ build tree is a synced copy of the same working tree.
 - **In-app model downloader removed** — browsing Hugging Face and downloading from inside the app
   added complexity for no real win over the browser + SAF import path. Models come in from the
   filesystem only; the catalog, downloader, staging directory, and dialog are gone.
+- **Agent robustness pass** — four fixes the audit turned up. (1) Short messages like "hi" or "ok"
+  no longer crash the turn: the orchestrator's auto-recall is now best-effort, and the SQLite store
+  short-circuits an empty FTS query instead of throwing. (2) `schedule_notification` alarms persist
+  to a store and the boot receiver re-arms them — they survive a reboot, fire past-due ones on
+  wake, and no longer collide on identical title+body. (3) An unattended (backgrounded or
+  scheduled) run fast-denies a tool that needs approval instead of holding the gate open for ten
+  minutes per call. (4) `web_fetch` caps the read and refuses non-text content types, so a huge or
+  binary response cannot OOM the tool.
 
 ## What works (on main)
 
@@ -89,10 +97,10 @@ servers contribute more at runtime.
 ## What is not implemented
 
 - **Automation and scheduling gaps.** The task queue, cron automations, and
-  per-task UI are shipped (M13/M16), and a `BootReceiver` re-arms automations
-  and scheduled tasks after a reboot or app update, but cron is the only
-  schedule kind, and there are no network/charging constraints or per-run
-  budgets.
+  per-task UI are shipped (M13/M16), and a `BootReceiver` re-arms automations,
+  scheduled tasks, and agent-set reminder notifications after a reboot or app
+  update, but cron is the only schedule kind, and there are no network/charging
+  constraints or per-run budgets.
 - **Memory gaps.** Working-summary compaction and `SEMANTIC_FACT` /
   `USER_INSTRUCTION` extraction (run after each completed turn) are wired and
   FTS-retrieved, a Settings panel lists recent memories and lets the user forget

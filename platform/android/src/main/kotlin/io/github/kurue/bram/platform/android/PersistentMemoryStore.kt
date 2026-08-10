@@ -48,9 +48,14 @@ class PersistentMemoryStore(context: Context) : MemoryStore {
         query: String,
         limit: Int,
     ): List<MemoryRecord> = withContext(Dispatchers.IO) {
+        val fts = fuzzyMatchQuery(query)
+        // A query with no terms longer than two characters (a common short message like "hi" or
+        // "ok") collapses to an empty MATCH expression, which SQLite rejects. Short-circuit
+        // instead of running it: a too-short query simply recalls nothing.
+        if (fts.isBlank()) return@withContext emptyList()
         database.readableDatabase.rawQuery(
             SEARCH_BY_CONVERSATION_SQL,
-            arrayOf(fuzzyMatchQuery(query), conversationId.value, limit.toString()),
+            arrayOf(fts, conversationId.value, limit.toString()),
         ).use { cursor ->
             cursor.rows()
         }
@@ -58,9 +63,11 @@ class PersistentMemoryStore(context: Context) : MemoryStore {
 
     override suspend fun searchAll(query: String, limit: Int): List<MemoryRecord> =
         withContext(Dispatchers.IO) {
+            val fts = fuzzyMatchQuery(query)
+            if (fts.isBlank()) return@withContext emptyList()
             database.readableDatabase.rawQuery(
                 SEARCH_ALL_SQL,
-                arrayOf(fuzzyMatchQuery(query), limit.toString()),
+                arrayOf(fts, limit.toString()),
             ).use { cursor ->
                 cursor.rows()
             }

@@ -2029,6 +2029,9 @@ class MainViewModel(
     /** The activity reports whether the user is looking at the app, gating the completion alert. */
     fun setAppForeground(foreground: Boolean) {
         appForeground = foreground
+        // The approval card is part of the activity UI; an unattended run cannot reach it, so tell
+        // the gate to refuse rather than wait the full timeout per call.
+        container.approvalGate.setAttended(foreground)
     }
 
     fun setCompletionAlerts(enabled: Boolean) {

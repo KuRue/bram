@@ -126,8 +126,11 @@ internal fun fetchRaw(url: URL, maxChars: Int): String {
                 return@repeat
             }
             if (code !in 200..299) throw java.io.IOException("HTTP $code")
-            val body = decodeBody(connection.inputStream, connection.contentEncoding)
-            return if (body.length > maxChars) body.substring(0, maxChars) else body
+            val contentType = connection.contentType
+            if (!isTextContentType(contentType)) {
+                throw java.io.IOException("Refused non-text response ($contentType)")
+            }
+            return decodeBody(connection.inputStream, connection.contentEncoding, maxChars)
         } finally {
             connection.disconnect()
         }
@@ -141,14 +144,50 @@ internal fun fetchRaw(url: URL, maxChars: Int): String {
  * Pulled out so the gzip path is unit-testable without a network: a server that saw
  * Accept-Encoding: gzip answers gzipped regardless of what the caller would prefer.
  */
-internal fun decodeBody(stream: java.io.InputStream, encoding: String?): String {
+internal fun decodeBody(stream: java.io.InputStream, encoding: String?, maxChars: Int): String {
     val inflated = when (encoding?.lowercase()) {
         "gzip" -> java.util.zip.GZIPInputStream(stream)
         "deflate" -> java.util.zip.InflaterInputStream(stream)
         else -> stream
     }
-    return inflated.bufferedReader(Charsets.UTF_8).readText()
+    // Read with a ceiling so a server streaming gigabytes of body — or a binary the content-type
+    // guard missed — cannot OOM the tool: stop once maxChars is reached rather than buffering the
+    // whole response and slicing afterward.
+    val reader = inflated.bufferedReader(Charsets.UTF_8)
+    val buffer = CharArray(8192)
+    val sb = StringBuilder()
+    while (true) {
+        val read = reader.read(buffer)
+        if (read <= 0) break
+        sb.append(buffer, 0, read)
+        if (sb.length >= maxChars) {
+            sb.setLength(maxChars)
+            break
+        }
+    }
+    return sb.toString()
 }
+
+/**
+ * Whether a response is worth reading as text. A null or blank type is treated as text: many
+ * servers omit it, and the tool's purpose is text, so refusing on absence would break pages that
+ * load fine.
+ */
+private fun isTextContentType(contentType: String?): Boolean {
+    if (contentType.isNullOrBlank()) return true
+    val mime = contentType.substringBefore(';').trim().lowercase()
+    return mime.startsWith("text/") || mime in TEXT_CONTENT_TYPES
+}
+
+private val TEXT_CONTENT_TYPES = setOf(
+    "application/json",
+    "application/xml",
+    "application/xhtml+xml",
+    "application/javascript",
+    "application/ld+json",
+    "application/rss+xml",
+    "application/atom+xml",
+)
 
 /**
  * Pulls result links and snippets out of a DuckDuckGo HTML results page.

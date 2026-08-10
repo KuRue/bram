@@ -118,6 +118,19 @@ class InteractiveApprovalGateTest {
     }
 
     @Test
+    fun `an unattended run refuses a tool that needs asking instead of waiting`() = runTest {
+        // A backgrounded or scheduled run cannot reach the approval card, so it must not hold the
+        // run for the timeout. The long timeout is deliberate: if the gate waited, the card would
+        // be published and this test would fail on the pending assertion.
+        val gate = InteractiveApprovalGate(FakePermissions(), timeoutMillis = 60_000)
+        gate.setAttended(false)
+        val decision = async { gate.decide(tool(), "{}") }
+        yield()
+        assertNull("no card is published when nobody can answer it", gate.pending.value)
+        assertEquals(ToolApprovalDecision.DENY, decision.await())
+    }
+
+    @Test
     fun `always allow is remembered and skips the next ask`() = runTest {
         val permissions = FakePermissions()
         val gate = InteractiveApprovalGate(permissions)

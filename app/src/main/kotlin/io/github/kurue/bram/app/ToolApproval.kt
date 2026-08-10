@@ -100,8 +100,20 @@ class InteractiveApprovalGate(
     @Volatile
     private var mode: PermissionMode = PermissionMode.AUTO
 
+    /**
+     * Whether someone is around to answer an approval prompt. The card lives in the activity's UI,
+     * so a backgrounded or scheduled run cannot reach it: rather than hold the run for the full
+     * timeout per call, [decide] refuses at once and the model gets a denial it can react to.
+     */
+    @Volatile
+    private var attended: Boolean = true
+
     fun setMode(mode: PermissionMode) {
         this.mode = mode
+    }
+
+    fun setAttended(value: Boolean) {
+        attended = value
     }
 
     companion object {
@@ -155,6 +167,11 @@ class InteractiveApprovalGate(
         if (current == PermissionMode.AUTO && !recovered && tool.readOnly && tool.requiredPermissions.isEmpty()) {
             return ToolApprovalDecision.ALLOW_ONCE
         }
+
+        // No one is watching to answer: a backgrounded or scheduled run cannot reach the approval
+        // card, so waiting the full timeout only holds the run open. Deny at once — the model gets
+        // a refusal it can react to instead of a multi-minute hang per call.
+        if (!attended) return ToolApprovalDecision.DENY
 
         val answer = CompletableDeferred<ToolApprovalDecision>()
         val request = PendingToolApproval(

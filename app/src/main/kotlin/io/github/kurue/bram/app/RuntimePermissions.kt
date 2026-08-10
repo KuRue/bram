@@ -137,6 +137,11 @@ class PermissionAwareApprovalGate(
         delegate.setMode(mode)
     }
 
+    /** Binds the wrapped gate to whether the UI is reachable. */
+    fun setAttended(value: Boolean) {
+        delegate.setAttended(value)
+    }
+
     override suspend fun decide(
         tool: ToolDefinition,
         argumentsJson: String,

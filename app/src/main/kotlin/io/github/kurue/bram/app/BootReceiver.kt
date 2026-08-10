@@ -31,6 +31,7 @@ class BootReceiver : BroadcastReceiver() {
                 runBlocking {
                     app.container.automationRunner.rescheduleAllNow()
                     app.container.taskRunner.reschedulePendingNow()
+                    rescheduleScheduledNotifications(app)
                 }
                 Log.i(TAG, "re-armed")
             } catch (t: Throwable) {

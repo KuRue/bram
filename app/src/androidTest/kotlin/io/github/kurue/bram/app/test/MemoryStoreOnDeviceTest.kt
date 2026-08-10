@@ -76,4 +76,28 @@ class MemoryStoreOnDeviceTest {
             store.remove("verify-imp-summary")
         }
     }
+
+    @Test
+    fun aQueryWithOnlyShortTermsReturnsEmptyRatherThanCrashing() = runBlocking {
+        val store = ApplicationProvider.getApplicationContext<BramApplication>().container.memoryStore
+        val conversation = ConversationId("memory-short-query-verification")
+        val fact = MemoryRecord(
+            "verify-short-fact",
+            MemoryKind.SEMANTIC_FACT,
+            "The user lives in Tokyo",
+            importance = 0.8,
+        )
+        try {
+            store.put(conversation, fact)
+            // A query whose every term is two characters or shorter collapses to an empty FTS
+            // expression, which SQLite rejects. The store must short-circuit rather than throw.
+            val shortHits = store.search(conversation, "hi", 10)
+            assertTrue("a too-short query recalls nothing, quietly", shortHits.isEmpty())
+            // A real word still matches, so the guard did not break ordinary search.
+            val tokyoHits = store.search(conversation, "Tokyo", 10)
+            assertTrue("a real term still recalls", tokyoHits.any { it.id == "verify-short-fact" })
+        } finally {
+            store.remove("verify-short-fact")
+        }
+    }
 }
