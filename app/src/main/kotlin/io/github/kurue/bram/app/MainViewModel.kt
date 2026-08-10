@@ -24,6 +24,7 @@ import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.McpServer
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
+import io.github.kurue.bram.core.domain.MemoryPrompt
 import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.PermissionMode
@@ -2017,11 +2018,16 @@ class MainViewModel(
         }
     }
 
-    /** The profile's instructions with the active skills appended, read fresh for every run. */
+    /**
+     * The profile's instructions with the active skills and the user's standing memories appended,
+     * read fresh for every run so newly activated skills and freshly extracted facts apply at once.
+     */
     private suspend fun runInstructions(snapshot: AppUiState): String {
         val base = snapshot.activeProfile?.systemPrompt.orEmpty()
         val skills = runCatching { container.skillStore.activeSkills() }.getOrDefault(emptyList())
-        return SkillPrompt.append(base, skills)
+        val memories = runCatching { container.memoryStore.mostImportant(MEMORY_INJECTION_LIMIT) }
+            .getOrDefault(emptyList())
+        return MemoryPrompt.append(SkillPrompt.append(base, skills), memories)
     }
 
     fun refreshAutomations() {
@@ -2767,6 +2773,9 @@ private const val FREE_STORAGE_BUFFER_BYTES = 512L * 1024 * 1024
 
 /** How many memories the browser shows — newest first, plenty for review without flooding the panel. */
 private const val MEMORY_BROWSER_LIMIT = 200
+
+/** How many standing memories join the system prompt each turn (the char budget trims further). */
+private const val MEMORY_INJECTION_LIMIT = 12
 
 private fun Int?.orZero(): Int = this ?: 0
 

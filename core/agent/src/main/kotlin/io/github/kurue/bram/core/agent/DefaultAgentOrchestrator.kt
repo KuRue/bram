@@ -347,6 +347,12 @@ class InMemoryMemoryStore : MemoryStore {
             .sortedByDescending { it.createdAtEpochMillis }
             .take(limit)
 
+    override suspend fun mostImportant(limit: Int): List<MemoryRecord> =
+        values.values.flatten()
+            .filterNot { it.kind == io.github.kurue.bram.core.domain.MemoryKind.WORKING_SUMMARY }
+            .sortedWith(compareByDescending<MemoryRecord> { it.importance }.thenByDescending { it.createdAtEpochMillis })
+            .take(limit)
+
     override suspend fun remove(id: String) {
         values.values.forEach { list -> list.removeAll { it.id == id } }
     }

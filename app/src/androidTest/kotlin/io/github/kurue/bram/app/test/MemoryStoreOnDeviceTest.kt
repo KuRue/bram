@@ -51,4 +51,29 @@ class MemoryStoreOnDeviceTest {
             store.remove("verify-summary")
         }
     }
+
+    @Test
+    fun mostImportantAgainstTheRealStore() = runBlocking {
+        val store = ApplicationProvider.getApplicationContext<BramApplication>().container.memoryStore
+        val conversation = ConversationId("memory-importance-verification")
+        val low = MemoryRecord("verify-low", MemoryKind.SEMANTIC_FACT, "Low-importance fact", importance = 0.1, createdAtEpochMillis = 1_000)
+        val high = MemoryRecord("verify-high", MemoryKind.USER_INSTRUCTION, "High-importance instruction", importance = 0.95, createdAtEpochMillis = 2_000)
+        val summary = MemoryRecord("verify-imp-summary", MemoryKind.WORKING_SUMMARY, "Hidden summary", importance = 1.0, createdAtEpochMillis = 3_000)
+
+        try {
+            store.put(conversation, low)
+            store.put(conversation, high)
+            store.put(conversation, summary)
+
+            val top = store.mostImportant(10)
+            // Highest importance first, working summaries hidden.
+            assertEquals("verify-high", top.first().id)
+            assertTrue(top.any { it.id == "verify-low" })
+            assertFalse("working summaries must not be injected", top.any { it.id == "verify-imp-summary" })
+        } finally {
+            store.remove("verify-low")
+            store.remove("verify-high")
+            store.remove("verify-imp-summary")
+        }
+    }
 }

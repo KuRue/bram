@@ -27,8 +27,52 @@ interface MemoryStore {
     suspend fun put(conversationId: ConversationId, memory: MemoryRecord)
     /** Newest memories first across every conversation, for the memory browser. */
     suspend fun recent(limit: Int): List<MemoryRecord>
+    /** Highest-importance memories first across every conversation, for the standing context. */
+    suspend fun mostImportant(limit: Int): List<MemoryRecord>
     /** Drops a memory by id; safe to call with an id that is no longer present. */
     suspend fun remove(id: String)
+}
+
+/**
+ * Renders a small, char-budgeted block of the user's standing memories into the system prompt, so
+ * the agent always knows the durable facts and instructions without having to call memory_search.
+ * Working summaries are excluded: they are a per-conversation scratchpad that already has its own
+ * slot in the context head. Mirrors [SkillPrompt].
+ */
+object MemoryPrompt {
+    fun append(prompt: String, memories: List<MemoryRecord>): String {
+        val standing = memories.filter { it.kind != MemoryKind.WORKING_SUMMARY }
+        val section = section(standing)
+        return if (section.isBlank()) prompt else "$prompt\n\n$section"
+    }
+
+    fun section(memories: List<MemoryRecord>): String {
+        if (memories.isEmpty()) return ""
+        val budget = MAX_MEMORY_PROMPT_CHARS
+        return buildString {
+            appendLine("WHAT YOU REMEMBER")
+            appendLine(
+                "Standing facts about the user and instructions gathered from earlier " +
+                    "conversations. Treat them as true and act on them, unless the user says " +
+                    "otherwise this turn.",
+            )
+            for (memory in memories) {
+                val label = when (memory.kind) {
+                    MemoryKind.USER_INSTRUCTION -> "Instruction"
+                    MemoryKind.SEMANTIC_FACT -> "Fact"
+                    MemoryKind.EPISODE -> "Episode"
+                    MemoryKind.WORKING_SUMMARY -> null
+                } ?: continue
+                val block = "$label: ${memory.text}"
+                if (length + block.length > budget) break
+                appendLine()
+                append(block)
+            }
+        }
+    }
+
+    /** Caps the standing-memory block so it never crowds the context window. ~1k tokens. */
+    const val MAX_MEMORY_PROMPT_CHARS = 4_000
 }
 
 /** Where an agent run stands, for the persistent run journal. */

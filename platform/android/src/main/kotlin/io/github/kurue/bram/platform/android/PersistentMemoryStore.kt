@@ -105,6 +105,20 @@ class PersistentMemoryStore(context: Context) : MemoryStore {
         }
     }
 
+    override suspend fun mostImportant(limit: Int): List<MemoryRecord> = withContext(Dispatchers.IO) {
+        database.readableDatabase.query(
+            "memory_records",
+            null,
+            "kind != ?",
+            arrayOf(MemoryKind.WORKING_SUMMARY.name),
+            null,
+            null,
+            "importance DESC, created_at DESC LIMIT $limit",
+        ).use { cursor ->
+            cursor.rows()
+        }
+    }
+
     override suspend fun remove(id: String) = withContext(Dispatchers.IO) {
         // The AFTER DELETE trigger on memory_records keeps the FTS index in sync.
         database.writableDatabase.delete("memory_records", "id = ?", arrayOf(id))

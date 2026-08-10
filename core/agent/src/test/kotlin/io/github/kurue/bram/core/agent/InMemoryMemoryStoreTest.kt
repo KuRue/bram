@@ -69,6 +69,35 @@ class InMemoryMemoryStoreTest {
         assertEquals(listOf("keep"), store.recent(10).map { it.text })
     }
 
-    private fun memory(id: String, text: String, createdAt: Long) =
-        MemoryRecord(id, MemoryKind.SEMANTIC_FACT, text, importance = 0.5, createdAtEpochMillis = createdAt)
+    @Test
+    fun `mostImportant ranks by importance then recency`() = runBlocking {
+        val store = InMemoryMemoryStore()
+        store.put(conversation, memory("low", "minor", createdAt = 1_000, importance = 0.2))
+        store.put(conversation, memory("high", "major", createdAt = 2_000, importance = 0.9))
+        store.put(conversation, memory("mid", "medium", createdAt = 3_000, importance = 0.5))
+
+        assertEquals(listOf("major", "medium", "minor"), store.mostImportant(10).map { it.text })
+    }
+
+    @Test
+    fun `mostImportant breaks ties newest first`() = runBlocking {
+        val store = InMemoryMemoryStore()
+        store.put(conversation, memory("a", "older", createdAt = 1_000, importance = 0.8))
+        store.put(conversation, memory("b", "newer", createdAt = 5_000, importance = 0.8))
+
+        assertEquals(listOf("newer", "older"), store.mostImportant(10).map { it.text })
+    }
+
+    @Test
+    fun `mostImportant hides working summaries`() = runBlocking {
+        val store = InMemoryMemoryStore()
+        store.put(conversation, MemoryRecord("ws", MemoryKind.WORKING_SUMMARY, "summary", importance = 1.0, createdAtEpochMillis = 9_000))
+        store.put(conversation, memory("fact", "real fact", createdAt = 1_000, importance = 0.5))
+
+        val top = store.mostImportant(10)
+        assertEquals(listOf("real fact"), top.map { it.text })
+    }
+
+    private fun memory(id: String, text: String, createdAt: Long, importance: Double = 0.5) =
+        MemoryRecord(id, MemoryKind.SEMANTIC_FACT, text, importance = importance, createdAtEpochMillis = createdAt)
 }

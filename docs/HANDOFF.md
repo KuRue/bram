@@ -97,11 +97,13 @@ servers contribute more at runtime.
   budgets.
 - **Memory gaps.** Working-summary compaction and `SEMANTIC_FACT` /
   `USER_INSTRUCTION` extraction (run after each completed turn) are wired and
-  FTS-retrieved, and a Settings panel lists recent memories and lets the user
-  forget wrong ones, but `EPISODE` records are never produced, there is no
-  embeddings/vector index (recall is FTS only), and extracted facts are
-  conversation-scoped (cross-conversation recall is via the `memory_search`
-  tool only).
+  FTS-retrieved, a Settings panel lists recent memories and lets the user forget
+  wrong ones, and the highest-importance memories are auto-injected into the
+  system prompt each turn (char-budgeted) so the agent has standing context
+  without calling `memory_search`. Still missing: `EPISODE` records are never
+  produced, there is no embeddings/vector index (recall is FTS only), and
+  per-conversation working summaries are separate from the cross-conversation
+  store.
 - **Skills gaps.** The SKILL.md lifecycle is shipped (M16), and the agent can now author skill
   drafts through a `propose_skill` tool — they land with no active version (kept out of the
   system prompt) until the user activates them from Settings.
