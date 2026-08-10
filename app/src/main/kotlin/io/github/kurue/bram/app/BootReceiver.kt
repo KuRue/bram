@@ -12,21 +12,33 @@ import kotlinx.coroutines.runBlocking
  * store, re-arms every future alarm, and starts anything whose time passed while the phone was
  * off — which defers it until a model is loaded and says so, exactly as if the app had been open.
  *
- * The work runs to completion synchronously inside [onReceive]. The process is started for this
- * broadcast and some OEMs kill it the instant onReceive returns, so delegating to a coroutine on
- * the app scope can lose the work when the process dies between onReceive returning and the
- * coroutine landing. The work itself is two small file reads and a handful of alarm sets — a few
- * milliseconds — so running it inline (via runBlocking) is safe and cannot be killed mid-flight.
+ * The work runs to completion inside this process rather than being delegated to a coroutine on
+ * the app scope: the process is started for this broadcast and some OEMs kill it the instant
+ * onReceive returns, so a coroutine could lose the work when the process dies between onReceive
+ * returning and the coroutine landing. [goAsync] keeps the broadcast alive until [PendingResult.finish]
+ * so the re-arm still cannot be dropped, while the background thread keeps a slow cold start
+ * (ART settling, the inference process spinning up to run a task whose time passed) from holding
+ * the main thread long enough to trip the broadcast ANR and have the system kill the process
+ * mid-re-arm.
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val app = context.applicationContext as? BramApplication ?: return
         Log.i(TAG, "re-arming after ${intent.action}")
-        runBlocking {
-            app.container.automationRunner.rescheduleAllNow()
-            app.container.taskRunner.reschedulePendingNow()
-        }
-        Log.i(TAG, "re-armed")
+        val pendingResult = goAsync()
+        Thread {
+            try {
+                runBlocking {
+                    app.container.automationRunner.rescheduleAllNow()
+                    app.container.taskRunner.reschedulePendingNow()
+                }
+                Log.i(TAG, "re-armed")
+            } catch (t: Throwable) {
+                Log.w(TAG, "re-arm failed", t)
+            } finally {
+                pendingResult.finish()
+            }
+        }.start()
     }
 
     private companion object {

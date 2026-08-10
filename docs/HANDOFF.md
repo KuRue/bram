@@ -45,6 +45,11 @@ build tree is a synced copy of the same working tree.
 
 ## What works (on main)
 
+**Compose UI smoke tests.** The shell (launch chrome, composer input, drawer
+and panel navigation) is covered by `ChatScreenSmokeTest` against the real
+`MainActivity`, runnable on the emulator or phone — see Testing. The stable
+hooks are test tags, so the assertions survive wording changes.
+
 **Local CPU inference.** Import a GGUF through the document picker, verify it
 with SHA-256, load it in the isolated `:inference` process, and chat with
 streaming, cancellation, unload, and recovery from a killed inference process.
@@ -203,14 +208,43 @@ cannot build Hexagon or OpenCL, and cannot run any accelerator correctness test,
 which needs real hardware.
 
 Unit tests cover accelerator agreement scoring, offload bisection, Markdown
-rendering, the streaming reasoning split, the web tool HTML parsing, and the
-activity summary. The accelerator tests exist because two earlier acceptance
-criteria produced confidently wrong verdicts on device; the cases that misled us
-are pinned.
+rendering, the streaming reasoning split, the web tool HTML parsing, the
+activity summary, and the memory/skill prompt assembly. The accelerator tests
+exist because two earlier acceptance criteria produced confidently wrong
+verdicts on device; the cases that misled us are pinned.
 
 For anything touching inference or the UI, run it on the emulator or phone. Three
 separate defects in this codebase compiled cleanly, passed CI, and were only
 visible when the app actually ran.
+
+### Compose UI tests (`ChatScreenSmokeTest`)
+
+The shell has a smoke suite: launch chrome, composer text input, and
+drawer/panel navigation, all run against the real `MainActivity` with no model
+state. Stable hooks are `testTag`s (`menu-button`, `new-chat`, `model-pill`,
+`composer-field`, `send-button`) rather than text, so the assertions survive
+wording changes. Run on a connected device or emulator:
+
+```
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w io.github.kurue.bram.app.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Two setup notes. First, espresso is pinned to `3.7.0`
+(`app/build.gradle.kts`): AOSP API 36 removed the hidden
+`InputManager.getInstance()` the bundled strategy reflected into, so older
+espresso fails every injection on the API 36 emulator image (it still worked
+on the Samsung build, which ships a patched framework). Second, the first
+instrumentation after an install or boot used to be killed by the system:
+`BootReceiver` ran its re-arm with `runBlocking` on the main thread, and a
+cold process could stall past the broadcast ANR timeout. It now uses
+`goAsync()` plus a background thread, keeping the broadcast alive until the
+re-arm finishes without blocking the main thread.
+
+To exercise the smoke tests on a fresh process, force-stop both packages
+before instrumenting; that is also how to reproduce the ANR the fix
+addresses.
 
 ## Working agreements
 

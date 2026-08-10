@@ -89,6 +89,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -385,13 +386,13 @@ private fun TopBubbleBar(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        BubbleButton(onClick = onMenu) {
+        BubbleButton(onClick = onMenu, modifier = Modifier.testTag("menu-button")) {
             MenuIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(22.dp))
         }
         Spacer(Modifier.width(10.dp))
 
         GlassSurface(
-            modifier = Modifier.weight(1f).clickable(onClick = onPickModel),
+            modifier = Modifier.weight(1f).clickable(onClick = onPickModel).testTag("model-pill"),
             shape = RoundedCornerShape(50),
             alpha = Glass.chromeAlpha,
         ) {
@@ -416,7 +417,7 @@ private fun TopBubbleBar(
         }
 
         Spacer(Modifier.width(10.dp))
-        BubbleButton(onClick = onNewConversation) {
+        BubbleButton(onClick = onNewConversation, modifier = Modifier.testTag("new-chat")) {
             NewChatIcon(MaterialTheme.colorScheme.onSurface, Modifier.size(22.dp))
         }
     }
@@ -606,7 +607,8 @@ private fun SendButton(
             .size(48.dp)
             .clip(CircleShape)
             .background(container)
-            .clickable(enabled = generating || enabled) { if (generating) onStop() else onSend() },
+            .clickable(enabled = generating || enabled) { if (generating) onStop() else onSend() }
+            .testTag("send-button"),
         contentAlignment = Alignment.Center,
     ) {
         if (generating) {
@@ -630,9 +632,13 @@ private fun SendButton(
 }
 
 @Composable
-private fun BubbleButton(onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+private fun BubbleButton(
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    content: @Composable BoxScope.() -> Unit,
+) {
     GlassSurface(
-        modifier = Modifier.size(44.dp).clickable(onClick = onClick),
+        modifier = modifier.size(44.dp).clickable(onClick = onClick),
         shape = CircleShape,
         alpha = Glass.chromeAlpha,
     ) {
@@ -781,7 +787,7 @@ private fun ChatComposer(
                     BasicTextField(
                         value = input,
                         onValueChange = { input = it },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().testTag("composer-field"),
                         enabled = !state.isGenerating,
                         maxLines = 5,
                         textStyle = MaterialTheme.typography.bodyLarge.copy(

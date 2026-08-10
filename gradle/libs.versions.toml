@@ -9,14 +9,16 @@ haze = "1.7.2"
 coroutines = "1.10.2"
 junit = "4.13.2"
 litertlm = "0.15.0"
-androidx-test-runner = "1.6.2"
-androidx-test-ext-junit = "1.2.1"
+androidx-test-runner = "1.7.0"
+androidx-test-ext-junit = "1.3.0"
 
 [libraries]
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
 compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4" }
+compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
 compose-foundation = { module = "androidx.compose.foundation:foundation" }
 compose-material3 = { module = "androidx.compose.material3:material3" }
 activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity-compose" }
