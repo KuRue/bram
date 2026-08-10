@@ -124,6 +124,7 @@ class AppContainer(application: Application) {
                 CalendarTool(application),
                 TermuxCommandTool(application),
                 MemorySearchTool(memoryStore),
+                ProposeSkillTool(skillStore),
             ),
         ),
     )

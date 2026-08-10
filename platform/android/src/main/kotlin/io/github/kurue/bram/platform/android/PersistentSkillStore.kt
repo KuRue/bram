@@ -63,6 +63,13 @@ class PersistentSkillStore(context: Context) : SkillStore {
         outcome
     }
 
+    override suspend fun proposeDraft(document: String): SkillImportOutcome = withContext(Dispatchers.IO) {
+        ensureLoaded()
+        val outcome = library.proposeDraft(document, System.currentTimeMillis())
+        if (outcome is SkillImportOutcome.Imported) persist()
+        outcome
+    }
+
     override suspend fun activateDraft(skillId: String): SkillActionOutcome = withContext(Dispatchers.IO) {
         ensureLoaded()
         val outcome = library.activateDraft(skillId, System.currentTimeMillis())

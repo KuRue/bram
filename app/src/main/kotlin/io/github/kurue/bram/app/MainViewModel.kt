@@ -2404,6 +2404,9 @@ class MainViewModel(
                                 )
                             }
                             pushModelStatus(ModelPhase.GENERATING)
+                            // A proposed skill is persisted the moment the tool returns; refresh so the
+                            // draft shows in Settings without waiting for an app restart.
+                            if (event.call.name == "propose_skill") refreshSkills()
                         }
                         is AgentEvent.Usage -> mutableState.update { it.copy(lastUsage = event.usage) }
                         is AgentEvent.Metrics -> mutableState.update {
@@ -2412,7 +2415,12 @@ class MainViewModel(
                                 sessionOutputTokens = it.sessionOutputTokens + event.metrics.outputTokens,
                             )
                         }
-                        is AgentEvent.Completed -> completedMessage = event.message
+                        is AgentEvent.Completed -> {
+                            completedMessage = event.message
+                            // Extraction runs in the orchestrator just before Completed, so the new
+                            // memory is already stored — refresh so the browser reflects it live.
+                            refreshMemories()
+                        }
                         is AgentEvent.Failed -> failure = event.message
                     }
                 }

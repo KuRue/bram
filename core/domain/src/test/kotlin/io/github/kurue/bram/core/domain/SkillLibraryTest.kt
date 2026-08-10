@@ -203,4 +203,59 @@ class SkillLibraryTest {
         assertTrue(prompt.contains("v1.0.0"))
         assertTrue(!prompt.contains("draft-only procedure"))
     }
+
+    @Test
+    fun `a proposed new skill lands as a draft with no active version`() {
+        val library = SkillLibrary()
+        val outcome = library.proposeDraft(document(), nowMillis = 1000L)
+
+        assertEquals(SkillImportOutcome.Imported("weather-scout", "1.0.0", stagedAsDraft = true), outcome)
+        val pkg = library.packages().single()
+        assertNull(pkg.activeVersion)
+        assertEquals("1.0.0", pkg.draftVersion)
+        // A draft-only package is kept out of the prompt until it is activated.
+        assertTrue(library.activeSkills().isEmpty())
+    }
+
+    @Test
+    fun `a proposed new version of a known skill stages as a draft like import`() {
+        val library = SkillLibrary()
+        library.importDocument(document(), nowMillis = 1000L)
+
+        val outcome = library.proposeDraft(document(version = "1.2.0"), nowMillis = 2000L)
+
+        assertEquals(SkillImportOutcome.Imported("weather-scout", "1.2.0", stagedAsDraft = true), outcome)
+        val pkg = library.packages().single()
+        assertEquals("1.0.0", pkg.activeVersion)
+        assertEquals("1.2.0", pkg.draftVersion)
+        assertEquals("1.0.0", library.activeSkills().single().version)
+    }
+
+    @Test
+    fun `activating a proposed draft promotes it into the prompt`() {
+        val library = SkillLibrary()
+        library.proposeDraft(document(), nowMillis = 1000L)
+        assertTrue(library.activeSkills().isEmpty())
+
+        assertEquals(SkillActionOutcome.Ok, library.activateDraft("weather-scout", nowMillis = 2000L))
+
+        val pkg = library.packages().single()
+        assertEquals("1.0.0", pkg.activeVersion)
+        assertNull(pkg.draftVersion)
+        assertEquals("1.0.0", library.activeSkills().single().version)
+    }
+
+    @Test
+    fun `proposing a version that is already staged is rejected`() {
+        val library = SkillLibrary()
+        library.proposeDraft(document(), nowMillis = 1000L)
+
+        val outcome = library.proposeDraft(document(), nowMillis = 2000L)
+
+        assertTrue(outcome is SkillImportOutcome.Rejected)
+        // Nothing changed: still one version, still a draft, still out of the prompt.
+        val pkg = library.packages().single()
+        assertEquals(listOf("1.0.0"), pkg.versions.map { it.version })
+        assertTrue(library.activeSkills().isEmpty())
+    }
 }

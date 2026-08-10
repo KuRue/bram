@@ -43,6 +43,12 @@ interface SkillStore {
     suspend fun activeSkills(): List<ActiveSkill>
     /** Imports a SKILL.md document: new skills are active, new versions of a known skill are drafts. */
     suspend fun importDocument(document: String): SkillImportOutcome
+    /**
+     * Imports a SKILL.md as a draft the user must activate: never active on arrival, even for a
+     * brand-new skill. The path for the agent's propose_skill tool, so an untrusted author never
+     * puts text into the prompt without review.
+     */
+    suspend fun proposeDraft(document: String): SkillImportOutcome
     suspend fun activateDraft(skillId: String): SkillActionOutcome
     /** Re-activates the version that was active before the current one. */
     suspend fun rollback(skillId: String): SkillActionOutcome
@@ -160,11 +166,29 @@ class SkillLibrary(
         }
     }
 
-    fun importDocument(document: String, nowMillis: Long): SkillImportOutcome {
-        val parsed = when (val result = SkillDocument.parse(document)) {
-            is SkillDocument.Result.Ok -> result.parsed
-            is SkillDocument.Result.Rejected -> return SkillImportOutcome.Rejected(result.reason)
+    fun importDocument(document: String, nowMillis: Long): SkillImportOutcome =
+        when (val result = SkillDocument.parse(document)) {
+            is SkillDocument.Result.Rejected -> SkillImportOutcome.Rejected(result.reason)
+            is SkillDocument.Result.Ok -> importParsed(result.parsed, activateOnNew = true, nowMillis = nowMillis)
         }
+
+    /**
+     * Like [importDocument] but a brand-new skill lands as a draft with no active version, so it
+     * stays out of the prompt until the user activates it. This is the path the agent's
+     * propose_skill tool takes: an untrusted author must not put text into the system prompt
+     * without review.
+     */
+    fun proposeDraft(document: String, nowMillis: Long): SkillImportOutcome =
+        when (val result = SkillDocument.parse(document)) {
+            is SkillDocument.Result.Rejected -> SkillImportOutcome.Rejected(result.reason)
+            is SkillDocument.Result.Ok -> importParsed(result.parsed, activateOnNew = false, nowMillis = nowMillis)
+        }
+
+    private fun importParsed(
+        parsed: SkillDocument.Parsed,
+        activateOnNew: Boolean,
+        nowMillis: Long,
+    ): SkillImportOutcome {
         val id = slug(parsed.name)
         val existing = packagesById[id]
         if (existing == null) {
@@ -172,11 +196,11 @@ class SkillLibrary(
                 id = id,
                 name = parsed.name,
                 versions = listOf(toVersion(parsed, nowMillis)),
-                activeVersion = parsed.version,
-                draftVersion = null,
+                activeVersion = if (activateOnNew) parsed.version else null,
+                draftVersion = if (activateOnNew) null else parsed.version,
                 updatedAtEpochMillis = nowMillis,
             )
-            return SkillImportOutcome.Imported(id, parsed.version, stagedAsDraft = false)
+            return SkillImportOutcome.Imported(id, parsed.version, stagedAsDraft = !activateOnNew)
         }
         val staged = existing.versions.any { it.version == parsed.version }
         if (staged) {

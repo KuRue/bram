@@ -102,8 +102,9 @@ servers contribute more at runtime.
   embeddings/vector index (recall is FTS only), and extracted facts are
   conversation-scoped (cross-conversation recall is via the `memory_search`
   tool only).
-- **Skills gaps.** The SKILL.md lifecycle is shipped (M16); the remaining gap is
-  agent-authored drafts (the `QUARANTINED` lifecycle path is unimplemented).
+- **Skills gaps.** The SKILL.md lifecycle is shipped (M16), and the agent can now author skill
+  drafts through a `propose_skill` tool — they land with no active version (kept out of the
+  system prompt) until the user activates them from Settings.
 - **LiteRT.** The `:runtime:litertlm` module is wired end-to-end (import, store,
   routing, UI card) but is blocked from shipping by an upstream AAR crash — see
   Known issues. It is not a usable runtime yet.
