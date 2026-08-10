@@ -128,44 +128,6 @@ class LiteRtLmStore(context: Context) {
         record
     }
 
-    /**
-     * Records a package [LiteRtLmDownloader] already downloaded and SHA-256 verified.
-     *
-     * [contentUri] is the source URL so the record keeps where the package came from, and replacing
-     * by it makes a re-download update the existing record instead of duplicating it.
-     */
-    suspend fun importDownloaded(
-        verifiedFile: java.io.File,
-        expectedSha256: String,
-        sourceUrl: String,
-        originalFileName: String,
-        progress: (ImportProgress) -> Unit = {},
-    ): LiteRtModelRecord = withContext(Dispatchers.IO) {
-        require(verifiedFile.isFile) { "The downloaded package file is missing" }
-        val size = verifiedFile.length()
-        require(size > 0) { "The downloaded package file is empty" }
-
-        packagesDirectory.mkdirs()
-        val packageFile = java.io.File(packagesDirectory, "${expectedSha256.take(24)}.litertlm")
-        if (packageFile.exists()) runCatching { packageFile.delete() }
-        if (!verifiedFile.renameTo(packageFile)) {
-            runCatching { verifiedFile.delete() }
-            throw IllegalStateException("Could not move the downloaded package into app storage")
-        }
-        val record = LiteRtModelRecord(
-            id = ModelId("litert:${expectedSha256.take(24)}"),
-            displayName = displayNameFor(originalFileName),
-            fileName = originalFileName,
-            contentUri = sourceUrl,
-            localPath = packageFile.absolutePath,
-            fileSizeBytes = size,
-            sha256 = expectedSha256,
-        )
-        addOrReplace(record, sourceUrl)
-        progress(ImportProgress("Verified", size, size))
-        record
-    }
-
     /** Which processor a package loads onto, remembered per package. */
     suspend fun setBackend(modelId: ModelId, backend: LiteRtBackend) = withContext(Dispatchers.IO) {
         val packages = decode(preferences.getString(KEY_PACKAGES, null)).toMutableList()

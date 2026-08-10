@@ -56,7 +56,6 @@ The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/k
 | Accelerator validation and layer bisection in-app | Working |
 | Collapsed reasoning and tool activity in the transcript | Working |
 | Task queue, scheduling, and tools beyond `device_status` | Not implemented |
-| Model download | Not implemented |
 | Memory, skills, and automations | Interfaces only |
 | OpenCL and LiteRT | Not implemented |
 

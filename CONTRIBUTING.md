@@ -8,7 +8,7 @@ Bram is pre-alpha. Changes should strengthen one complete boundary or vertical s
 - Keep native inference and driver initialization in the isolated `:inference` process.
 - Probe accelerator capability with correctness tests; do not infer support from a marketing device name.
 - Preserve the transcript as canonical data. Summaries, memories, retrieval results, and KV caches must be reproducible projections.
-- Treat model output, tool arguments, tool results, downloaded models, and generated skills as untrusted input.
+- Treat model output, tool arguments, tool results, imported models, and generated skills as untrusted input.
 - Do not add silent remote fallback. Routing must obey the run's privacy class and leave a user-visible record.
 - Do not commit model weights, endpoint keys, signing keys, local paths, or generated backend caches.
 

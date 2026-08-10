@@ -7,7 +7,7 @@ Last updated: 2026-08-08
 | Item | Value |
 |---|---|
 | Repository | Private `KuRue/bram` |
-| main | [`48ff4f6`](https://github.com/KuRue/bram/commit/48ff4f6) — through Milestone 19 (in-app model downloads) |
+| main | [`8d0429d`](https://github.com/KuRue/bram/commit/8d0429d) — UI smoke tests land; in-app model downloader removed |
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
 | Test emulator | AVD `Pixel_9a`, x86_64, 6 GB RAM / 16 GB storage |
 | Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone, tool-capable), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
@@ -33,15 +33,16 @@ build tree is a synced copy of the same working tree.
   rather than an inline Reply action, which testing showed to be pointless for a message you cannot
   see yet. Also: the build-sync now mirrors deletions (`--delete`) while excluding the WSL-only
   OpenCL stub.
-- **Milestone 19 (in-app model downloads)** — "Download a model" on the Models screen: the
-  HuggingFace tree API is browsed from the dialog (smallest-first, LFS-only, readable errors for
-  missing/gated repos), the download streams to a `.gguf.part` staging file with live progress and
-  an instant Cancel (cancellation severs the connection to wake a blocked read), verifies SHA-256,
-  and imports the digest-named copy with its HF source URL recorded. Eleven new unit tests cover
-  the catalog and downloader against stub HTTP servers. Verified on the S25 Ultra: Qwen2.5-0.5B
-  Q2_K (396 MB) downloaded at ~1.3 MB/s, verified, imported, auto-profiled, and loaded; the second
-  turn showed `KV reuse: 565 of 585 tok` and prompt processing at 2489 tok/s vs 104 tok/s cold —
-  the first on-device demonstration of the Milestone 7 KV-reuse gain.
+- **Memory auto-injection** (`f21680e`) — the highest-importance standing memories now ride the
+  system prompt every turn (char-budgeted, like skills), so the agent has durable context without
+  calling `memory_search`. Working summaries stay out of it.
+- **Compose UI smoke tests** (`8d0429d`) — `ChatScreenSmokeTest` covers launch chrome, composer
+  input, and drawer/panel navigation against the real `MainActivity`, with test-tag hooks. Also
+  fixes the `BootReceiver` broadcast ANR (the re-arm ran `runBlocking` on the main thread; now
+  `goAsync()` plus a background thread) and pins espresso 3.7.0 for the API 36 emulator.
+- **In-app model downloader removed** — browsing Hugging Face and downloading from inside the app
+  added complexity for no real win over the browser + SAF import path. Models come in from the
+  filesystem only; the catalog, downloader, staging directory, and dialog are gone.
 
 ## What works (on main)
 
@@ -63,12 +64,6 @@ seven, with no error reported. Vulkan compiles and is offered, but is not
 validated. Auto-configure measures whichever backends the build and device
 offer and records the results on the profile; NPU routing was re-verified
 after the backend changes (all four htp skels packaged and loaded).
-
-**Model downloads.** Import a GGUF straight from Hugging Face from the
-Models screen: browse the repository's quantizations (smallest-first,
-SHA-256-verified, readable errors for missing or gated repos), download with
-live progress and cancellation, and the verified copy lands in the models
-list with a profile ready to load.
 
 **Conversations.** Persisted as one JSON file each with a rebuildable index.
 Multiple threads, New and History, titles from the first message, restored on
@@ -93,8 +88,6 @@ servers contribute more at runtime.
 
 ## What is not implemented
 
-- **Resumable or queued downloads.** One verified, cancellable transfer at a
-  time; a dropped connection restarts the file rather than resuming it.
 - **Automation and scheduling gaps.** The task queue, cron automations, and
   per-task UI are shipped (M13/M16), and a `BootReceiver` re-arms automations
   and scheduled tasks after a reboot or app update, but cron is the only
@@ -259,13 +252,11 @@ addresses.
 ## Next
 
 1. A larger tool-capable model for agentic use. The web tools and approval gate
-   work; LFM2.5-2.6B cannot chain tools reliably. Downloading one is now a
-   dialog away.
+   work; LFM2.5-2.6B cannot chain tools reliably. Add one through the Models
+   screen's import picker once it is on the device.
 2. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
    the validated GPU path, so chasing Vulkan is low priority unless OpenCL's
    1.11x needs replacing.
-3. Resumable and queued downloads (multi-file repositories, Xet) — the
-   download path is built; these extend it rather than rework it.
 
 Deferred from Milestone 7 (closed): batch tuning (`n_ubatch` pinned at 128,
 should follow measured prompt throughput) and surfacing the KV-reuse count in
@@ -274,9 +265,9 @@ shown). Both shipped after the milestone closed: batch is a per-profile setting
 with a teacher-forced "Tune batch" measurement (winner saved with a dated
 note; measured 512/256 on the NPU profile), and the composer metrics line
 shows "KV reuse: N of M tok". The reuse count is honest — zero on the hybrid
-LFM2 model, which refuses partial cache trims; Milestone 19's Qwen2.5-0.5B
-download finally demonstrated the gain on the phone (565 of 585 tokens
-reused, prompt at 2489 tok/s vs 104 cold).
+LFM2 model, which refuses partial cache trims; a Qwen2.5-0.5B import
+demonstrated the gain on the phone (565 of 585 tokens reused, prompt at
+2489 tok/s vs 104 cold).
 
 Reasoning-folding for LFM2.5 is unit-tested only; confirm on device with a
 reasoning turn when convenient.

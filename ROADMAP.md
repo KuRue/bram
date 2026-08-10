@@ -28,7 +28,7 @@ the S25 Ultra.
 - Persisted Storage Access Framework GGUF catalog, bounded metadata parser, and SHA-256 verification.
 - GGUF chat-template application and tokenizer-backed exact token counts.
 - CPU ARM64 backend with cancellation, progress, metrics, and safe cleanup.
-- Model import verification. Built-in downloads and resumable transfers remain deferred.
+- Model import verification.
 - LFM2.5-2.6B Q4_0 as an initial reference model.
 
 Exit criterion: install, load, chat, cancel, unload, and recover from a killed inference process on the S25 Ultra.
@@ -488,7 +488,7 @@ and in the next prompt, journal entry with token totals) and the failure path (a
 does not end the run).
 
 Deferred: on-device embeddings and a vector index. An embedding model is another multi-hundred
-megabyte download that must be validated like any other model, the FTS retrieval already covers
+megabyte import that must be validated like any other model, the FTS retrieval already covers
 keyword recall, and `searchAll` is the seam the vector index would replace — no code above it
 needs to change when one lands.
 
@@ -668,51 +668,6 @@ the alert now carries the reply's text instead and tapping it opens Bram.
 Exit criterion: a model loaded with the app backgrounded reports its phase in a persistent
 notification, a turn finishes while the app is backgrounded, and — when the setting is on — posts
 a completion notification summarizing the reply that the user can act on without opening Bram.
-
-## Milestone 19 — in-app model downloads (complete)
-
-The M1 deferral paid off while it stood, but it has been the biggest new-user gap since: getting a
-GGUF onto the phone needed a browser, a Hugging Face page, a file manager, and the SAF picker.
-This closes the gap with a download straight from the Models screen.
-
-- **Catalog listing.** `HuggingFaceCatalog` asks the tree API for every GGUF the repository's
-  main branch carries — the metadata endpoint lists a handful of sibling files, not the
-  quantizations, and a person should pick the size they want — and offers only LFS files with an
-  object id, because a file without a SHA-256 to verify against cannot be trusted the way an
-  import expects to be. The list is sorted smallest-first so the cheapest option leads, and
-  missing, gated/private, and otherwise failing repositories become readable messages rather than
-  stack traces. Repo ids are validated up front with a hint showing the expected shape.
-- **Verified download.** `ModelDownloader` streams into a `.gguf.part` staging file, verifying
-  SHA-256 as it goes, so an interrupted or cancelled download can never be mistaken for a
-  complete model. It renames to the digest name only after verification, rejects truncated or
-  mismatched responses, and deletes the staging file on any failure — a phone has no spare
-  gigabytes for half a model. Cancellation is instant even on a quiet socket: cancelling the job
-  severs the connection, waking a blocked read immediately rather than waiting out the read
-  timeout, and the error is rewrapped as a cancellation so the UI does not report a deliberate
-  stop as a failure.
-- **Import.** The verified copy is moved into the store with the HF source URL recorded on the
-  record, metadata read from the file itself, and the same auto-profile behaviour as any other
-  import, so the model is loadable the moment the download lands.
-- **UI.** "Download a model" on the Models screen opens a dialog with the repository field,
-  one-tap chips for the Qwen family, a file list with sizes, a live progress bar (indeterminate
-  only until the first bytes arrive), a Cancel that works, and success/error states. The
-  ViewModel's download runs in the application scope with progress pushed through state, and
-  cancellation always resets the UI, including when it arrives as a thrown `CancellationException`.
-- **Tests.** Eleven unit tests against stub HTTP servers: tree parsing and sorting, missing and
-  gated repository messages, URL shape, the download happy path (content, naming, progress),
-  SHA-256 mismatch, truncation, HTTP failure, and cancellation cleaning up the staging file.
-
-Verified on the S25 Ultra with `Qwen/Qwen2.5-0.5B-Instruct-GGUF`: the catalog listed five
-quants smallest-first, the Q2_K copy downloaded at about 1.3 MB/s with live progress, verified,
-and imported as `9ee36184e616dfc76df4f5dd.gguf` (396 MB), its profile auto-created. Loaded on the
-CPU and chatted with, the first turn processed the prompt cold at 104.2 tok/s; the second turn
-reported `KV reuse: 565 of 585 tok` (96.6%) and processed at 2489.4 tok/s — a 24x prompt speedup
-that finally demonstrates Milestone 7's KV-reuse gain, which the hybrid LFM2.5 reference model
-cannot (llama.cpp refuses partial cache trims for it). Generation ran at 52–56 tok/s.
-
-Deferred: resumable transfers, parallel/queued downloads with notifications, multi-file
-repositories (split GGUF parts), and Xet. None of them changes the shape of the code they would
-build on.
 
 ## Testing matrix
 

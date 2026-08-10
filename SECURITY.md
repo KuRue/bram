@@ -28,8 +28,7 @@ Use a private GitHub security advisory for the repository when available. Do not
 - GGUF files and their embedded metadata/templates remain untrusted native-runtime input. Import
   hashing identifies the selected bytes but does not establish publisher provenance or compare
   them with an authoritative expected hash.
-- Only seekable document-provider files can be loaded. Bram does not yet offer an app-managed copy
-  fallback, built-in downloads, or resumable transfers.
+- Only seekable document-provider files can be loaded; there is no app-managed copy fallback.
 - Accelerator backends, model provenance, sandboxed skill assets, and autonomous-run auditing
   remain roadmap work.
 
