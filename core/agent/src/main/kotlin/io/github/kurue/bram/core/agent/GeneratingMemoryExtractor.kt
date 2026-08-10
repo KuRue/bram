@@ -74,7 +74,7 @@ class GeneratingMemoryExtractor : MemoryExtractor {
         const val EXTRACTION_SYSTEM_PROMPT =
             "Read the exchange and pull out only durable memories the assistant should keep for " +
                 "future turns. Output ONLY a JSON array, no prose, no code fence. Each element has " +
-                "the shape {\"kind\": \"fact\" | \"instruction\", \"text\": string, \"importance\": number}. " +
+                    "the shape {\"kind\": \"fact\" | \"instruction\", \"text\": string, \"importance\": number between 0.0 and 1.0}. " +
                 "\"fact\": a statement true later (the user's name, tools or languages they use, " +
                 "project details, deadlines, preferences about content). " +
                 "\"instruction\": a standing directive about how to respond (tone, format, things to " +
