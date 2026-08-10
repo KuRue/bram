@@ -341,6 +341,16 @@ class InMemoryMemoryStore : MemoryStore {
         values.getOrPut(conversationId.value) { mutableListOf() }.add(memory)
     }
 
+    override suspend fun recent(limit: Int): List<MemoryRecord> =
+        values.values.flatten()
+            .filterNot { it.kind == io.github.kurue.bram.core.domain.MemoryKind.WORKING_SUMMARY }
+            .sortedByDescending { it.createdAtEpochMillis }
+            .take(limit)
+
+    override suspend fun remove(id: String) {
+        values.values.forEach { list -> list.removeAll { it.id == id } }
+    }
+
     private fun List<MemoryRecord>.searchScored(query: String, limit: Int): List<MemoryRecord> {
         val terms = query.lowercase().split(Regex("\\W+")).filter { it.length > 2 }.toSet()
         return filterNot { it.kind == io.github.kurue.bram.core.domain.MemoryKind.WORKING_SUMMARY }

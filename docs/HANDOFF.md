@@ -80,16 +80,16 @@ the app.
 **Chat quality of life.** Retry, edit-and-resend, copy, Markdown rendering, and
 auto-scroll that follows a streaming reply.
 
-**Tools.** The approval gate asks before a side-effecting tool runs; `write_note`
-is the one tool a local model can call end to end. (More tools live on
-`agent-tools`.)
+**Tools.** The approval gate asks before a side-effecting tool runs. The
+built-in surface (wired in `BramApplication`) covers device status, scratch
+notes, web search/fetch, files, clipboard, notifications, scheduled reminders,
+app/URI launching, contacts, calendar, Termux commands, and memory search; MCP
+servers contribute more at runtime.
 
 ## What is not implemented
 
 - **Resumable or queued downloads.** One verified, cancellable transfer at a
   time; a dropped connection restarts the file rather than resuming it.
-- **Tools beyond `device_status` and `write_note`.** `web_search`/`web_fetch`
-  are on `agent-tools`, not main.
 - **Automation and scheduling gaps.** The task queue, cron automations, and
   per-task UI are shipped (M13/M16), and a `BootReceiver` re-arms automations
   and scheduled tasks after a reboot or app update, but cron is the only
@@ -97,10 +97,11 @@ is the one tool a local model can call end to end. (More tools live on
   budgets.
 - **Memory gaps.** Working-summary compaction and `SEMANTIC_FACT` /
   `USER_INSTRUCTION` extraction (run after each completed turn) are wired and
-  FTS-retrieved, but `EPISODE` records are never produced, there is no UI for
-  browsing or curating memories, no embeddings/vector index, and extracted
-  facts are conversation-scoped (cross-conversation recall is via the
-  `memory_search` tool only).
+  FTS-retrieved, and a Settings panel lists recent memories and lets the user
+  forget wrong ones, but `EPISODE` records are never produced, there is no
+  embeddings/vector index (recall is FTS only), and extracted facts are
+  conversation-scoped (cross-conversation recall is via the `memory_search`
+  tool only).
 - **Skills gaps.** The SKILL.md lifecycle is shipped (M16); the remaining gap is
   agent-authored drafts (the `QUARANTINED` lifecycle path is unimplemented).
 - **LiteRT.** The `:runtime:litertlm` module is wired end-to-end (import, store,

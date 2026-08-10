@@ -23,6 +23,8 @@ import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.McpServer
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.MemoryKind
+import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.ReasoningFormat
@@ -365,6 +367,8 @@ data class AppUiState(
     val automations: List<Automation> = emptyList(),
     /** The last automation action's result, shown under the automations section. */
     val automationStatus: String? = null,
+    /** Newest-first remembered facts and instructions, for the memory browser. */
+    val memories: List<MemoryRecord> = emptyList(),
 ) {
     val selectedLocalModel: LocalModelRecord?
         get() = localModels.firstOrNull { it.id.value == selectedRuntimeId }
@@ -501,6 +505,7 @@ class MainViewModel(
         refreshSkills()
         refreshAutomations()
         container.automationRunner.rescheduleAll()
+        refreshMemories()
     }
 
     private fun refreshRunJournal() {
@@ -2077,6 +2082,21 @@ class MainViewModel(
         mutableState.update { it.copy(automationStatus = message) }
     }
 
+    fun refreshMemories() {
+        viewModelScope.launch {
+            val memories = runCatching { container.memoryStore.recent(MEMORY_BROWSER_LIMIT) }
+                .getOrDefault(emptyList())
+            mutableState.update { it.copy(memories = memories) }
+        }
+    }
+
+    fun removeMemory(id: String) {
+        viewModelScope.launch {
+            runCatching { container.memoryStore.remove(id) }
+            refreshMemories()
+        }
+    }
+
     /** The assistant bubble as it stands mid-turn, so tool steps appear as they happen. */
     private fun inFlightMessage(text: String, activity: List<AgentActivity>) = ConversationMessage(
         role = MessageRole.ASSISTANT,
@@ -2736,6 +2756,9 @@ private const val FULL_GPU_OFFLOAD = 999
 
 /** Free storage the download needs beside the file itself: the staged copy and the imported one. */
 private const val FREE_STORAGE_BUFFER_BYTES = 512L * 1024 * 1024
+
+/** How many memories the browser shows — newest first, plenty for review without flooding the panel. */
+private const val MEMORY_BROWSER_LIMIT = 200
 
 private fun Int?.orZero(): Int = this ?: 0
 

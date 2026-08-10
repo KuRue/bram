@@ -89,6 +89,28 @@ class PersistentMemoryStore(context: Context) : MemoryStore {
             Unit
         }
 
+    override suspend fun recent(limit: Int): List<MemoryRecord> = withContext(Dispatchers.IO) {
+        // Working summaries are an internal scratchpad, not something to browse: hide them so the
+        // panel shows only facts, instructions, and episodes.
+        database.readableDatabase.query(
+            "memory_records",
+            null,
+            "kind != ?",
+            arrayOf(MemoryKind.WORKING_SUMMARY.name),
+            null,
+            null,
+            "created_at DESC LIMIT $limit",
+        ).use { cursor ->
+            cursor.rows()
+        }
+    }
+
+    override suspend fun remove(id: String) = withContext(Dispatchers.IO) {
+        // The AFTER DELETE trigger on memory_records keeps the FTS index in sync.
+        database.writableDatabase.delete("memory_records", "id = ?", arrayOf(id))
+        Unit
+    }
+
     private fun Cursor.rows(): List<MemoryRecord> {
         val out = mutableListOf<MemoryRecord>()
         while (moveToNext()) out += toMemoryRecord()

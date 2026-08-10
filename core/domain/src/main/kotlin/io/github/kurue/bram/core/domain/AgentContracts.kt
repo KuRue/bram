@@ -25,6 +25,10 @@ interface MemoryStore {
     /** Searches every conversation, for the agent's own recall tool and for diagnostics. */
     suspend fun searchAll(query: String, limit: Int): List<MemoryRecord>
     suspend fun put(conversationId: ConversationId, memory: MemoryRecord)
+    /** Newest memories first across every conversation, for the memory browser. */
+    suspend fun recent(limit: Int): List<MemoryRecord>
+    /** Drops a memory by id; safe to call with an id that is no longer present. */
+    suspend fun remove(id: String)
 }
 
 /** Where an agent run stands, for the persistent run journal. */

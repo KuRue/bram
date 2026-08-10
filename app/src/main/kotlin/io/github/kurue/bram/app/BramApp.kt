@@ -119,6 +119,8 @@ import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.MemoryKind
+import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.PrivacyClass
 import io.github.kurue.bram.core.domain.RemoteApiKind
@@ -325,6 +327,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onSaveAutomation = viewModel::saveAutomation,
                                 onRemoveAutomation = viewModel::removeAutomation,
                                 onSetAutomationEnabled = viewModel::setAutomationEnabled,
+                                onRemoveMemory = viewModel::removeMemory,
                                 onRefreshDiagnostics = viewModel::refreshDeviceProfile,
                                 onWithdrawToolPermission = viewModel::withdrawToolPermission,
                                 onSetCompletionAlerts = viewModel::setCompletionAlerts,
@@ -2176,6 +2179,7 @@ private fun SettingsScreen(
     onSaveAutomation: (String, String, String) -> Unit,
     onRemoveAutomation: (String) -> Unit,
     onSetAutomationEnabled: (String, Boolean) -> Unit,
+    onRemoveMemory: (String) -> Unit,
     onRefreshDiagnostics: () -> Unit,
     onWithdrawToolPermission: (String) -> Unit,
     onSetCompletionAlerts: (Boolean) -> Unit,
@@ -2388,6 +2392,18 @@ private fun SettingsScreen(
             onClick = { onSaveAutomation(automationName, automationCron, automationPrompt) },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Save automation") }
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        SectionHeader(
+            "Memories",
+            "What the assistant remembered from past turns — extracted facts and standing " +
+                "instructions. The agent recalls these through its memory_search tool; remove " +
+                "anything wrong or stale so it does not color future replies.",
+        )
+        if (state.memories.isEmpty()) {
+            Text("No memories yet. They are gathered automatically as you chat.")
+        }
+        state.memories.forEach { MemoryCard(it, onRemoveMemory) }
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
         SectionHeader(
@@ -2988,6 +3004,42 @@ private fun AutomationCard(
 private fun formatWhen(epochMillis: Long): String =
     java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
         .format(java.util.Date(epochMillis))
+
+@Composable
+private fun MemoryCard(memory: MemoryRecord, onRemove: (String) -> Unit) {
+    GlassSurface(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    memoryKindLabel(memory.kind),
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "importance ${"%.1f".format(memory.importance)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(memory.text)
+            Text(
+                "remembered ${formatWhen(memory.createdAtEpochMillis)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row {
+                TextButton(onClick = { onRemove(memory.id) }) { Text("Forget") }
+            }
+        }
+    }
+}
+
+private fun memoryKindLabel(kind: MemoryKind): String = when (kind) {
+    MemoryKind.SEMANTIC_FACT -> "Fact"
+    MemoryKind.USER_INSTRUCTION -> "Instruction"
+    MemoryKind.EPISODE -> "Episode"
+    MemoryKind.WORKING_SUMMARY -> "Working summary"
+}
 
 @Composable
 private fun InfoCard(title: String, detail: String) {
