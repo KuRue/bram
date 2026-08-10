@@ -91,9 +91,10 @@ is the one tool a local model can call end to end. (More tools live on
 - **Tools beyond `device_status` and `write_note`.** `web_search`/`web_fetch`
   are on `agent-tools`, not main.
 - **Automation and scheduling gaps.** The task queue, cron automations, and
-  per-task UI are shipped (M13/M16), but automations do not survive a reboot
-  (no `BOOT_COMPLETED` receiver), cron is the only schedule kind, and there are
-  no network/charging constraints or per-run budgets.
+  per-task UI are shipped (M13/M16), and a `BootReceiver` re-arms automations
+  and scheduled tasks after a reboot or app update, but cron is the only
+  schedule kind, and there are no network/charging constraints or per-run
+  budgets.
 - **Memory gaps.** Working-summary compaction and `SEMANTIC_FACT` /
   `USER_INSTRUCTION` extraction (run after each completed turn) are wired and
   FTS-retrieved, but `EPISODE` records are never produced, there is no UI for

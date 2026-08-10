@@ -17,9 +17,11 @@ import kotlinx.coroutines.launch
  * from the conversation library like any task. The next occurrence is then scheduled, chaining the
  * recurrence.
  *
- * Alarms are best-effort, exactly like scheduled tasks: they do not survive a reboot, and a
- * schedule whose fire time passed while the phone was off fires when the app next starts, because
- * [rescheduleAll] is called at startup and an alarm set for a past time fires immediately.
+ * Alarms are best-effort, exactly like scheduled tasks: the system can drop them under pressure,
+ * and Android clears them on reboot or app update. [BootReceiver] re-arms everything the moment
+ * the phone is back, and an alarm set for a past time fires immediately, so a schedule whose fire
+ * time passed while the phone was off runs as soon as the device is on again — even before the
+ * app is ever opened.
  */
 class AutomationRunner(
     private val appContext: Context,
@@ -31,14 +33,17 @@ class AutomationRunner(
 
     /** Called at startup and after any schedule change: one alarm per enabled automation. */
     fun rescheduleAll() {
-        scope.launch {
-            store.automations().forEach { automation ->
-                val outcome = reschedule(automation)
-                if (outcome is AutomationOutcome.Failed) {
-                    // A stored schedule the parser no longer accepts (it was valid when saved, or
-                    // the file was hand-edited) must not alarm forever: it just never fires.
-                    store.save(automation.copy(nextRunAtEpochMillis = null))
-                }
+        scope.launch { rescheduleAllNow() }
+    }
+
+    /** The work behind [rescheduleAll], awaited by [BootReceiver] so the process cannot die first. */
+    suspend fun rescheduleAllNow() {
+        store.automations().forEach { automation ->
+            val outcome = reschedule(automation)
+            if (outcome is AutomationOutcome.Failed) {
+                // A stored schedule the parser no longer accepts (it was valid when saved, or
+                // the file was hand-edited) must not alarm forever: it just never fires.
+                store.save(automation.copy(nextRunAtEpochMillis = null))
             }
         }
     }

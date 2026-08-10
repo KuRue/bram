@@ -14,6 +14,8 @@
     <!-- Exact alarms are a special app-op on API 31+. Declared so the reminder tool can schedule
          exactly when the user has granted it; otherwise it falls back to inexact timing. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- Re-arms the alarms for automations and scheduled tasks after the phone restarts. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Termux declares this permission for third-party apps that run commands in its context.
          The user grants it on the App Info > Permissions > Additional permissions screen. -->
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
@@ -63,6 +65,18 @@
         <receiver
             android:name=".TaskAlarmReceiver"
             android:exported="false" />
+
+        <!-- Re-arms automations and scheduled-task alarms after a reboot or app update. Both
+             broadcasts are protected: only the system (or the package itself) can deliver them. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <activity
             android:name=".MainActivity"

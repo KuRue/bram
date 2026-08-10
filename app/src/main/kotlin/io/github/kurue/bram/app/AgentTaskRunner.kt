@@ -22,6 +22,9 @@ import kotlinx.coroutines.launch
  * [executor] at startup. A task whose time has come while no model is loaded is marked
  * [TaskState.DEFERRED] rather than failed: an unattended schedule should not lose work because the
  * app happened not to be ready, so deferred tasks start as soon as a model is loaded again.
+ *
+ * Alarms do not survive a reboot or an app update; [reschedulePending] re-arms them when the
+ * phone is back, so the queue behaves as if the app had been open the whole time.
  */
 class AgentTaskRunner(
     private val appContext: Context,
@@ -50,8 +53,23 @@ class AgentTaskRunner(
 
     private var currentJob: Job? = null
 
+    /**
+     * Loads the persisted queue once; [reschedulePending] joins it so alarms are never re-armed
+     * against an empty in-memory list.
+     */
+    private val loadJob: Job
+
     init {
-        scope.launch {
+        // When the process was started by a boot receiver or an alarm there is no ViewModel to
+        // tell the user a task is waiting for a model, so the runner says so itself. The ViewModel
+        // replaces this with its own notifier the moment the app opens. postTaskDeferred is
+        // self-guarding (notification permission and channel), so this is safe in any process.
+        notifier = { task ->
+            if (task.state == TaskState.DEFERRED) {
+                AgentTaskService.postTaskDeferred(appContext, task)
+            }
+        }
+        loadJob = scope.launch {
             mutableTasks.value = runCatching { store.load() }.getOrDefault(emptyList())
                 .sortedByDescending(AgentTask::createdAtEpochMillis)
         }
@@ -73,6 +91,31 @@ class AgentTaskRunner(
         if (scheduledAtEpochMillis != null) scheduleAlarm(task)
         processNow()
         return task
+    }
+
+    /**
+     * Re-arms the alarms Android cleared on reboot or app update, then starts anything whose time
+     * has come (defers it until a model is loaded, with a notification). Called by [BootReceiver];
+     * waits for the store to load first, so no pending alarm is lost to the load race.
+     */
+    fun reschedulePending() {
+        scope.launch { reschedulePendingNow() }
+    }
+
+    /**
+     * The work behind [reschedulePending], awaited by [BootReceiver] so the process cannot die
+     * before every alarm is back in place.
+     */
+    suspend fun reschedulePendingNow() {
+        loadJob.join()
+        val now = System.currentTimeMillis()
+        mutableTasks.value
+            .filter { it.state == TaskState.QUEUED }
+            .forEach { task ->
+                val at = task.scheduledAtEpochMillis
+                if (at != null && at > now) scheduleAlarm(task)
+            }
+        processNow()
     }
 
     /**

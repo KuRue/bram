@@ -559,9 +559,10 @@ matches) — and computes the next fire strictly after a given time. `Persistent
 gives every enabled automation a one-shot `setAndAllowWhileIdle` alarm for its next fire and
 chains the next one when it fires; the existing `TaskAlarmReceiver` was extended with an
 automation-id extra, so there is still exactly one manifest receiver for all of it. Alarms are
-best-effort like scheduled tasks — they do not survive a reboot, and a fire that passed while
-the phone was off happens at the next app start, because startup reschedules everything and an
-alarm set for the past fires immediately. The Settings panel lists each automation with its
+best-effort like scheduled tasks — Android clears them on reboot and app update, and a
+`BootReceiver` re-arms automations and scheduled tasks the moment the device is back, so a fire
+that passed while the phone was off happens at boot (an alarm set for the past fires
+immediately) rather than at the next app start. The Settings panel lists each automation with its
 schedule, enabled switch, last and next fire times, and the add form validates the expression
 before saving. Fourteen JVM tests cover the cron parser and the next-fire math, including
 weekdays-only, quarter-hour steps, Friday-the-13th semantics, February 31st never firing, and
