@@ -13,6 +13,7 @@ android {
         targetSdk = 36
         versionCode = 2
         versionName = "0.2.0-alpha01"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures {
@@ -76,6 +77,9 @@ dependencies {
     androidTestImplementation(composeBom)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
     // The android.jar on the unit-test classpath stubs org.json and throws from every method, so
     // the real implementation goes in behind it.
     testImplementation(libs.org.json)
