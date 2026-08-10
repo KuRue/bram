@@ -100,12 +100,19 @@ fun parseExtractedMemories(raw: String): List<ExtractedMemory> {
     return out
 }
 
-/** Finds the outermost JSON array in [raw], tolerating a ``` fence and surrounding prose. */
+/**
+ * Finds the JSON payload in [raw], tolerating a ``` fence and surrounding prose. Small models
+ * often emit a single object instead of the requested array, so a leading `{…}` is accepted and
+ * wrapped as a one-element array rather than discarded.
+ */
 private fun extractJsonArray(raw: String): String? {
-    val start = raw.indexOf('[')
-    val end = raw.lastIndexOf(']')
-    if (start < 0 || end <= start) return null
-    return raw.substring(start, end + 1)
+    val arrStart = raw.indexOf('[')
+    val arrEnd = raw.lastIndexOf(']')
+    if (arrStart >= 0 && arrEnd > arrStart) return raw.substring(arrStart, arrEnd + 1)
+    val objStart = raw.indexOf('{')
+    val objEnd = raw.lastIndexOf('}')
+    if (objStart >= 0 && objEnd > objStart) return "[" + raw.substring(objStart, objEnd + 1) + "]"
+    return null
 }
 
 private fun parseKind(value: String): MemoryKind? = when (value.trim().lowercase()) {

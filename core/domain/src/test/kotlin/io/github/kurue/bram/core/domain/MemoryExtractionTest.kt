@@ -55,6 +55,14 @@ class MemoryExtractionTest {
     }
 
     @Test
+    fun `accepts a single object in place of an array`() {
+        // Small models routinely emit one object instead of the requested array.
+        val out = parseExtractedMemories("""Here you go: {"kind":"fact","text":"The user likes cats"}""")
+        assertEquals(1, out.size)
+        assertEquals("The user likes cats", out[0].text)
+    }
+
+    @Test
     fun `caps the number of extracted items`() {
         val items = (0 until 12).joinToString(",") { """{"kind":"fact","text":"fact number $it"}""" }
         assertEquals(8, parseExtractedMemories("[$items]").size)
