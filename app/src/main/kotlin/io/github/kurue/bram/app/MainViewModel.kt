@@ -2052,9 +2052,14 @@ class MainViewModel(
     private suspend fun runInstructions(snapshot: AppUiState): String {
         val base = snapshot.activeProfile?.systemPrompt.orEmpty()
         val skills = runCatching { container.skillStore.activeSkills() }.getOrDefault(emptyList())
+        // Rank skills by description similarity to this turn's ask, so the ones that matter land
+        // first and the character budget trims the rest. With no embedding model designated the
+        // ranker returns the input unchanged, so every active skill still joins the prompt.
+        val query = snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
+        val ranked = container.skillSelection.rank(skills, query, container.embedder)
         val memories = runCatching { container.memoryStore.mostImportant(MEMORY_INJECTION_LIMIT) }
             .getOrDefault(emptyList())
-        return MemoryPrompt.append(SkillPrompt.append(base, skills), memories)
+        return MemoryPrompt.append(SkillPrompt.append(base, ranked), memories)
     }
 
     fun refreshAutomations() {

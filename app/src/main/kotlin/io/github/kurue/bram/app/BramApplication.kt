@@ -7,10 +7,12 @@ import io.github.kurue.bram.core.agent.DefaultAgentOrchestrator
 import io.github.kurue.bram.core.agent.GeneratingMemoryExtractor
 import io.github.kurue.bram.core.agent.MutableToolRegistry
 import io.github.kurue.bram.core.agent.StaticToolRegistry
+import io.github.kurue.bram.core.domain.Embedder
 import io.github.kurue.bram.core.domain.EndpointCredentialResolver
 import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import io.github.kurue.bram.core.domain.SkillSelection
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import kotlinx.coroutines.CoroutineScope
@@ -111,17 +113,25 @@ class AppContainer(application: Application) {
      * session (working-directory persistence across `shell` calls) and a task run can clear it.
      */
     val termuxTool = TermuxCommandTool(application)
-    val memoryStore = PersistentMemoryStore(
-        application,
-        // Skips the IPC entirely when no embedding model is designated, so the common keyword-only
-        // case pays nothing and the inference process is not bound on every memory write.
-        object : io.github.kurue.bram.core.domain.Embedder {
-            override suspend fun embed(text: String): FloatArray? {
-                if (embeddingModelStore.modelId() == null) return null
-                return LlamaCppEmbedder(llamaCppClient).embed(text)
-            }
-        },
-    )
+    /**
+     * The guarded embedder shared by semantic memory recall and skill ranking. Returns null when no
+     * embedding model is designated, so the memory store falls back to keyword (FTS) recall and
+     * skill selection falls back to inserting every active skill — both unchanged from the
+     * no-embedder baseline.
+     */
+    val embedder: Embedder = object : Embedder {
+        override suspend fun embed(text: String): FloatArray? {
+            if (embeddingModelStore.modelId() == null) return null
+            return LlamaCppEmbedder(llamaCppClient).embed(text)
+        }
+    }
+    val memoryStore = PersistentMemoryStore(application, embedder)
+    /**
+     * Ranks active skills by description similarity to the turn's query, so the prompt's character
+     * budget trims the least relevant rather than the alphabetically last. Cache lives here so it
+     * survives across per-run orchestrator instances.
+     */
+    val skillSelection = SkillSelection()
     val runJournal = SqliteRunJournal(application)
     /**
      * Built-ins plus whatever MCP servers contribute. Mutable so a server's tools can be swapped in
