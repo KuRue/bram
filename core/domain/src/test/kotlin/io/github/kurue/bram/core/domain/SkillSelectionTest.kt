@@ -84,4 +84,61 @@ class SkillSelectionTest {
         assertEquals(2, calls.count { it == "da" })
         assertEquals(1, calls.count { it == "db" })
     }
+
+    // --- draft discovery -------------------------------------------------------
+
+    private fun packageWithDraft(
+        id: String,
+        name: String,
+        draftDescription: String,
+        draftVersion: String = "1.0.0",
+    ) = SkillPackage(
+        id = id,
+        name = name,
+        versions = listOf(SkillVersion(draftVersion, draftDescription, "draft body", 0)),
+        activeVersion = null,
+        draftVersion = draftVersion,
+        updatedAtEpochMillis = 0,
+    )
+
+    @Test
+    fun `topDraft returns the draft whose description matches the query above threshold`() = runBlocking {
+        val git = packageWithDraft("git", "Git helper", "how to use git for version control")
+        val cooking = packageWithDraft("cooking", "Cooking", "recipes and cooking techniques")
+        val embedder = embedder(
+            mapOf(
+                "how to use git for version control" to floatArrayOf(1f, 0f),
+                "recipes and cooking techniques" to floatArrayOf(0f, 1f),
+                "commit my staged changes" to floatArrayOf(1f, 0f),
+            ),
+        )
+        val match = SkillSelection().topDraft(listOf(cooking, git), "commit my staged changes", embedder)
+        assertEquals("git", match?.id)
+    }
+
+    @Test
+    fun `topDraft returns null when the best match is below threshold`() = runBlocking {
+        val git = packageWithDraft("git", "Git helper", "how to use git")
+        // Orthogonal vectors → cosine 0, well below the default 0.60 threshold.
+        val embedder = embedder(
+            mapOf(
+                "how to use git" to floatArrayOf(1f, 0f),
+                "what's the weather" to floatArrayOf(0f, 1f),
+            ),
+        )
+        assertEquals(null, SkillSelection().topDraft(listOf(git), "what's the weather", embedder))
+    }
+
+    @Test
+    fun `topDraft returns null without an embedder, without ranking`() = runBlocking {
+        val draft = packageWithDraft("git", "Git helper", "how to use git")
+        assertEquals(null, SkillSelection().topDraft(listOf(draft), "use git", embedder = null))
+    }
+
+    @Test
+    fun `topDraft ignores packages that have no draft`() = runBlocking {
+        // An active-only package (no draftVersion) is not a discovery candidate.
+        val active = SkillPackage("a", "Active", listOf(SkillVersion("1.0.0", "desc", "body", 0)), "1.0.0", null, 0)
+        assertEquals(null, SkillSelection().topDraft(listOf(active), "anything", embedder(emptyMap())))
+    }
 }

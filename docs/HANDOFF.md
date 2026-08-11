@@ -130,7 +130,11 @@ servers contribute more at runtime.
   conversation, so a long-running thread cannot let them dominate.)
 - **Skills gaps.** The SKILL.md lifecycle is shipped (M16), and the agent can now author skill
   drafts through a `propose_skill` tool — they land with no active version (kept out of the
-  system prompt) until the user activates them from Settings.
+  system prompt) until the user activates them from Settings. Active skills are cosine-ranked
+  against the turn's query so the prompt's character budget trims the least relevant; and a
+  drafted skill whose description matches the task is surfaced to the model as a one-line nudge
+  (at most once per conversation, deduped), so the user learns a relevant draft exists without the
+  draft ever being followed before activation. Both need an embedding model designated to rank.
 - **LiteRT.** The `:runtime:litertlm` module is wired end-to-end (import, store,
   routing, UI card) but is blocked from shipping by an upstream AAR crash — see
   Known issues. It is not a usable runtime yet.

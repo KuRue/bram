@@ -304,5 +304,18 @@ object SkillPrompt {
         }
     }
 
+    /**
+     * A one-line advisory that a relevant drafted (inactive) skill exists, so the model can suggest
+     * the user activate it. A draft is unreviewed text and is never followed until activation, so
+     * this is not an instruction — it only names the draft and its description, and asks to be
+     * mentioned once rather than nagged about.
+     */
+    fun appendDraftHint(prompt: String, name: String, description: String): String {
+        val hint = "DRAFTED SKILL (not active): $name — $description. It is not followed until the " +
+            "user activates it in Skills. You may mention it once if it is clearly relevant to the " +
+            "task; do not repeat or nag."
+        return if (prompt.isBlank()) hint else "$prompt\n\n$hint"
+    }
+
     const val MAX_SKILL_PROMPT_CHARS = 100_000
 }

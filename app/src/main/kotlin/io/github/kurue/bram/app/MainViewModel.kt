@@ -460,6 +460,12 @@ class MainViewModel(
     private var generationJob: Job? = null
     /** Whether the app is what the user is looking at. Gates the completion alert. */
     private var appForeground = true
+    /**
+     * Drafted-skill ids already nudged in the current conversation, so a relevant draft is suggested
+     * at most once per thread. Cleared when the conversation changes; a draft that activates or
+     * re-versions is handled by it no longer being a draft (or the caller deduping on id).
+     */
+    private val hintedDraftSkills = mutableSetOf<String>()
     /** Pure candidate scorer; one per ViewModel because it holds no state. */
     private val router = RuleBasedModelRouter()
     /** Prevents catalog refresh from inventing a Primary before persisted assignments arrive. */
@@ -714,6 +720,7 @@ class MainViewModel(
     fun startNewConversation() {
         if (mutableState.value.isGenerating) return
         conversationId = container.conversationStore.newId()
+        hintedDraftSkills.clear()
         container.approvalGate.setMode(PermissionMode.AUTO)
         mutableState.update {
             it.copy(
@@ -740,6 +747,7 @@ class MainViewModel(
             val mode = runCatching { container.conversationStore.permissionMode(target) }.getOrDefault(PermissionMode.AUTO)
             val privacy = runCatching { container.conversationStore.privacyClass(target) }.getOrDefault(PrivacyClass.STANDARD)
             conversationId = target
+            hintedDraftSkills.clear()
             container.approvalGate.setMode(mode)
             mutableState.update {
                 it.copy(
@@ -2057,9 +2065,22 @@ class MainViewModel(
         // ranker returns the input unchanged, so every active skill still joins the prompt.
         val query = snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
         val ranked = container.skillSelection.rank(skills, query, container.embedder)
+        var prompt = SkillPrompt.append(base, ranked)
+        // One nudge per conversation: surface a drafted (inactive) skill whose description matches
+        // this task so the user learns it exists. Drafts are unreviewed text and are never followed
+        // — only their existence is named — and the set keeps a match from being suggested twice.
+        val packages = runCatching { container.skillStore.packages() }.getOrDefault(emptyList())
+        val draft = container.skillSelection.topDraft(packages, query, container.embedder)
+            ?.takeIf { it.id !in hintedDraftSkills }
+        if (draft != null) {
+            hintedDraftSkills += draft.id
+            draft.versions.firstOrNull { it.version == draft.draftVersion }?.let { version ->
+                prompt = SkillPrompt.appendDraftHint(prompt, draft.name, version.description)
+            }
+        }
         val memories = runCatching { container.memoryStore.mostImportant(MEMORY_INJECTION_LIMIT) }
             .getOrDefault(emptyList())
-        return MemoryPrompt.append(SkillPrompt.append(base, ranked), memories)
+        return MemoryPrompt.append(prompt, memories)
     }
 
     fun refreshAutomations() {

@@ -258,4 +258,21 @@ class SkillLibraryTest {
         assertEquals(listOf("1.0.0"), pkg.versions.map { it.version })
         assertTrue(library.activeSkills().isEmpty())
     }
+
+    @Test
+    fun `the draft hint names the skill and description, and says it is not active`() {
+        val prompt = SkillPrompt.appendDraftHint("base prompt", "Git helper", "how to use git")
+        assertTrue("carries the base prompt", prompt.startsWith("base prompt"))
+        assertTrue("names the draft", prompt.contains("Git helper"))
+        assertTrue("includes the description", prompt.contains("how to use git"))
+        assertTrue("says it is not active", prompt.contains("not active"))
+        assertTrue("asks not to nag", prompt.contains("once"))
+    }
+
+    @Test
+    fun `the draft hint stands alone when there is no base prompt`() {
+        val prompt = SkillPrompt.appendDraftHint("", "Git helper", "how to use git")
+        assertTrue("names the draft without a base prompt", prompt.contains("Git helper"))
+        assertTrue("no leading blank section", !prompt.startsWith("\n"))
+    }
 }
