@@ -113,6 +113,8 @@ class AgentTaskService : Service() {
         private const val TASK_NOTIFICATION_ID = 1003
         private const val APPROVAL_CHANNEL_ID = "bram-approvals"
         private const val APPROVAL_BASE_NOTIFICATION_ID = 3000
+        private const val SKILL_DRAFT_CHANNEL_ID = "bram-skill-drafts"
+        private const val SKILL_DRAFT_NOTIFICATION_ID = 4000
 
         const val ACTION_APPROVAL_RESOLVE = "io.github.kurue.bram.action.APPROVAL_RESOLVE"
         const val EXTRA_APPROVAL_REQUEST_ID = "approvalRequestId"
@@ -265,6 +267,42 @@ class AgentTaskService : Service() {
                 .build()
             manager.notify(approvalNotificationId(request.id), notification)
             return true
+        }
+
+        /**
+         * Posts a nudge that the agent authored a skill draft, so it does not wait unseen in the
+         * Skills panel until the user happens to open it. Read-only by design: a draft is untrusted
+         * text, so the notification only opens for review and never activates the skill from the
+         * shade.
+         */
+        fun postSkillDraft(context: Context, name: String, version: String) {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            if (Build.VERSION.SDK_INT >= 26 && manager.getNotificationChannel(SKILL_DRAFT_CHANNEL_ID) == null) {
+                manager.createNotificationChannel(
+                    NotificationChannel(
+                        SKILL_DRAFT_CHANNEL_ID,
+                        "Skill drafts",
+                        NotificationManager.IMPORTANCE_DEFAULT,
+                    ).apply {
+                        this.description = "Posted when Bram authors a skill draft for you to review."
+                    },
+                )
+            }
+            val notification = Notification.Builder(context, SKILL_DRAFT_CHANNEL_ID)
+                .setContentTitle("Bram drafted a skill")
+                .setContentText("$name v$version — review it in Skills")
+                .setSmallIcon(android.R.drawable.ic_menu_edit)
+                .setContentIntent(openPendingIntent(context))
+                .setAutoCancel(true)
+                .build()
+            manager.notify(SKILL_DRAFT_NOTIFICATION_ID, notification)
         }
 
         /** Takes the request's notification down, on whatever path the request settled. */

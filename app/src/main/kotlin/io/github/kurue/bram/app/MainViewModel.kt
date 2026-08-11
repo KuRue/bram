@@ -56,6 +56,7 @@ import java.net.URI
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -1961,6 +1962,22 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Parses the propose_skill arguments (for the human-readable name) and its result (for
+     * success, since a rejected draft returns an error), and posts the review nudge. Best-effort:
+     * a malformed payload simply posts nothing.
+     */
+    private fun maybePostSkillDraftNotification(argumentsJson: String, resultJson: String) {
+        val result = runCatching { JSONObject(resultJson) }.getOrNull() ?: return
+        if (result.has("error")) return
+        val name = runCatching { JSONObject(argumentsJson).optString("name") }.getOrDefault("")
+            .takeIf(String::isNotBlank) ?: return
+        val version = result.optString("version").ifBlank {
+            runCatching { JSONObject(argumentsJson).optString("version") }.getOrDefault("")
+        }
+        AgentTaskService.postSkillDraft(container.appContext, name, version)
+    }
+
     /** Reads a picked skill file and imports it; the file picker hands over the URI, like models. */
     fun importSkillDocument(uri: Uri) {
         viewModelScope.launch {
@@ -2494,7 +2511,12 @@ class MainViewModel(
                             pushModelStatus(ModelPhase.GENERATING)
                             // A proposed skill is persisted the moment the tool returns; refresh so the
                             // draft shows in Settings without waiting for an app restart.
-                            if (event.call.name == "propose_skill") refreshSkills()
+                            if (event.call.name == "propose_skill") {
+                                refreshSkills()
+                                // A draft is untrusted text, so it must not wait unseen: nudge the
+                                // user to review it when they are not already watching the turn.
+                                if (!appForeground) maybePostSkillDraftNotification(event.call.argumentsJson, event.result)
+                            }
                         }
                         is AgentEvent.Usage -> mutableState.update { it.copy(lastUsage = event.usage) }
                         is AgentEvent.Metrics -> mutableState.update {
