@@ -142,9 +142,39 @@ llama.cpp's Jinja engine yields nothing for, so the template raises and Bram
 falls back to a built-in one. Turning reasoning off is the practical fix and is
 the default.
 
-**Tools need the model's own template to render.** Tool definitions go through
-`common_chat_templates_apply`. When a template falls back, that path has no tool
-support; Qwen3.5 is in that state and cannot call a tool.
+**Tools need the model's own template to render (designed, not yet shipped).**
+Tool definitions go through `common_chat_templates_apply`. When a model's
+Jinja template raises (Qwen3.5 iterates `messages[::-1]`, which minja yields
+nothing for), `apply_chat_template` in `runtime/llamacpp/src/main/cpp/bram_llama_jni.cpp`
+catches it and retries with `inputs.use_jinja = false` (lines ~457-466). That
+routes to llama.cpp's built-in templates, and the generic built-in does not
+format tools — so the model never sees what it can call. Qwen3.5 is in that
+state and cannot call a tool.
+
+A naive preamble ("here are your tools") is not enough on its own: Bram's
+recovery only catches one shape — `name(key='value')` (LFM2.5 style) in
+`runtime/llamacpp/.../inference/BareToolCall.kt` — it does not recover the
+Qwen/Hermes `<tool_call>{"name":…,"arguments":…}</tool_call>` JSON convention.
+So the fix needs a tool-capable built-in template *together with* its matching
+parser, ideally matched to the model's family. The native `common_chat_parse`
+already understands family-specific markers once the format is pinned.
+
+Plan, when a fallback model is available to validate against:
+1. On the `use_jinja = false` retry in `apply_chat_template`, pin
+   `inputs.chat_format` to a tool-capable built-in chosen by family heuristics
+   on the model metadata (Qwen3.x → the Qwen tool format; Hermes/ChatML →
+   Hermes; Llama3 → Llama3), instead of letting it resolve to the generic.
+2. Surface the chosen format in `bridge.chatFormat()` (already reported in the
+   start event) so the Kotlin side can pick the right reasoning tags and the
+   recovery path can relax only for the format actually in use.
+3. Only then consider broadening `BareToolCall` — its strictness is deliberate
+   (a model quoting JSON in prose must not become a call).
+
+This is parked because it is model-family-dependent and cannot be validated
+without a real fallback-mode model (Qwen3.5) doing tool calls on a device; the
+emulator has no such model and the suite cannot exercise template/parser
+tuning. Picking it up means loading one and iterating the format choice
+against real output before committing.
 
 **LFM2.5-2.6B is too small for reliable tool use.** It retries failing calls,
 invents tools the gate then rejects, and exhausts the tool-turn budget. The tool
