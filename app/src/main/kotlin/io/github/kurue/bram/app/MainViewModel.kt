@@ -43,7 +43,11 @@ import io.github.kurue.bram.core.domain.PrivacyClass
 import io.github.kurue.bram.core.domain.RemoteApiKind
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.RoutingMode
+import io.github.kurue.bram.core.domain.RoutingPoolAssignments
+import io.github.kurue.bram.core.domain.RoutingPoolSlot
 import io.github.kurue.bram.core.domain.RoutingRequest
+import io.github.kurue.bram.core.domain.RoutingWorkload
+import io.github.kurue.bram.core.domain.RoutingWorkloadClassifier
 import io.github.kurue.bram.core.domain.TokenUsage
 import io.github.kurue.bram.core.agent.RuleBasedModelRouter
 import io.github.kurue.bram.platform.android.RoutingSettingsStore
@@ -313,6 +317,8 @@ data class AppUiState(
     val privacyClass: PrivacyClass = PrivacyClass.STANDARD,
     /** How every turn chooses between local and remote processing. Global. */
     val routingMode: RoutingMode = RoutingMode.AUTO,
+    /** The small set of profiles/endpoints automatic routing is allowed to choose between. */
+    val routingPool: RoutingPoolAssignments = RoutingPoolAssignments(),
     /** The privacy class a brand new conversation starts with. Global. */
     val defaultPrivacyClass: PrivacyClass = PrivacyClass.STANDARD,
     /** What the most recent routing decision picked, for the session header and notifications. */
@@ -395,6 +401,14 @@ data class AppUiState(
 
     val activeProfile: ModelProfile?
         get() = profiles.firstOrNull { it.id == activeProfileId }
+
+    fun routingTargetLabel(targetId: String?): String? = when {
+        targetId == null -> null
+        targetId.startsWith(REMOTE_PREFIX) -> endpoints
+            .firstOrNull { remoteRuntimeId(it.id) == targetId }
+            ?.displayName
+        else -> profiles.firstOrNull { it.id == targetId }?.name
+    }
 }
 
 data class EndpointDraft(
@@ -444,6 +458,8 @@ class MainViewModel(
     private var appForeground = true
     /** Pure candidate scorer; one per ViewModel because it holds no state. */
     private val router = RuleBasedModelRouter()
+    /** Prevents catalog refresh from inventing a Primary before persisted assignments arrive. */
+    private var routingPoolRestored = false
 
     init {
         restoreRoutingSettings()
@@ -515,7 +531,7 @@ class MainViewModel(
         runner.executor = { task -> runTask(task) }
         runner.canRun = {
             val snapshot = mutableState.value
-            routeSelection(snapshot, snapshot.defaultPrivacyClass).isNotEmpty()
+            hasConfiguredRoute(snapshot, snapshot.defaultPrivacyClass)
         }
         runner.notifier = { task ->
             val backgrounded = !appForeground
@@ -548,10 +564,17 @@ class MainViewModel(
      * failing outright; a cancellation is a real stop, not a retry.
      */
     private suspend fun runTask(task: AgentTask): TaskOutcome {
+        val initial = mutableState.value
+        val workload = RoutingWorkloadClassifier.classify(task.prompt)
+        preferredLocalProfile(initial, workload)?.let { prepareLocalProfile(it) }
         val snapshot = mutableState.value
-        val plan = routeSelection(snapshot, snapshot.defaultPrivacyClass)
+        val plan = routeSelection(
+            snapshot,
+            snapshot.defaultPrivacyClass,
+            preferQuality = workload == RoutingWorkload.DEMANDING,
+        )
             .takeIf { it.isNotEmpty() }
-            ?: return TaskOutcome.Failed("No eligible runtime; load a model or check the routing policy.")
+            ?: return TaskOutcome.Failed("No eligible routing profile. Check the routing and privacy settings.")
         container.approvalGate.setMode(PermissionMode.AUTO)
         var failure: String? = null
         var reply: String? = null
@@ -857,7 +880,13 @@ class MainViewModel(
                     }.id.value
                 }
             }.onSuccess { id ->
-                if (isLiteRt) reloadLiteRtModels(selectId = id) else reloadLocalModels(selectId = id)
+                if (isLiteRt) {
+                    reloadLiteRtModels(selectId = id)
+                } else {
+                    // Import is the novice setup path: metadata creates the baseline profile, then
+                    // Bram measures any processors this phone exposes without asking for tuning.
+                    reloadLocalModels(selectId = id, configureImported = true)
+                }
             }.onFailure { error ->
                 mutableState.update { it.copy(error = error.message ?: "Could not import the model") }
             }
@@ -929,12 +958,45 @@ class MainViewModel(
         }
     }
 
+    /** Assigns a local profile or remote runtime to one automatic-routing role. */
+    fun setRoutingPoolTarget(slot: RoutingPoolSlot, targetId: String?) {
+        val snapshot = mutableState.value
+        val available = snapshot.profiles.map { it.id }.toSet() +
+            snapshot.endpoints.map { remoteRuntimeId(it.id) }
+        val clean = targetId?.takeIf { it in available }
+        if (targetId != null && clean == null) return
+        if (slot == RoutingPoolSlot.REMOTE_OFFLOAD && clean != null && !clean.startsWith(REMOTE_PREFIX)) return
+        val updated = snapshot.routingPool.assign(slot, clean)
+        mutableState.update { it.copy(routingPool = updated) }
+        viewModelScope.launch {
+            runCatching { container.routingSettings.setRoutingPool(updated) }
+            container.taskRunner.processNow()
+        }
+    }
+
     private fun restoreRoutingSettings() {
         viewModelScope.launch {
             val mode = runCatching { container.routingSettings.routingMode() }.getOrDefault(RoutingMode.AUTO)
             val default = runCatching { container.routingSettings.defaultPrivacyClass() }.getOrDefault(PrivacyClass.STANDARD)
-            mutableState.update { it.copy(routingMode = mode, defaultPrivacyClass = default) }
+            val pool = runCatching { container.routingSettings.routingPool() }.getOrDefault(RoutingPoolAssignments())
+            mutableState.update {
+                it.copy(routingMode = mode, defaultPrivacyClass = default, routingPool = pool)
+            }
+            routingPoolRestored = true
+            ensurePrimaryRoutingProfile()
         }
+    }
+
+    /** A first imported model becomes Primary without making the user understand routing first. */
+    private suspend fun ensurePrimaryRoutingProfile() {
+        if (!routingPoolRestored) return
+        val snapshot = mutableState.value
+        if (snapshot.routingPool.primaryTargetId != null) return
+        val primary = snapshot.profiles.firstOrNull()?.id ?: return
+        val updated = snapshot.routingPool.assign(RoutingPoolSlot.PRIMARY, primary)
+        mutableState.update { it.copy(routingPool = updated) }
+        runCatching { container.routingSettings.setRoutingPool(updated) }
+        container.taskRunner.processNow()
     }
 
     private fun refreshToolPermissions() {
@@ -1122,6 +1184,11 @@ class MainViewModel(
             if (state.activeProfileId == profileId && state.loadedModelId != null) {
                 unloadModelInternal(forget = false)
             }
+            val updatedPool = state.routingPool.remove(profileId)
+            if (updatedPool != state.routingPool) {
+                mutableState.update { it.copy(routingPool = updatedPool) }
+                container.routingSettings.setRoutingPool(updatedPool)
+            }
             container.modelProfileStore.delete(profileId)
             reloadProfiles()
         }
@@ -1173,6 +1240,7 @@ class MainViewModel(
                     ?: current.activeProfileId?.takeIf { id -> profiles.any { it.id == id } },
             )
         }
+        ensurePrimaryRoutingProfile()
     }
 
     /** Loads a model under whichever profile is active for it. */
@@ -1189,91 +1257,94 @@ class MainViewModel(
      */
     fun loadProfile(profileId: String) {
         val state = mutableState.value
-        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
-        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
-        val modelId = model.id.value
         if (state.isLoadingModel || state.isGenerating) return
-        viewModelScope.launch {
-            // Resolved here rather than above the launch: at a cold start the profile may name an
-            // accelerator that detection has not reported yet, and a stale availableBackends list
-            // would silently restore an NPU profile onto the CPU. resolveLoadBackend re-detects in
-            // that case rather than falling back without asking.
-            val backend = resolveLoadBackend(profile.backendId)
+        viewModelScope.launch { prepareLocalProfile(profileId) }
+    }
+
+    /** Prepares a local profile and returns whether its self-test passed. */
+    private suspend fun prepareLocalProfile(profileId: String): Boolean {
+        val state = mutableState.value
+        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return false
+        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return false
+        val modelId = model.id.value
+        if (state.loadedModelId == modelId && state.activeProfileId == profile.id && state.cpuValidated) {
+            return true
+        }
+        if (state.isLoadingModel) return false
+
+        // At a cold start the profile may name an accelerator detection has not reported yet.
+        val backend = resolveLoadBackend(profile.backendId)
+        mutableState.update {
+            it.copy(
+                selectedRuntimeId = modelId,
+                activeProfileId = profile.id,
+                isLoadingModel = true,
+                status = "Preparing ${profile.name} on ${backend.label}…",
+                error = null,
+                modelLoadDetail = null,
+            )
+        }
+        val outcome = runCatching {
+            val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+            val threads = (visibleCores - 2).coerceIn(1, 4)
+            container.llamaCppClient.load(
+                model = model.copy(preferredContextTokens = profile.contextTokens),
+                threads = threads,
+                gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0,
+                deviceFilter = backend.devicePrefix,
+                enableThinking = profile.thinkingEnabled,
+                flashAttention = profile.flashAttention,
+                kvCacheType = profile.kvCacheType,
+                batchTokens = profile.batchTokens,
+                ubatchTokens = profile.ubatchTokens,
+            )
+        }
+        outcome.onSuccess { result ->
+            container.localModelStore.setLastLoadedModelId(modelId)
+            container.modelProfileStore.setLastUsedProfileId(profile.id)
+            container.taskRunner.processNow()
             mutableState.update {
                 it.copy(
-                    selectedRuntimeId = modelId,
-                    activeProfileId = profile.id,
-                    isLoadingModel = true,
-                    status = "Loading ${profile.name} on ${backend.label}…",
-                    error = null,
-                    modelLoadDetail = null,
-                )
-            }
-            runCatching {
-                val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-                val threads = (visibleCores - 2).coerceIn(1, 4)
-                container.llamaCppClient.load(
-                    // The profile's context size, not the file's: the same GGUF may be configured
-                    // for a long context in one profile and a cheap one in another.
-                    model = model.copy(preferredContextTokens = profile.contextTokens),
-                    threads = threads,
-                    gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0,
-                    deviceFilter = backend.devicePrefix,
-                    enableThinking = profile.thinkingEnabled,
-                    flashAttention = profile.flashAttention,
-                    kvCacheType = profile.kvCacheType,
-                    batchTokens = profile.batchTokens,
-                    ubatchTokens = profile.ubatchTokens,
-                )
-            }.onSuccess { result ->
-                viewModelScope.launch {
-                    container.localModelStore.setLastLoadedModelId(modelId)
-                    container.modelProfileStore.setLastUsedProfileId(profile.id)
-                }
-                // Deferred tasks wait on a loaded model; the queue can start them now.
-                container.taskRunner.processNow()
-                mutableState.update {
-                    it.copy(
-                        loadedModelId = modelId,
-                        loadedBackend = backend,
-                        cpuValidated = result.optBoolean("cpuValidated"),
-                        modelLoadDetail = buildString {
-                            append(result.optString("description", model.displayName))
-                            append(" · running on ")
-                            append(backend.label)
+                    loadedModelId = modelId,
+                    loadedBackend = backend,
+                    cpuValidated = result.optBoolean("cpuValidated"),
+                    modelLoadDetail = buildString {
+                        append(result.optString("description", model.displayName))
+                        append(" · running on ")
+                        append(backend.label)
+                        append(" · ")
+                        append(result.optInt("contextTokens", model.preferredContextTokens))
+                        append(" context")
+                        if (!backend.offloadsToAccelerator) {
                             append(" · ")
-                            append(result.optInt("contextTokens", model.preferredContextTokens))
-                            append(" context")
-                            if (!backend.offloadsToAccelerator) {
-                                append(" · ")
-                                append(result.optInt("threads", 1))
-                                append(" threads")
-                            }
-                            result.optLong("processPssBytes").takeIf { bytes -> bytes > 0 }?.let { bytes ->
-                                append(" · ")
-                                append(bytes / 1_048_576L)
-                                append(" MB process PSS")
-                            }
-                            append(" · self-test passed")
-                        },
-                    )
-                }
-                pushModelStatus(ModelPhase.IDLE)
-                refreshDeviceProfile()
-            }.onFailure { error ->
-                mutableState.update {
-                    it.copy(
-                        loadedModelId = null,
-                        loadedBackend = null,
-                        cpuValidated = false,
-                        error = error.message ?: "Could not load the local model",
-                    )
-                }
-                AgentTaskService.stop(container.appContext)
-                refreshDeviceProfile()
+                            append(result.optInt("threads", 1))
+                            append(" threads")
+                        }
+                        result.optLong("processPssBytes").takeIf { bytes -> bytes > 0 }?.let { bytes ->
+                            append(" · ")
+                            append(bytes / 1_048_576L)
+                            append(" MB process PSS")
+                        }
+                        append(" · self-test passed")
+                    },
+                )
             }
-            mutableState.update { it.copy(isLoadingModel = false, status = null) }
+            pushModelStatus(ModelPhase.IDLE)
+            refreshDeviceProfile()
+        }.onFailure { error ->
+            mutableState.update {
+                it.copy(
+                    loadedModelId = null,
+                    loadedBackend = null,
+                    cpuValidated = false,
+                    error = error.message ?: "Could not prepare the local profile",
+                )
+            }
+            AgentTaskService.stop(container.appContext)
+            refreshDeviceProfile()
         }
+        mutableState.update { it.copy(isLoadingModel = false, status = null) }
+        return outcome.isSuccess && mutableState.value.cpuValidated
     }
 
     /**
@@ -1752,6 +1823,13 @@ class MainViewModel(
 
     fun removeEndpoint(endpointId: String) {
         viewModelScope.launch {
+            val targetId = remoteRuntimeId(endpointId)
+            val snapshot = mutableState.value
+            val updatedPool = snapshot.routingPool.remove(targetId)
+            if (updatedPool != snapshot.routingPool) {
+                mutableState.update { it.copy(routingPool = updatedPool) }
+                container.routingSettings.setRoutingPool(updatedPool)
+            }
             container.endpointStore.remove(endpointId)
             reloadEndpoints()
         }
@@ -2088,15 +2166,6 @@ class MainViewModel(
     private fun runTurn(requestMessages: List<ConversationMessage>) {
         val snapshot = mutableState.value
         if (snapshot.isGenerating) return
-
-        val plan = routeSelection(snapshot, snapshot.privacyClass)
-        if (plan.isEmpty()) {
-            mutableState.update {
-                it.copy(error = "No eligible runtime: load a GGUF, configure a remote provider, or relax the routing policy.")
-            }
-            return
-        }
-        val prompt = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
         // Bind the gate to this conversation's mode for the duration of the run. Runs are serial,
         // and the mode could have been changed on another conversation in the meantime.
         container.approvalGate.setMode(snapshot.permissionMode)
@@ -2104,7 +2173,7 @@ class MainViewModel(
             it.copy(
                 messages = requestMessages,
                 isGenerating = true,
-                status = "Preparing context…",
+                status = "Choosing a profile…",
                 error = null,
                 lastUsage = null,
                 lastMetrics = null,
@@ -2115,13 +2184,34 @@ class MainViewModel(
         // while the user is elsewhere, and a run tied to the screen would be cancelled the moment
         // the ViewModel is cleared. AgentTaskService keeps the process alive for the duration.
         generationJob = container.appScope.launch {
+            val conversationCharacters = requestMessages.sumOf { it.content.length }
+            val latestRequest = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
+            val workload = RoutingWorkloadClassifier.classify(latestRequest, conversationCharacters)
+            preferredLocalProfile(snapshot, workload)?.let { prepareLocalProfile(it) }
+            val runSnapshot = mutableState.value
+            val plan = routeSelection(
+                runSnapshot,
+                snapshot.privacyClass,
+                preferQuality = workload == RoutingWorkload.DEMANDING,
+            )
+            if (plan.isEmpty()) {
+                mutableState.update {
+                    it.copy(
+                        isGenerating = false,
+                        status = null,
+                        error = "No profile is ready. Check the Primary profile and conversation privacy.",
+                    )
+                }
+                generationJob = null
+                return@launch
+            }
             var failure: String? = null
             var stopped = false
             for ((index, selection) in plan.withIndex()) {
                 if (index > 0) {
                     mutableState.update { it.copy(status = "Falling back to ${selection.runtime.model.displayName}…") }
                 }
-                when (val outcome = runTurnAttempt(selection, snapshot, requestMessages)) {
+                when (val outcome = runTurnAttempt(selection, runSnapshot, requestMessages)) {
                     is TurnOutcome.Completed -> { stopped = false; break }
                     is TurnOutcome.Failed -> {
                         failure = outcome.reason
@@ -2160,7 +2250,7 @@ class MainViewModel(
                 mutableState.update { it.copy(status = "Generation stopped") }
             } else if (failure != null) {
                 mutableState.update {
-                    it.copy(error = failure, status = "You can reload or choose another runtime.")
+                    it.copy(error = failure, status = "Bram could not prepare an eligible fallback.")
                 }
             }
         }
@@ -2505,7 +2595,7 @@ class MainViewModel(
         }
     }
 
-    private fun reloadLocalModels(selectId: String? = null) {
+    private fun reloadLocalModels(selectId: String? = null, configureImported: Boolean = false) {
         viewModelScope.launch {
             val models = container.localModelStore.list()
             mutableState.update { current ->
@@ -2520,7 +2610,16 @@ class MainViewModel(
             }
             refreshModelStorage()
             syncProfiles(models)
-            restoreLastModel()
+            val importedProfile = selectId?.let { modelId ->
+                mutableState.value.profiles.firstOrNull {
+                    it.modelId.value == modelId && it.autoConfiguredAtEpochMillis == 0L
+                }
+            }
+            if (configureImported && importedProfile != null) {
+                autoConfigure(importedProfile.id)
+            } else {
+                restoreLastModel()
+            }
         }
     }
 
@@ -2563,24 +2662,52 @@ class MainViewModel(
      * conversation's privacy class, and returns the ordered list of runtimes — first choice, then
      * policy-allowed fallbacks. Empty when nothing passed the hard gates.
      */
-    private fun routeSelection(snapshot: AppUiState, privacyClass: PrivacyClass): List<RuntimeSelection> {
+    private fun routeSelection(
+        snapshot: AppUiState,
+        privacyClass: PrivacyClass,
+        preferQuality: Boolean = false,
+    ): List<RuntimeSelection> {
+        val assignedTargets = snapshot.routingPool.targetIds
+        val assignedLocalModels = snapshot.profiles
+            .filter { it.id in assignedTargets }
+            .map { it.modelId }
+            .toSet()
         val pairs = buildList {
-            snapshot.localModels.forEach { model ->
+            snapshot.localModels
+                .filter { assignedTargets.isEmpty() || it.id in assignedLocalModels }
+                .forEach { model ->
                 val available = snapshot.cpuValidated && model.id.value == snapshot.loadedModelId
                 add(
-                    RuntimeSelection(container.runtime(model), model) to
+                    RuntimeSelection(
+                        runtime = container.runtime(model),
+                        localModel = model,
+                        routingLabel = snapshot.profileFor(model).name,
+                    ) to
                         RoutingEstimates.localCandidate(model, available, snapshot.loadedBackend != null && snapshot.loadedBackend != RuntimeBackend.CPU),
                 )
             }
-            snapshot.litertlmModels.forEach { record ->
+            snapshot.litertlmModels.filter { assignedTargets.isEmpty() }.forEach { record ->
                 val available = record.id.value == snapshot.litertlmLoadedId
                 add(
-                    RuntimeSelection(container.runtime(record), null, record) to
+                    RuntimeSelection(
+                        runtime = container.runtime(record),
+                        localModel = null,
+                        litertlmModel = record,
+                        routingLabel = record.displayName,
+                    ) to
                         RoutingEstimates.localCandidate(record, available, snapshot.litertlmLoadedBackend == LiteRtBackend.GPU),
                 )
             }
-            snapshot.endpoints.forEach { endpoint ->
-                add(RuntimeSelection(container.runtime(endpoint), null) to RoutingEstimates.remoteCandidate(endpoint))
+            snapshot.endpoints
+                .filter { assignedTargets.isEmpty() || remoteRuntimeId(it.id) in assignedTargets }
+                .forEach { endpoint ->
+                add(
+                    RuntimeSelection(
+                        runtime = container.runtime(endpoint),
+                        localModel = null,
+                        routingLabel = endpoint.displayName,
+                    ) to RoutingEstimates.remoteCandidate(endpoint),
+                )
             }
         }
         if (pairs.isEmpty()) return emptyList()
@@ -2591,7 +2718,9 @@ class MainViewModel(
                 privacyClass = privacyClass,
                 requiredCapabilities = setOf(ModelCapability.TEXT),
                 minimumContextTokens = MINIMUM_CONTEXT_TOKENS,
-                preferQuality = snapshot.routingMode == RoutingMode.AUTO,
+                // Routine work favors the efficient Primary. Demanding work prepares Power first
+                // and lets the router weigh remote offload when conversation privacy permits it.
+                preferQuality = preferQuality,
                 localBias = if (privacyClass == PrivacyClass.PRIVATE_REMOTE_ALLOWED) 2.0 else 1.0,
             ),
             candidates = pairs.map { it.second },
@@ -2604,11 +2733,41 @@ class MainViewModel(
                 pairs.firstOrNull { it.second.model.id == fallback.model.id }?.let { add(it.first) }
             }
         }
-        val label = ordered.firstOrNull()?.runtime?.model?.displayName
+        val label = ordered.firstOrNull()?.routingLabel
         if (label != null) {
             mutableState.update { it.copy(lastRoutedRuntimeLabel = label) }
         }
         return ordered
+    }
+
+    /** Which local role to prepare before routing; only one llama.cpp model is resident at a time. */
+    private fun preferredLocalProfile(snapshot: AppUiState, workload: RoutingWorkload): String? {
+        if (snapshot.routingMode == RoutingMode.REMOTE_ONLY) return null
+        val preferred = when (workload) {
+            RoutingWorkload.ROUTINE -> snapshot.routingPool.primaryTargetId
+            RoutingWorkload.DEMANDING -> snapshot.routingPool.powerTargetId
+                ?: snapshot.routingPool.primaryTargetId
+        }
+        return preferred
+            ?.takeUnless { it.startsWith(REMOTE_PREFIX) }
+            ?.takeIf { id -> snapshot.profiles.any { it.id == id } }
+    }
+
+    /** A configured local profile counts as runnable even before its model has been prepared. */
+    private fun hasConfiguredRoute(snapshot: AppUiState, privacyClass: PrivacyClass): Boolean {
+        val assigned = snapshot.routingPool.targetIds
+        if (assigned.isEmpty()) {
+            val local = snapshot.routingMode != RoutingMode.REMOTE_ONLY && snapshot.profiles.isNotEmpty()
+            val remote = snapshot.routingMode != RoutingMode.LOCAL_ONLY &&
+                privacyClass != PrivacyClass.LOCAL_ONLY && snapshot.endpoints.isNotEmpty()
+            return local || remote
+        }
+        val local = snapshot.routingMode != RoutingMode.REMOTE_ONLY &&
+            snapshot.profiles.any { it.id in assigned }
+        val remote = snapshot.routingMode != RoutingMode.LOCAL_ONLY &&
+            privacyClass != PrivacyClass.LOCAL_ONLY &&
+            snapshot.endpoints.any { remoteRuntimeId(it.id) in assigned }
+        return local || remote
     }
 
     private fun validate(draft: EndpointDraft): String? {
@@ -2638,6 +2797,8 @@ class MainViewModel(
         val runtime: ModelRuntime,
         val localModel: LocalModelRecord?,
         val litertlmModel: LiteRtModelRecord? = null,
+        /** User-facing profile/provider name, which can differ for two profiles of one GGUF. */
+        val routingLabel: String,
     ) {
         /** Whether this candidate runs on-device, which changes how a failure is treated. */
         val isLocal: Boolean
