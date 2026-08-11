@@ -72,10 +72,21 @@ enum class KvCacheType(val wire: String) {
     F16("f16"),
     Q8_0("q8_0");
 
+    /**
+     * Named for what it buys rather than for the storage format. "Q8_0" tells someone who already
+     * knows what it means, which is the one person who does not need to be told.
+     */
     val label: String
         get() = when (this) {
-            F16 -> "F16"
-            Q8_0 -> "Q8"
+            F16 -> "Exact"
+            Q8_0 -> "Compact"
+        }
+
+    /** The trade, in one line, under the chips. */
+    val summary: String
+        get() = when (this) {
+            F16 -> "Full precision. The default."
+            Q8_0 -> "Half the memory, so roughly twice the context. Very slightly less exact."
         }
 
     companion object {

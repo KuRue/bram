@@ -5,6 +5,11 @@ import android.content.ClipboardManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -115,6 +120,7 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import io.github.kurue.bram.core.domain.AcceleratorCapability
 import io.github.kurue.bram.core.domain.AgentActivity
+import org.json.JSONObject
 import io.github.kurue.bram.core.domain.Automation
 import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.BackendMeasurement
@@ -483,9 +489,13 @@ private fun TopBubbleBar(
 /** Live state belongs here: throughput while generating, otherwise what is loaded and where. */
 @Composable
 private fun modelStatusLine(state: AppUiState): String = when {
-    state.isGenerating -> state.lastMetrics?.decodeTokensPerSecond
-        ?.let { "${formatRate(it)} · generating" }
-        ?: "generating…"
+    // Throughput belongs here rather than above the composer: it is state about the model, which is
+    // what this line is for, and the chat says it is working by animating instead.
+    state.isGenerating -> buildString {
+        append(state.loadedBackend?.label ?: "Running")
+        state.selectedLocalModel?.let { append(" · ${formatTokens(it.preferredContextTokens)}") }
+        state.lastMetrics?.decodeTokensPerSecond?.let { append(" · ${formatRate(it)}") }
+    }
     state.routingMode == RoutingMode.AUTO && !state.routingPool.isEmpty ->
         state.routingTargetLabel(state.routingPool.primaryTargetId)?.let { "Primary · ready" }
             ?: "Choose a Primary profile"
@@ -775,6 +785,9 @@ private fun ChatTranscript(
                 onEdit = { text -> onEdit(message.id.value, text) },
             )
         }
+        if (state.isGenerating) {
+            item(key = "working") { WorkingDots() }
+        }
         state.pendingApproval?.let { pending ->
             item(key = "approval") {
                 ToolApprovalCard(pending, onResolve = onResolveApproval)
@@ -808,23 +821,6 @@ private fun ChatComposer(
             .navigationBarsPadding()
             .padding(horizontal = 12.dp),
     ) {
-        state.lastMetrics?.let { metrics ->
-            Text(
-                buildString {
-                    append(state.loadedBackend?.label ?: "Runtime")
-                    append(": ${formatRate(metrics.promptTokensPerSecond)} prompt")
-                    append(" · ${formatRate(metrics.decodeTokensPerSecond)} generation")
-                    metrics.cachedPromptTokens?.let { reused ->
-                        append(" · KV reuse: $reused of ${metrics.promptTokens} tok")
-                    }
-                    metrics.processPssBytes?.let { append(" · ${formatBytes(it)} PSS") }
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
-            )
-        }
-
         GlassSurface(
             modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
             shape = RoundedCornerShape(percent = 50),
@@ -1329,6 +1325,9 @@ private fun ProfileCard(
 ) {
     // Settings the runtime reads at load time cannot change under a loaded model.
     val locked = loaded || loading || busy
+    // Measuring reloads the model as part of its work and puts back whatever was loaded when it
+    // finished, so a loaded model is no reason to refuse — only work already in flight is.
+    val measuring = loading || busy
     var renaming by rememberSaveable(profile.id) { mutableStateOf(false) }
     var draftName by rememberSaveable(profile.id) { mutableStateOf(profile.name) }
     var editingPrompt by rememberSaveable(profile.id) { mutableStateOf(false) }
@@ -1441,7 +1440,7 @@ private fun ProfileCard(
                 // The pills above are the argument for this button: re-measuring is how the choice
                 // of backend changes, and the manual controls sit behind an expander so the card
                 // stays short until someone actually wants to turn a dial.
-                Button(onClick = onAutoConfigure, enabled = !locked, modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = onAutoConfigure, enabled = !measuring, modifier = Modifier.fillMaxWidth()) {
                     Text("Auto-configure")
                 }
 
@@ -1529,7 +1528,7 @@ private fun ProfileCard(
                         }
                     }
 
-                    SectionLabel("KV cache")
+                    SectionLabel("Attention memory")
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1546,6 +1545,11 @@ private fun ProfileCard(
                             )
                         }
                     }
+                    Text(
+                        profile.kvCacheType.summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         SectionLabel("Reasoning", Modifier.weight(1f))
@@ -1584,7 +1588,7 @@ private fun ProfileCard(
                     }
                     Button(
                         onClick = onTuneBatch,
-                        enabled = !locked,
+                        enabled = !measuring,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(if (tuning) "Tuning…" else "Tune batch")
@@ -2779,6 +2783,17 @@ private fun ChatBubble(
             }
         }
 
+        // Shown with the actions, on the same tap: a timestamp under every message is furniture in
+        // a long transcript, but "when did I ask this" is a fair question to have on demand.
+        if (showActions && !editing) {
+            Text(
+                formatSentAt(message.createdAtEpochMillis),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, start = 2.dp),
+            )
+        }
+
         // Revealed on tap rather than always present. Two rows of buttons under every message is
         // a lot of furniture in a long transcript, and these are occasional actions.
         if (canAct && showActions && !editing && message.content.isNotBlank()) {
@@ -2793,6 +2808,43 @@ private fun ChatBubble(
                     TextButton(onClick = onRegenerate) { Text("Retry") }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Three dots breathing in turn, to say Bram is still working.
+ *
+ * The throughput line used to carry this, by changing; it now lives in the top bar, so the chat
+ * needed its own sign of life. A local model can sit for seconds between tokens and stillness reads
+ * as a hang.
+ */
+@Composable
+private fun WorkingDots() {
+    val transition = rememberInfiniteTransition(label = "working")
+    Row(
+        Modifier.padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        repeat(3) { index ->
+            val alpha by transition.animateFloat(
+                initialValue = 0.25f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(600, delayMillis = index * 180),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+                label = "dot$index",
+            )
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .background(
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
+                        CircleShape,
+                    ),
+            )
         }
     }
 }
@@ -2828,13 +2880,11 @@ private fun MessageBody(
 }
 
 /**
- * A tool call waiting to be allowed or refused.
+ * One question and three answers.
  *
- * Shown in the transcript rather than as a dialog: it is part of what the run did, it stays in the
- * record afterwards, and a dialog over a reply the user is still reading is a good way to get a
- * reflexive tap on whichever button is nearest.
- *
- * The arguments are shown in full. An approval that hides what it is approving is theatre.
+ * The long form — description, required permissions, a warning, the raw arguments, and a sentence
+ * about what "always" would grant — was more reading than a decision needs, and a wall of text
+ * before two buttons trains people to press the nearest one. What it acts on is in the question.
  */
 @Composable
 private fun ToolApprovalCard(
@@ -2850,64 +2900,45 @@ private fun ToolApprovalCard(
     ) {
         Column(
             Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                "Bram wants to use ${pending.toolName}",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
+                "Allow Bram to ${pending.toolName}${approvalTarget(pending)}?",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
             )
-            if (pending.description.isNotBlank()) {
-                Text(pending.description, style = MaterialTheme.typography.bodyMedium)
-            }
-            if (pending.requiredPermissions.isNotEmpty()) {
+            if (pending.recovered) {
+                // Worth one line: this call was read out of the model's prose rather than marked as
+                // a call, and prose can be echoed from a page Bram read.
                 Text(
-                    "Needs: ${pending.requiredPermissions.sorted().joinToString(", ")}",
-                    style = MaterialTheme.typography.bodySmall,
+                    "Read from the reply text, not a marked call.",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (!pending.readOnly) {
-                Text(
-                    "This changes something. Bram will report what happened, not what it intended.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                pending.argumentsJson.ifBlank { "{}" },
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-            )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Button(onClick = { onResolve(ToolApprovalDecision.ALLOW_ONCE) }) { Text("Allow once") }
+                TextButton(onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) }) { Text("Always") }
                 TextButton(onClick = { onResolve(ToolApprovalDecision.DENY) }) { Text("Refuse") }
-            }
-            Text(
-                // Said before the button is pressed, since "always" is the one answer that is hard
-                // to take back and the scope is what makes it safe or not.
-                "\"Always\" would allow ${pending.scopeLabel}.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(
-                    onClick = { onResolve(ToolApprovalDecision.ALLOW_FOR_RUN) },
-                ) { Text("Allow for this run") }
-                TextButton(
-                    onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
-                ) { Text("Always allow this") }
             }
         }
     }
 }
 
-/**
- * One line of agent work, collapsed by default.
- *
- * Reasoning and tool traffic are worth keeping and occasionally worth reading, but shown inline
- * they bury the answer — a small model can spend several paragraphs deciding how to say hello.
- */
+/** The thing a call acts on, for the question. Shares its shape with the activity rows. */
+private fun approvalTarget(pending: PendingToolApproval): String {
+    val arguments = runCatching { JSONObject(pending.argumentsJson) }.getOrNull() ?: return ""
+    val value = arguments.keys().asSequence()
+        .mapNotNull { key -> arguments.opt(key)?.toString()?.takeIf(String::isNotBlank) }
+        .firstOrNull() ?: return ""
+    val shown = if (value.startsWith("http")) {
+        runCatching { java.net.URI(value).host }.getOrNull()?.removePrefix("www.") ?: value
+    } else {
+        value
+    }
+    return " " + shown.take(40)
+}
+
 @Composable
 private fun ActivityRow(entry: AgentActivity, number: Int? = null) {
     var expanded by rememberSaveable(entry.summary) { mutableStateOf(false) }
@@ -2933,7 +2964,7 @@ private fun ActivityRow(entry: AgentActivity, number: Int? = null) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "${number?.let { "$it. " } ?: ""}$glyph ${entry.summary}",
+                "${number?.let { "$it. " } ?: ""}$glyph ${entry.summary}${activityTarget(entry)}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
@@ -2965,41 +2996,40 @@ private fun ActivityRow(entry: AgentActivity, number: Int? = null) {
 }
 
 /**
- * The reasoning and tool steps a turn took.
+ * The reasoning and tool steps a turn took, one row each, in the order they happened.
  *
- * A single step renders directly. Several collapse into one summary line - "Thought 8s - 3 tools" -
- * so a turn that searches, reads a page, and writes a note does not push the answer off the screen.
- * Each step is still there, numbered, once expanded.
+ * A collapsed summary ("Thought 8s · 3 tools") hid the shape of the run behind a count, and the
+ * shape is the interesting part while it is still running: thought, searched, read a page, thought
+ * again. Each row is one line and opens for its detail, so several steps cost several lines rather
+ * than several paragraphs.
  */
 @Composable
 private fun ActivityList(messageId: String, activity: List<AgentActivity>) {
     if (activity.isEmpty()) return
-    if (activity.size == 1) {
-        ActivityRow(activity.first())
-        return
+    Column(Modifier.fillMaxWidth()) {
+        activity.forEach { entry -> ActivityRow(entry) }
     }
-    var expanded by rememberSaveable("$messageId-activity") { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
-        Row(
-            Modifier.fillMaxWidth().clickable { expanded = !expanded },
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "⌁ ${summariseActivity(activity)}",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                if (expanded) "▲" else "▼",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (expanded) {
-            activity.forEachIndexed { index, entry -> ActivityRow(entry, number = index + 1) }
-        }
+}
+
+/**
+ * What a step acted on, for the end of its row.
+ *
+ * Read from the arguments rather than from a per-tool table, so a tool added later says something
+ * useful without this having to learn about it. A URL shows its host, since the rest of a search
+ * URL is noise on one line.
+ */
+private fun activityTarget(entry: AgentActivity): String {
+    if (entry !is AgentActivity.ToolInvocation) return ""
+    val arguments = runCatching { JSONObject(entry.argumentsJson) }.getOrNull() ?: return ""
+    val value = arguments.keys().asSequence()
+        .mapNotNull { key -> arguments.opt(key)?.toString()?.takeIf(String::isNotBlank) }
+        .firstOrNull() ?: return ""
+    val shown = if (value.startsWith("http")) {
+        runCatching { java.net.URI(value).host }.getOrNull()?.removePrefix("www.") ?: value
+    } else {
+        value
     }
+    return " · " + shown.take(48)
 }
 
 @Composable
@@ -3317,6 +3347,17 @@ private fun formatTokens(tokens: Int): String = when {
     tokens >= 1_000_000 -> String.format(Locale.US, "%.1fM", tokens / 1_000_000.0)
     tokens >= 1_000 -> String.format(Locale.US, "%.0fK", tokens / 1_000.0)
     else -> tokens.toString()
+}
+
+/** When a message was sent. Today's messages show the time; older ones need the date too. */
+private fun formatSentAt(epochMillis: Long): String {
+    if (epochMillis <= 0L) return ""
+    val sent = java.util.Calendar.getInstance().apply { timeInMillis = epochMillis }
+    val now = java.util.Calendar.getInstance()
+    val sameDay = sent.get(java.util.Calendar.YEAR) == now.get(java.util.Calendar.YEAR) &&
+        sent.get(java.util.Calendar.DAY_OF_YEAR) == now.get(java.util.Calendar.DAY_OF_YEAR)
+    val pattern = if (sameDay) "HH:mm" else "d MMM, HH:mm"
+    return java.text.SimpleDateFormat(pattern, Locale.getDefault()).format(java.util.Date(epochMillis))
 }
 
 private fun formatRate(rate: Double?): String = rate?.let { String.format(Locale.US, "%.1f tok/s", it) } ?: "measuring"

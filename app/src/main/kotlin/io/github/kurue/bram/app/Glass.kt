@@ -31,7 +31,7 @@ object Glass {
     const val CARD_ALPHA: Float = 0.22f
 
     /** Bubbles carry body text; a whisper of tint marks them without veiling the background. */
-    const val BUBBLE_ALPHA: Float = 0.14f
+    const val BUBBLE_ALPHA: Float = 0.52f
 
     /** Recessed detail (an expanded activity trace) sits behind body text and reads as inset. */
     const val DETAIL_ALPHA: Float = 0.10f
