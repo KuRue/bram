@@ -17,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import io.github.kurue.bram.platform.android.AndroidDeviceProfiler
 import io.github.kurue.bram.platform.android.ConversationStore
 import io.github.kurue.bram.platform.android.McpServerStore
@@ -56,6 +57,14 @@ class AppContainer(application: Application) {
      * [AgentTaskService], which keeps the process alive for as long as a run holds it.
      */
     val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * One turn at a time, process-wide. The chat turn guard `isGenerating` lives on the
+     * ViewModel, but an activity recreated in the background gets a fresh ViewModel that believes
+     * a running turn never started; without this mutex its second turn would overlap the first
+     * on the same conversation, and both would later persist competing versions of the thread.
+     */
+    val turnMutex: Mutex = Mutex()
 
     val endpointStore = SecureEndpointStore(application)
     val mcpServerStore = McpServerStore(application)
