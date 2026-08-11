@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The B, cut from the slab in the accent colour.
+
+    Geometric rather than typeset: a straight stem and two true semicircular bowls, so it holds its
+    shape at 48dp on a launcher and does not turn into a smudge. The wear is clipped to the letter
+    itself — the marks stop at its edge the way wear on a real object does, rather than floating
+    over the slab as a texture laid on top.
+
+    Everything sits inside the 66dp safe circle, so no launcher mask clips the letter.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Cast shadow, offset down and right from the light in the background layer. Gives the
+         letter a little lift off the slab without a blur, which a vector cannot do. -->
+    <path
+        android:pathData="M36,32 H60 A12,12 0 0 1 60,56 H62 A12,12 0 0 1 62,80 H36 Z"
+        android:fillColor="#FF000000"
+        android:fillAlpha="0.30" />
+
+    <!-- The letter. Lighter at the top left where the light falls, deepening to a burnt edge. -->
+    <path
+        android:pathData="M34,30 H58 A12,12 0 0 1 58,54 H60 A12,12 0 0 1 60,78 H34 Z M46,38 H56 A5,5 0 0 1 56,48 H46 Z M46,60 H58 A6,6 0 0 1 58,72 H46 Z"
+        android:fillType="evenOdd">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="34"
+                android:startY="28"
+                android:endX="72"
+                android:endY="80">
+                <item android:offset="0" android:color="#FFF0BF96" />
+                <item android:offset="0.45" android:color="#FFD9A47C" />
+                <item android:offset="1" android:color="#FFA9683F" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Wear, clipped to the letter. Two worn bands across the face and a rubbed lower corner:
+         enough to read as weathered at a glance, restrained enough to survive being shrunk. -->
+    <group>
+        <clip-path android:pathData="M34,30 H58 A12,12 0 0 1 58,54 H60 A12,12 0 0 1 60,78 H34 Z M46,38 H56 A5,5 0 0 1 56,48 H46 Z M46,60 H58 A6,6 0 0 1 58,72 H46 Z" />
+
+        <path
+            android:pathData="M28,52 L80,44 L80,49 L28,57 Z"
+            android:fillColor="#FF3A2415"
+            android:fillAlpha="0.22" />
+        <path
+            android:pathData="M28,68 L80,63 L80,65 L28,70 Z"
+            android:fillColor="#FF3A2415"
+            android:fillAlpha="0.16" />
+        <path
+            android:pathData="M28,80 L80,68 L80,84 L28,84 Z"
+            android:fillAlpha="0.20">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="34"
+                    android:startY="84"
+                    android:endX="66"
+                    android:endY="62">
+                    <item android:offset="0" android:color="#FF241408" />
+                    <item android:offset="1" android:color="#00241408" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- The lit edge of the stem, where the slab's light catches the cut. -->
+        <path
+            android:pathData="M34,30 H39 V78 H34 Z"
+            android:fillColor="#FFFFF3E8"
+            android:fillAlpha="0.20" />
+        <path
+            android:pathData="M34,30 H60 V34 H34 Z"
+            android:fillColor="#FFFFF3E8"
+            android:fillAlpha="0.14" />
+    </group>
+</vector>

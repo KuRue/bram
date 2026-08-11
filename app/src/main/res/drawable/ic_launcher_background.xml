@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The slab the B is cut into: near-black, lit from the upper left, with the accent glowing up
+    through it from behind the letter.
+
+    The glow is the whole reason the background is not a flat fill. An adaptive icon's two layers
+    are drawn with a parallax offset on some launchers, so light that belongs *behind* the letter
+    has to live here rather than in the foreground — it drifts against the B the way a real light
+    source would, instead of travelling with it.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Base slab. Diagonal rather than vertical so the icon has a direction to it. -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108">
+                <item android:offset="0" android:color="#FF2A2A33" />
+                <item android:offset="0.55" android:color="#FF1A1A21" />
+                <item android:offset="1" android:color="#FF0D0D11" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- The accent, bloomed. Sits under the letter and fades out well before the mask edge, so
+         every launcher shape — circle, squircle, teardrop — crops only unlit slab. -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="50"
+                android:centerY="50"
+                android:gradientRadius="44">
+                <item android:offset="0" android:color="#59D9A47C" />
+                <item android:offset="0.45" android:color="#26C68A5E" />
+                <item android:offset="1" android:color="#00C68A5E" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Weathering: a wash of wear across the lower right, as if the slab has been handled. Kept
+         to two broad strokes because a vector has no noise to give it, and anything finer than
+         this disappears at 48dp anyway. -->
+    <path
+        android:pathData="M108,34 L108,108 L26,108 Z"
+        android:fillAlpha="0.16">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="30"
+                android:startY="104"
+                android:endX="104"
+                android:endY="38">
+                <item android:offset="0" android:color="#FF000000" />
+                <item android:offset="1" android:color="#00000000" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path
+        android:pathData="M0,0 L60,0 L0,54 Z"
+        android:fillAlpha="0.10">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="52"
+                android:endY="46">
+                <item android:offset="0" android:color="#FFFFFFFF" />
+                <item android:offset="1" android:color="#00FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>
