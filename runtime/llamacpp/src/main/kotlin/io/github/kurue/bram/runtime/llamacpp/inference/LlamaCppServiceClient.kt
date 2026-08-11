@@ -48,6 +48,23 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         JSONObject(requireService().state())
     }
 
+    /** Loads a small embedding GGUF into a resident CPU context in the inference process. */
+    suspend fun loadEmbedder(modelPath: String, threads: Int): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requireService().loadEmbedder(modelPath, threads))
+    }
+
+    /**
+     * Embeds one piece of text, or null if the inference process is unreachable or the call fails.
+     * Null lets the memory store fall back to keyword recall rather than failing the turn.
+     */
+    suspend fun embed(text: String): FloatArray? = withContext(Dispatchers.IO) {
+        runCatching { requireService().embed(text) }.getOrNull()
+    }
+
+    suspend fun unloadEmbedder(): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requireService().unloadEmbedder())
+    }
+
     suspend fun devices(): JSONObject = withContext(Dispatchers.IO) {
         JSONObject(requireService().devices())
     }

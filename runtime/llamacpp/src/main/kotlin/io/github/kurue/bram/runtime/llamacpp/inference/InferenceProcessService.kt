@@ -248,6 +248,16 @@ class InferenceProcessService : Service() {
                 .put("cpuValidated", cpuValidated)
                 .toString()
         }
+
+        // The embedder has its own model+context and native mutex, so these run on the Binder
+        // thread directly rather than the single-thread chat executor — an embedding must not
+        // queue behind a turn, and a turn must not queue behind an embedding.
+        override fun loadEmbedder(modelPath: String?, threads: Int): String =
+            bridge.loadEmbedder(modelPath.orEmpty(), threads)
+
+        override fun embed(text: String?): FloatArray = bridge.embed(text.orEmpty())
+
+        override fun unloadEmbedder(): String = bridge.unloadEmbedder()
     }
 
     override fun onBind(intent: Intent?): IBinder = binder

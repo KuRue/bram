@@ -54,6 +54,9 @@ internal class NativeLlamaBridge {
     external fun selfTest(): String
     external fun unload(): String
     external fun state(): String
+    external fun loadEmbedder(modelPath: String, threads: Int): String
+    external fun embed(text: String): FloatArray
+    external fun unloadEmbedder(): String
 
     private companion object {
         init {

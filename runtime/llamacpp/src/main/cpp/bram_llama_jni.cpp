@@ -50,6 +50,16 @@ struct runtime_state {
     std::vector<llama_token> cached_tokens;
 };
 
+// A second, independent model + context for text embeddings, kept resident so memory recall can
+// cosine-rank without reloading each query. Separate from the chat state and its mutex so embedding
+// a memory or a query never blocks a turn, and vice versa.
+struct embed_state {
+    llama_model * model = nullptr;
+    llama_context * ctx = nullptr;
+    int n_embd = 0;
+    int n_ctx = 512;
+};
+
 // Fixed prompt for the cross-backend correctness comparison. Changing it invalidates every
 // recorded CPU reference, so treat it as part of the validation contract.
 constexpr const char * kReferencePrompt = "List the first five prime numbers in order.";
@@ -58,6 +68,9 @@ runtime_state g_state;
 std::mutex g_mutex;
 std::once_flag g_backend_once;
 std::atomic_bool g_cancelled{false};
+
+embed_state g_embed;
+std::mutex g_embed_mutex;
 
 // Recent native log lines, kept so load failures can surface llama.cpp's actual reason.
 std::mutex g_log_mutex;
@@ -1179,5 +1192,124 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_state(
                << ",\"contextTokens\":" << g_state.context_tokens
                << ",\"threads\":" << g_state.threads << "}";
         return result.str();
+    });
+}
+
+// Loads a small embedding GGUF into its own CPU context, resident for the life of the process so
+// each memory and query embeds without a reload. Independent of the chat model, so the two never
+// contend except for raw CPU.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_loadEmbedder(
+    JNIEnv * env, jobject, jstring path, jint threads) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_embed_mutex);
+        ensure_backend();
+        if (g_embed.ctx != nullptr) { llama_free(g_embed.ctx); g_embed.ctx = nullptr; }
+        if (g_embed.model != nullptr) { llama_model_free(g_embed.model); g_embed.model = nullptr; }
+        g_embed.n_embd = 0;
+
+        const std::string model_path = from_jstring(env, path);
+        llama_model_params params = llama_model_default_params();
+        params.n_gpu_layers = 0;  // CPU: embedding models are small, and this avoids accelerator contention with the chat model.
+        // An explicitly CPU-only device list keeps the load independent of accelerator health, the
+        // same reason the chat CPU load uses one. The vector must outlive the call; llama.cpp borrows.
+        std::vector<ggml_backend_dev_t> devices = { nullptr };
+        params.devices = devices.data();
+        params.load_mode = LLAMA_LOAD_MODE_MMAP;
+        llama_model * model = llama_model_load_from_file(model_path.c_str(), params);
+        if (model == nullptr) throw std::runtime_error("Could not load the embedding GGUF");
+        const int n_embd = llama_model_n_embd(model);
+        if (n_embd <= 0) {
+            llama_model_free(model);
+            throw std::runtime_error("The GGUF is not an embedding model (it has no embedding dimension)");
+        }
+
+        llama_context_params ctx_params = llama_context_default_params();
+        ctx_params.n_ctx = static_cast<uint32_t>(g_embed.n_ctx);
+        ctx_params.n_batch = static_cast<uint32_t>(g_embed.n_ctx);
+        ctx_params.n_ubatch = static_cast<uint32_t>(g_embed.n_ctx);
+        const int resolved_threads = threads > 0 ? threads : 4;
+        ctx_params.n_threads = resolved_threads;
+        ctx_params.n_threads_batch = resolved_threads;
+        ctx_params.embeddings = true;
+        // MEAN pooling matches the common sentence-embedding GGUFs (bge, e5, gte, MiniLM). A CLS
+        // model still produces a usable vector with it, just not its optimal one.
+        ctx_params.pooling_type = LLAMA_POOLING_TYPE_MEAN;
+        ctx_params.no_perf = true;
+        llama_context * ctx = llama_init_from_model(model, ctx_params);
+        if (ctx == nullptr) {
+            llama_model_free(model);
+            throw std::runtime_error("Could not allocate the embedding context");
+        }
+
+        g_embed.model = model;
+        g_embed.ctx = ctx;
+        g_embed.n_embd = n_embd;
+        char description[512] = {};
+        llama_model_desc(model, description, sizeof(description));
+        std::ostringstream result;
+        result << "{\"loaded\":true,\"nEmbds\":" << n_embd
+               << ",\"description\":\"" << json_escape(description) << "\"}";
+        return result.str();
+    });
+}
+
+// Embeds one piece of text and returns its L2-normalized vector, so cosine is a plain dot product
+// at the search site and scores stay comparable across queries.
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_embed(
+    JNIEnv * env, jobject, jstring text_value) {
+    try {
+        std::lock_guard<std::mutex> lock(g_embed_mutex);
+        if (g_embed.model == nullptr || g_embed.ctx == nullptr) {
+            throw_java(env, "No embedding model is loaded");
+            return nullptr;
+        }
+        const std::string text = from_jstring(env, text_value);
+        const llama_vocab * vocab = llama_model_get_vocab(g_embed.model);
+        const int32_t required = -llama_tokenize(
+            vocab, text.data(), static_cast<int32_t>(text.size()), nullptr, 0, true, true);
+        if (required <= 0) throw std::runtime_error("The embedding tokenizer rejected the text");
+        std::vector<llama_token> tokens(static_cast<size_t>(required));
+        const int32_t actual = llama_tokenize(
+            vocab, text.data(), static_cast<int32_t>(text.size()),
+            tokens.data(), static_cast<int32_t>(tokens.size()), true, true);
+        if (actual < 0) throw std::runtime_error("The embedding tokenizer failed");
+        tokens.resize(static_cast<size_t>(actual));
+        if (tokens.empty()) throw std::runtime_error("The embedding tokenizer produced no tokens");
+        if (static_cast<int>(tokens.size()) > g_embed.n_ctx) tokens.resize(static_cast<size_t>(g_embed.n_ctx));
+
+        llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(tokens.data()), static_cast<int>(tokens.size()));
+        if (llama_decode(g_embed.ctx, batch) != 0) {
+            throw std::runtime_error("The embedding model failed while encoding the text");
+        }
+        const float * embd = llama_get_embeddings_seq(g_embed.ctx, 0);
+        if (embd == nullptr) throw std::runtime_error("The embedding model produced no pooled vector");
+
+        double norm = 0.0;
+        for (int i = 0; i < g_embed.n_embd; ++i) norm += static_cast<double>(embd[i]) * embd[i];
+        const float scale = norm > 0.0 ? 1.0f / static_cast<float>(std::sqrt(norm)) : 0.0f;
+        std::vector<float> normalized(static_cast<size_t>(g_embed.n_embd));
+        for (int i = 0; i < g_embed.n_embd; ++i) normalized[static_cast<size_t>(i)] = embd[i] * scale;
+
+        jfloatArray result = env->NewFloatArray(g_embed.n_embd);
+        if (result == nullptr) return nullptr;
+        env->SetFloatArrayRegion(result, 0, g_embed.n_embd, normalized.data());
+        return result;
+    } catch (const std::exception & error) {
+        throw_java(env, error.what());
+        return nullptr;
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_unloadEmbedder(
+    JNIEnv * env, jobject) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_embed_mutex);
+        if (g_embed.ctx != nullptr) { llama_free(g_embed.ctx); g_embed.ctx = nullptr; }
+        if (g_embed.model != nullptr) { llama_model_free(g_embed.model); g_embed.model = nullptr; }
+        g_embed.n_embd = 0;
+        return std::string("{\"loaded\":false}");
     });
 }

@@ -14,4 +14,7 @@ interface IInferenceService {
     void cancel(String requestId);
     String unload();
     String state();
+    String loadEmbedder(String modelPath, int threads);
+    float[] embed(String text);
+    String unloadEmbedder();
 }
