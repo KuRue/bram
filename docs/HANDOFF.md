@@ -125,8 +125,10 @@ servers contribute more at runtime.
   (embedding) ranking via reciprocal-rank fusion: a resident llama.cpp embedder
   in the `:inference` process L2-normalizes mean-pooled vectors, chosen by the
   user on the Memories screen; with none designated, recall falls back to FTS.
-  Still missing: `EPISODE` records are never produced, and per-conversation
-  working summaries are separate from the cross-conversation store.
+  Still missing: per-conversation working summaries are separate from the
+  cross-conversation store, and episodes are uncapped (substantial-only
+  extraction bounds volume at the source, but a hard per-conversation cap has
+  not been added if that ever proves too loose).
 - **Skills gaps.** The SKILL.md lifecycle is shipped (M16), and the agent can now author skill
   drafts through a `propose_skill` tool — they land with no active version (kept out of the
   system prompt) until the user activates them from Settings.
