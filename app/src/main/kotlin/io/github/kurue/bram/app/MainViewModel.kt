@@ -1135,14 +1135,31 @@ class MainViewModel(
             )
             runCatching { unloadModelInternal(forget = false) }
             mutableState.update {
-                it.copy(
-                    isValidatingAccelerator = false,
-                    status = null,
-                    autoConfigure = it.autoConfigure?.copy(finished = true, current = note),
-                )
+                it.copy(isValidatingAccelerator = false, status = null)
             }
             refreshDeviceProfile()
             reloadProfiles(selectId = profile.id)
+
+            // Second phase: the best batch depends on the processor, so it follows the choice of
+            // one. Two buttons where one says "configure this for me" was the confusion; this makes
+            // the one button mean it.
+            mutableState.update {
+                it.copy(autoConfigure = it.autoConfigure?.copy(current = "Tuning prompt batch…"))
+            }
+            runCatching { runBatchTune(profile.id) }
+            val tuned = mutableState.value.profiles.firstOrNull { it.id == profile.id }
+
+            mutableState.update {
+                it.copy(
+                    autoConfigure = it.autoConfigure?.copy(
+                        finished = true,
+                        current = listOfNotNull(
+                            note,
+                            tuned?.batchTuneNote?.takeIf(String::isNotBlank),
+                        ).joinToString("\n\n"),
+                    ),
+                )
+            }
             restoreLoaded?.let { loadModel(it) }
         }
     }
@@ -1494,15 +1511,27 @@ class MainViewModel(
      * changing the math. The winner is written into the profile, like an accelerator measurement,
      * and the model is restored to whatever was loaded before.
      */
+    /** Tunes the batch on its own, for someone who wants only that. */
     fun tuneBatch(profileId: String) {
         val state = mutableState.value
-        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
-        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
         if (state.isLoadingModel || state.isGenerating ||
             state.isValidatingAccelerator || state.batchTuneProfileId != null
         ) return
-        val restoreLoaded = state.loadedModelId
-        viewModelScope.launch {
+        viewModelScope.launch { runBatchTune(profileId) }
+    }
+
+    /**
+     * Measures prompt speed across candidate batch sizes and keeps the fastest that still
+     * reproduces the CPU reference.
+     *
+     * Suspends rather than launching so auto-configure can run it as its second phase: the
+     * best batch depends on the processor, so it has to follow the choice of one.
+     */
+    private suspend fun runBatchTune(profileId: String) {
+        val state = mutableState.value
+        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
+        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        val restoreLoaded = mutableState.value.loadedModelId
             val backend = resolveLoadBackend(profile.backendId)
             mutableState.update {
                 it.copy(
@@ -1610,7 +1639,6 @@ class MainViewModel(
             mutableState.update { it.copy(batchTuneProfileId = null, status = null) }
             refreshDeviceProfile()
             restoreLoaded?.let { loadModel(it) }
-        }
     }
 
     /**
@@ -2302,8 +2330,15 @@ class MainViewModel(
         var completedMessage: ConversationMessage? = null
         val activity = mutableListOf<AgentActivity>()
         var thinkingStartedAt = 0L
-        val finishedThinking = mutableListOf<AgentActivity.Thinking>()
         var thinkingMillisTotal = 0L
+        // Parsing is per round, not per turn. A format that reports no opening marker — LFM2.5
+        // among them — has the prompt open the reasoning block, and the prompt does that again for
+        // every segment after a tool result. Reading the whole turn as one string therefore treated
+        // only the first block as reasoning and spilled every later one, its closing marker, and
+        // the bare call text into the visible answer.
+        val visibleParts = mutableListOf<String>()
+        var roundText = ""
+        var roundReasoningRecorded = 0
         var thinking = false
         var failure: String? = null
         return try {
@@ -2338,19 +2373,23 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             assistantText += event.text
-                            val streaming = streamingReply(assistantText, reasoningFormat)
+                            roundText += event.text
+                            val streaming = streamingReply(roundText, reasoningFormat)
                             val now = System.currentTimeMillis()
                             // A block that has just closed keeps the time it actually took; leaving
                             // it on the running clock would have every finished block claim the
                             // duration of the whole turn.
-                            while (finishedThinking.size < streaming.closedReasoning.size) {
-                                val index = finishedThinking.size
+                            while (roundReasoningRecorded < streaming.closedReasoning.size) {
+                                val index = roundReasoningRecorded
                                 val took = if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
-                                finishedThinking += AgentActivity.Thinking(
+                                // Appended to the same list the tool calls go into, so the rows read
+                                // in the order the model did things: thought, called, thought again.
+                                activity += AgentActivity.Thinking(
                                     text = streaming.closedReasoning[index],
                                     durationMillis = took,
                                     inProgress = false,
                                 )
+                                roundReasoningRecorded += 1
                                 thinkingMillisTotal += took
                                 thinkingStartedAt = 0L
                             }
@@ -2376,13 +2415,21 @@ class MainViewModel(
                                 it.copy(
                                     messages = requestMessages + ConversationMessage(
                                         role = MessageRole.ASSISTANT,
-                                        content = streaming.visibleText,
-                                        activity = activity + finishedThinking + listOfNotNull(inFlight),
+                                        content = (visibleParts + streaming.visibleText).joinToString("").trim(),
+                                        activity = activity + listOfNotNull(inFlight),
                                     ),
                                 )
                             }
                         }
                         is AgentEvent.ToolStarted -> {
+                            // The round that produced this call is over. Keep whatever prose it
+                            // wrote, drop the call itself — the row below says it better than
+                            // `[web_fetch(url='…')]` sitting in the middle of the answer does.
+                            val finished = streamingReply(roundText, reasoningFormat)
+                            stripBareCalls(finished.visibleText).takeIf(String::isNotBlank)
+                                ?.let { visibleParts += it }
+                            roundText = ""
+                            roundReasoningRecorded = 0
                             activity += AgentActivity.ToolInvocation(
                                 id = event.call.id,
                                 name = event.call.name,
@@ -2391,7 +2438,11 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = "Running ${event.call.name}…",
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningFormat).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(
+                                        (visibleParts + streamingReply(roundText, reasoningFormat).visibleText)
+                                            .joinToString("").trim(),
+                                        activity,
+                                    ),
                                 )
                             }
                             pushModelStatus(ModelPhase.CALLING_TOOL)
@@ -2407,7 +2458,11 @@ class MainViewModel(
                             mutableState.update {
                                 it.copy(
                                     status = null,
-                                    messages = requestMessages + inFlightMessage(streamingReply(assistantText, reasoningFormat).visibleText, activity + finishedThinking),
+                                    messages = requestMessages + inFlightMessage(
+                                        (visibleParts + streamingReply(roundText, reasoningFormat).visibleText)
+                                            .joinToString("").trim(),
+                                        activity,
+                                    ),
                                 )
                             }
                             pushModelStatus(ModelPhase.GENERATING)
@@ -2855,3 +2910,13 @@ private fun org.json.JSONArray?.toIntList(): List<Int> {
     val array = this ?: return emptyList()
     return (0 until array.length()).map(array::getInt)
 }
+
+/**
+ * Removes call syntax a model wrote as text.
+ *
+ * Formats that mark their calls have them stripped by the runtime's parser, but the ones Bram
+ * recovers from bare text are still sitting in the reply, so `[web_fetch(url='…')]` ended up in the
+ * middle of the answer. The activity row above says the same thing better.
+ */
+internal fun stripBareCalls(text: String): String =
+    text.replace(Regex("""\[?\b\w+\((?:[^()]|\([^()]*\))*\)]?"""), "").trim()

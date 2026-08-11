@@ -118,30 +118,18 @@ class InteractiveApprovalGate(
 
     companion object {
         /**
-         * The key an allowance is remembered under: the tool, plus the values of the arguments it
-         * says identify its target.
+         * The key an allowance is remembered under: the tool itself.
          *
-         * An argument the call omits is recorded as absent rather than skipped, so a later call
-         * that supplies one cannot slip through an allowance granted without it.
+         * It used to include the arguments a tool named as its target, so allowing one URL did not
+         * allow the next. That was safer and unusable: a person who allows a fetch means "you may
+         * fetch", not "you may fetch this one address", and re-approving every page made the grant
+         * worthless. Narrowing again should come with a way to see and revoke what was granted,
+         * rather than by making every grant too small to be worth making.
          */
-        fun approvalScope(tool: ToolDefinition, argumentsJson: String): String {
-            if (tool.approvalScopeKeys.isEmpty()) return tool.name
-            val arguments = runCatching { JSONObject(argumentsJson) }.getOrNull()
-            val targets = tool.approvalScopeKeys.sorted().joinToString(",") { key ->
-                "$key=" + (arguments?.opt(key)?.toString() ?: "<absent>")
-            }
-            return "${tool.name}($targets)"
-        }
+        fun approvalScope(tool: ToolDefinition, argumentsJson: String): String = tool.name
 
         /** The same thing said to a person rather than to a preferences file. */
-        fun scopeLabel(tool: ToolDefinition, argumentsJson: String): String {
-            if (tool.approvalScopeKeys.isEmpty()) return "every use of ${tool.name}"
-            val arguments = runCatching { JSONObject(argumentsJson) }.getOrNull()
-            val targets = tool.approvalScopeKeys.sorted().joinToString(", ") { key ->
-                "$key = " + (arguments?.opt(key)?.toString() ?: "(not set)")
-            }
-            return "${tool.name} with $targets"
-        }
+        fun scopeLabel(tool: ToolDefinition, argumentsJson: String): String = "every use of ${tool.name}"
     }
     val pending: StateFlow<PendingToolApproval?> = mutablePending.asStateFlow()
 

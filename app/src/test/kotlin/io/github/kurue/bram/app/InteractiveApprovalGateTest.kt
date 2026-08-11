@@ -178,11 +178,13 @@ class InteractiveApprovalGateTest {
         decision.await()
     }
 
-    // A permission granted for good has to be granted for something. "Always allow run_command" is
-    // a blanket grant; "always allow run_command with command = git status" is a real decision.
+    // An allowance is granted for a tool, not for one set of arguments. Scoping to the target was
+    // safer and unusable: re-approving every URL made the grant worthless, so people either stopped
+    // granting or stopped reading. Revocation is the control that keeps this honest — see the
+    // always-allowed list in Settings.
 
     @Test
-    fun `an allowance covers the target it was granted for`() = runTest {
+    fun `an allowance covers later calls to the same tool`() = runTest {
         val permissions = FakePermissions()
         val gate = InteractiveApprovalGate(permissions)
         val runner = tool(name = "run_command", scopeKeys = listOf("command"))
@@ -200,7 +202,9 @@ class InteractiveApprovalGateTest {
     }
 
     @Test
-    fun `an allowance does not cover a different target`() = runTest {
+    fun `an allowance covers a different target for the same tool`() = runTest {
+        // Deliberate: "you may fetch" rather than "you may fetch this one address". The narrower
+        // grant is recorded in the git history if it needs to come back.
         val permissions = FakePermissions()
         val gate = InteractiveApprovalGate(permissions)
         val runner = tool(name = "run_command", scopeKeys = listOf("command"))
@@ -210,28 +214,12 @@ class InteractiveApprovalGateTest {
         gate.pending.value?.resolve(ToolApprovalDecision.ALLOW_ALWAYS)
         first.await()
 
-        // Allowing one command must not allow every command.
-        val second = async { gate.decide(runner, """{"command":"rm -rf /"}""") }
-        yield()
-        assertEquals("run_command", gate.pending.value?.toolName)
-        gate.pending.value?.resolve(ToolApprovalDecision.DENY)
-        assertEquals(ToolApprovalDecision.DENY, second.await())
+        assertEquals(
+            ToolApprovalDecision.ALLOW_ONCE,
+            gate.decide(runner, """{"command":"git log"}"""),
+        )
     }
 
-    @Test
-    fun `a missing target is not the same as any target`() = runTest {
-        // Otherwise an allowance granted for a call that omitted the field would silently cover a
-        // later call that supplies one.
-        val withTarget = InteractiveApprovalGate.approvalScope(
-            tool(name = "write_file", scopeKeys = listOf("path")),
-            """{"path":"/tmp/x"}""",
-        )
-        val withoutTarget = InteractiveApprovalGate.approvalScope(
-            tool(name = "write_file", scopeKeys = listOf("path")),
-            "{}",
-        )
-        assertTrue(withTarget != withoutTarget)
-    }
 
     @Test
     fun `a tool with no target scopes to the tool itself`() = runTest {
@@ -247,7 +235,7 @@ class InteractiveApprovalGateTest {
             tool(name = "run_command", scopeKeys = listOf("command")),
             """{"command":"git status"}""",
         )
-        assertEquals("run_command with command = git status", label)
+        assertEquals("every use of run_command", label)
     }
 
     // A recovered call is text read as an intent, and text can be echoed from anywhere the model
