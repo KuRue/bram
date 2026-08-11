@@ -90,7 +90,12 @@ class AppContainer(application: Application) {
      */
     val runtimePermissionBroker = RuntimePermissionBroker(application)
     val approvalGate = PermissionAwareApprovalGate(
-        InteractiveApprovalGate(toolPermissionStore),
+        InteractiveApprovalGate(toolPermissionStore).apply {
+            // A tool call that needs an answer while nobody is at the card becomes a notification
+            // with Allow/Deny actions that resolve the same request the card would.
+            notifyRequest = { request -> AgentTaskService.postApprovalRequest(application, request) }
+            onRequestResolved = { request -> AgentTaskService.cancelApprovalNotification(application, request.id) }
+        },
         runtimePermissionBroker,
     )
     val taskStore = AgentTaskStore(application)

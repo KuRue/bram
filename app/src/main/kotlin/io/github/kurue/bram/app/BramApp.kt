@@ -616,6 +616,10 @@ private fun BramDrawer(
                 listOf(
                     listOf("Models" to AppPanel.MODELS, "Tasks" to AppPanel.TASKS),
                     listOf("Capabilities" to AppPanel.CAPABILITIES, "Settings" to AppPanel.SETTINGS),
+                    // The per-conversation tool-approval mode and privacy class live here; before
+                    // the drawer carried them they were only reachable through the top pill's
+                    // routing screen, which made "don't ask for this conversation" undiscoverable.
+                    listOf("Conversation" to AppPanel.SESSION, "System" to AppPanel.SYSTEM),
                 ).forEach { destinations ->
                     Row(
                         Modifier.fillMaxWidth(),

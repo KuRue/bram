@@ -51,4 +51,14 @@ class ChatScreenSmokeTest {
         composeRule.onNodeWithText("Models").performClick()
         composeRule.onNodeWithText("Profiles").assertIsDisplayed()
     }
+
+    @Test
+    fun drawerOpensConversationPanelShowsPermissionModes() {
+        composeRule.onNodeWithTag("menu-button").performClick()
+        composeRule.onNodeWithText("Conversation").performClick()
+        composeRule.onNodeWithText("Tool approvals").assertIsDisplayed()
+        composeRule.onNodeWithText("Ask when needed").assertIsDisplayed()
+        composeRule.onNodeWithText("Always ask").assertIsDisplayed()
+        composeRule.onNodeWithText("Don't ask").assertIsDisplayed()
+    }
 }

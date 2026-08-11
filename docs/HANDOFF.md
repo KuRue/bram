@@ -51,6 +51,13 @@ build tree is a synced copy of the same working tree.
   scheduled) run fast-denies a tool that needs approval instead of holding the gate open for ten
   minutes per call. (4) `web_fetch` caps the read and refuses non-text content types, so a huge or
   binary response cannot OOM the tool.
+- **Approvals reach the shade** — a tool call that needs an answer while nobody is at the card
+  (app backgrounded, or a scheduled task) now posts a high-importance notification with Allow /
+  Deny actions instead of the fast-deny above: the run parks on the request and the actions
+  resolve the same pending card the app would. Without notification permission the old fast-deny
+  still applies, so an invisible ask never holds the run. The per-conversation tool-approval mode
+  (bypass / auto / manual) was only reachable through the top pill's routing screen; it now has
+  its own Conversation destination in the drawer, next to System.
 - **Embedding recall, end to end** — the memory store carries a vector index (`memory_vectors`,
   DB v2) with cosine ranking, fused into the keyword (FTS) results via reciprocal-rank fusion
   behind a pluggable `Embedder` interface (`core/domain`). The native llama.cpp embedder is wired:
