@@ -180,10 +180,15 @@ against real output before committing.
 invents tools the gate then rejects, and exhausts the tool-turn budget. The tool
 infrastructure is ready; real agent behavior needs a larger tool-capable model.
 
-**`web_fetch` loops on bot-hostile sites.** developer.android.com redirect-loops
-under plain HTTP regardless of headers; the model should use `web_search`
-snippets or alternate URLs. Ordinary pages (example.com, Wikipedia) fetch fine.
-(On `agent-tools`.)
+**`web_fetch` redirect handling hardened (was: loops on bot-hostile sites).**
+developer.android.com used to redirect-loop under plain HTTP regardless of
+headers, costing the full hop cap and failing opaquely. The redirect policy
+now keeps a host-scoped cookie jar (replaying `Set-Cookie` across hops, the
+usual cause of a CDN loop), detects a cycle on the second hit instead of
+bouncing to the hop cap, and refuses an https→http downgrade. A loop that
+still happens now fails fast with a message that says so and, for a plain-http
+loop, nudges toward the https URL. The policy is pure over a single-request
+seam and unit-tested in `WebToolTest`.
 
 **The UI cannot be read by automation while a turn is running.** `uiautomator
 dump` needs an idle window and the send button animates during generation, so the
