@@ -72,13 +72,17 @@ class GeneratingMemoryExtractor : MemoryExtractor {
         // Kept short and explicit: small local models follow a strict format better than they follow
         // a long instruction, and extraction quality is bounded by the model, not the prompt length.
         const val EXTRACTION_SYSTEM_PROMPT =
-            "Read the exchange and pull out only durable memories the assistant should keep for " +
-                "future turns. Output ONLY a JSON array, no prose, no code fence. Each element has " +
-                    "the shape {\"kind\": \"fact\" | \"instruction\", \"text\": string, \"importance\": number between 0.0 and 1.0}. " +
+            "Read the exchange and pull out durable memories the assistant should keep for " +
+                "future turns, plus at most one episode. Output ONLY a JSON array, no prose, no code fence. Each element has " +
+                "the shape {\"kind\": \"fact\" | \"instruction\" | \"episode\", \"text\": string, \"importance\": number between 0.0 and 1.0}. " +
                 "\"fact\": a statement true later (the user's name, tools or languages they use, " +
                 "project details, deadlines, preferences about content). " +
                 "\"instruction\": a standing directive about how to respond (tone, format, things to " +
-                "always or never do). Skip small talk, the current task, and anything that only " +
-                "matters right now. If nothing durable, return []."
+                "always or never do). " +
+                "\"episode\": a one-line past-tense summary of what the user wanted and what you did " +
+                "in this exchange (for example, 'helped fix a redirect loop by adding cookie replay'). " +
+                "Add an episode ONLY when the exchange accomplished something non-trivial; skip small " +
+                "talk and exchanges that resolved nothing. " +
+                "Skip anything that only matters right now. If nothing applies, return []."
     }
 }

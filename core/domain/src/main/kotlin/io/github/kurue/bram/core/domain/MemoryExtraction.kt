@@ -119,6 +119,7 @@ private fun parseKind(value: String): MemoryKind? = when (value.trim().lowercase
     "fact", "semantic_fact", "semanticfact" -> MemoryKind.SEMANTIC_FACT
     "instruction", "user_instruction", "userinstruction", "preference", "directive"
     -> MemoryKind.USER_INSTRUCTION
+    "episode" -> MemoryKind.EPISODE
     else -> null
 }
 

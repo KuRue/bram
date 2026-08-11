@@ -35,6 +35,18 @@ class MemoryExtractionTest {
     }
 
     @Test
+    fun `parses an episode and gives it the episode default importance`() {
+        val out = parseExtractedMemories(
+            """[{"kind":"episode","text":"Helped fix a redirect loop by adding cookie replay"}]""",
+        )
+        assertEquals(1, out.size)
+        assertEquals(MemoryKind.EPISODE, out[0].kind)
+        assertEquals("Helped fix a redirect loop by adding cookie replay", out[0].text)
+        // Episodes rank below facts and instructions so they only surface when relevant.
+        assertEquals(0.5, out[0].importance, 1e-9)
+    }
+
+    @Test
     fun `skips unknown kinds, blank text, and too-short text`() {
         val out = parseExtractedMemories(
             """[
