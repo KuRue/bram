@@ -581,6 +581,9 @@ class MainViewModel(
             .takeIf { it.isNotEmpty() }
             ?: return TaskOutcome.Failed("No eligible routing profile. Check the routing and privacy settings.")
         container.approvalGate.setMode(PermissionMode.AUTO)
+        // Tasks are unattended and independent: their Termux calls stay stateless, so a task never
+        // inherits a chat conversation's remembered working directory.
+        container.termuxTool.setSession(null)
         var failure: String? = null
         var reply: String? = null
         var activity = emptyList<String>()
@@ -2254,6 +2257,9 @@ class MainViewModel(
         // Bind the gate to this conversation's mode for the duration of the run. Runs are serial,
         // and the mode could have been changed on another conversation in the meantime.
         container.approvalGate.setMode(snapshot.permissionMode)
+        // Bind the Termux shell session to this conversation so `shell` calls keep their working
+        // directory across the turn (and across turns in the same thread).
+        container.termuxTool.setSession(conversationId.value)
         mutableState.update {
             it.copy(
                 messages = requestMessages,

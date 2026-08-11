@@ -106,6 +106,11 @@ class AppContainer(application: Application) {
     val llamaCppClient = LlamaCppServiceClient(application)
     val deviceProfiler = AndroidDeviceProfiler(application)
     val conversationStore = ConversationStore(application)
+    /**
+     * The one Termux bridge, held so a chat turn can bind its conversation as the active shell
+     * session (working-directory persistence across `shell` calls) and a task run can clear it.
+     */
+    val termuxTool = TermuxCommandTool(application)
     val memoryStore = PersistentMemoryStore(
         application,
         // Skips the IPC entirely when no embedding model is designated, so the common keyword-only
@@ -139,7 +144,7 @@ class AppContainer(application: Application) {
                 LaunchUriTool(application),
                 ContactsTool(application),
                 CalendarTool(application),
-                TermuxCommandTool(application),
+                termuxTool,
                 MemorySearchTool(memoryStore),
                 ProposeSkillTool(skillStore),
             ),

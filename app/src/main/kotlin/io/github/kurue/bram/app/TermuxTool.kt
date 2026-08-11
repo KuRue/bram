@@ -40,28 +40,46 @@ import org.json.JSONObject
 class TermuxCommandTool(context: Context) : ToolHandler {
     private val appContext = context.applicationContext
 
+    /**
+     * The conversation whose turn is running, so [execute] can keep a per-conversation working
+     * directory for `shell` calls. Null during scheduled tasks (unattended work stays stateless)
+     * and until the ViewModel binds one at the start of a chat turn. Runs are serial, so a single
+     * mutable token is enough.
+     */
+    @Volatile
+    private var sessionToken: String? = null
+
+    fun setSession(token: String?) {
+        sessionToken = token
+    }
+
     override val definition = ToolDefinition(
         name = "termux_exec",
         // stdout from an arbitrary program. `curl`, `git clone` and `pip install` all end with
         // somebody else'''s text in the conversation, and Bram cannot tell those runs from `ls`.
         returnsUntrustedContent = true,
         description = "Run a command in Termux and return its exit code, stdout, and stderr. " +
-            "The command must be an executable already installed in Termux (e.g. \"ls\", " +
-            "\"git\", \"python\"). Output is truncated to about 50 KB per stream; the original " +
-            "lengths are reported so you can tell a truncated result from a complete one. " +
-            "Requires Termux with external-app access enabled.",
+            "Prefer `shell` (a raw bash command line) for anything that chains, pipes, globs, or " +
+            "uses builtins like cd/export: it runs under bash so `cd proj && make && git status` " +
+            "works in one call, and within a conversation the working directory persists across " +
+            "shell calls (cd into a project, then call again with just `git status`). Use " +
+            "`command`+`args` for a single executable whose arguments must be passed verbatim " +
+            "(no shell expansion); that path is stateless. Output is truncated to about 50 KB " +
+            "per stream with the original lengths reported. Requires Termux with external-app " +
+            "access enabled.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{
-               "command":{"type":"string","description":"The executable to run, e.g. \"git\"."},
+               "shell":{"type":"string",
+                        "description":"A raw bash command line: pipes (|), chains (&&, ;), globs (*), redirects, and builtins (cd, export, source) all work. When set, command/args are ignored. In a chat turn the working directory persists across shell calls."},
+               "command":{"type":"string","description":"The executable to run, e.g. \"git\". Ignored when `shell` is set."},
                "args":{"type":"array","items":{"type":"string"},
-                       "description":"Arguments for the executable, e.g. [\"status\"]."},
+                       "description":"Arguments for the executable, e.g. [\"status\"]. Ignored when `shell` is set."},
                "workdir":{"type":"string",
-                          "description":"Working directory inside Termux. Defaults to Termux home."},
+                          "description":"Working directory inside Termux. For `command` calls this is the start directory; for `shell` calls it overrides the remembered cwd and becomes the new one. Defaults to Termux home."},
                "stdin":{"type":"string","description":"Optional stdin for the command."},
                "timeout_seconds":{"type":"integer",
                                   "description":"How long to wait before giving up. Default 120."}},
-             "required":["command"],
              "additionalProperties":false}
         """.trimIndent(),
         readOnly = false,
@@ -73,9 +91,12 @@ class TermuxCommandTool(context: Context) : ToolHandler {
     override suspend fun execute(argumentsJson: String): String = withContext(Dispatchers.IO) {
         val arguments = runCatching { JSONObject(argumentsJson) }.getOrNull()
             ?: return@withContext toolError("invalid_arguments", "Arguments were not valid JSON")
+        val shellLine = arguments.optString("shell").trim()
         val command = arguments.optString("command").trim()
-        if (command.isEmpty()) return@withContext toolError("invalid_command", "A command is needed")
-        if (command.length > MAX_COMMAND_CHARS) {
+        if (shellLine.isEmpty() && command.isEmpty()) {
+            return@withContext toolError("invalid_command", "Provide `shell` or `command`.")
+        }
+        if (shellLine.length > MAX_COMMAND_CHARS || command.length > MAX_COMMAND_CHARS) {
             return@withContext toolError("invalid_command", "Command is too long")
         }
         if (!isTermuxInstalled()) {
@@ -103,6 +124,15 @@ class TermuxCommandTool(context: Context) : ToolHandler {
         val timeoutSeconds = arguments.optInt("timeout_seconds", 120).coerceIn(5, 600)
         val token = java.util.UUID.randomUUID().toString()
 
+        // The wrapped `shell` path runs under bash so pipes, chains, globs, and builtins work, and
+        // (in a chat turn) restores/saves the working directory so `cd` survives across calls. The
+        // direct `command` path execs the named binary with verbatim args and is stateless.
+        val (executablePath, execArgs) = if (shellLine.isNotEmpty()) {
+            buildShellInvocation(shellLine, workdir)
+        } else {
+            resolveExecutable(command) to args
+        }
+
         val result = runCatching {
             val pending = PendingIntent.getService(
                 appContext,
@@ -113,13 +143,16 @@ class TermuxCommandTool(context: Context) : ToolHandler {
             )
             val intent = Intent(EXTRA_COMMAND_PATH_ACTION).apply {
                 component = ComponentName(TERMUX_PACKAGE, TERMUX_RUN_COMMAND_SERVICE)
-                putExtra(EXTRA_COMMAND_PATH, resolveExecutable(command))
-                putExtra(EXTRA_ARGUMENTS, args)
-                workdir?.let { putExtra(EXTRA_WORKDIR, it) }
+                putExtra(EXTRA_COMMAND_PATH, executablePath)
+                putExtra(EXTRA_ARGUMENTS, execArgs)
+                // The wrapped shell path manages cwd itself (restore + save inside the snippet), so
+                // it does not set the workdir extra; only the direct exec path uses Termux's start
+                // directory.
+                if (shellLine.isEmpty()) workdir?.let { putExtra(EXTRA_WORKDIR, it) }
                 // Background execution is the only mode that keeps stdout and stderr separate,
                 // and it is what the RUN_COMMAND permission covers.
                 putExtra(EXTRA_BACKGROUND, true)
-                putExtra(EXTRA_COMMAND_LABEL, command)
+                putExtra(EXTRA_COMMAND_LABEL, if (shellLine.isNotEmpty()) "bash -c" else command)
                 if (stdin.isNotEmpty()) putExtra(EXTRA_STDIN, stdin)
                 putExtra(EXTRA_PENDING_INTENT, pending)
             }
@@ -135,7 +168,7 @@ class TermuxCommandTool(context: Context) : ToolHandler {
         TermuxResultRegistry.pending[token] = expected
         return@withContext try {
             val outcome = withTimeout(timeoutSeconds * 1_000L) { expected.await() }
-            outcome.toToolJson(command)
+            outcome.toToolJson(if (shellLine.isNotEmpty()) "bash -c" else command)
         } catch (_: TimeoutCancellationException) {
             toolError(
                 "termux_timeout",
@@ -146,6 +179,49 @@ class TermuxCommandTool(context: Context) : ToolHandler {
             TermuxResultRegistry.pending.remove(token)
         }
     }
+
+    /**
+     * Builds the `bash -c` invocation for a `shell` call: restores the conversation's last working
+     * directory (or cds into an explicit override), runs the model's command line, and saves the
+     * resulting directory back. Returns the executable path and the argument array for the
+     * RUN_COMMAND intent.
+     */
+    private fun buildShellInvocation(shellLine: String, workdir: String?): Pair<String, Array<String>> {
+        val statePath = sessionToken
+            ?.takeIf { SESSION_TOKEN.matches(it) }
+            ?.let { id -> "$BRAM_SESSION_DIR/session-$id.cwd" }
+        val snippet = buildString {
+            if (statePath != null) {
+                append("mkdir -p ")
+                append(shellQuote(BRAM_SESSION_DIR))
+                append(" 2>/dev/null; ")
+                if (workdir != null) {
+                    append("cd ")
+                    append(shellQuote(workdir))
+                } else {
+                    append("cd \"\$(cat ")
+                    append(shellQuote(statePath))
+                    append(" 2>/dev/null)\" 2>/dev/null")
+                }
+                append("; ")
+                append(shellLine)
+                append("; __B=\$?; pwd > ")
+                append(shellQuote(statePath))
+                append(" 2>/dev/null; exit \$__B")
+            } else {
+                if (workdir != null) {
+                    append("cd ")
+                    append(shellQuote(workdir))
+                    append("; ")
+                }
+                append(shellLine)
+            }
+        }
+        return resolveExecutable("bash") to arrayOf("-c", snippet)
+    }
+
+    /** Single-quotes a path so it is a literal inside a bash snippet, even with spaces or $. */
+    private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
     private fun isTermuxInstalled(): Boolean = runCatching {
         appContext.packageManager.getPackageInfo(TERMUX_PACKAGE, 0)
@@ -263,6 +339,11 @@ private const val TERMUX_PACKAGE = "com.termux"
 private const val TERMUX_RUN_COMMAND_SERVICE = "com.termux.app.RunCommandService"
 private const val TERMUX_PREFIX = "/data/data/com.termux/files/usr"
 private const val TERMUX_HOME = "/data/data/com.termux/files/home"
+
+// Where per-conversation shell session state (the last working directory) lives. Inside Termux's
+// home, so Termux's own uid reads and writes it; Bram only hands it the conversation token.
+private const val BRAM_SESSION_DIR = "$TERMUX_HOME/.bram"
+private val SESSION_TOKEN = Regex("\\A[A-Za-z0-9_-]+\\Z")
 
 // RUN_COMMAND intent extras (com.termux.RUN_COMMAND_*).
 private const val EXTRA_COMMAND_PATH_ACTION = "com.termux.RUN_COMMAND"
