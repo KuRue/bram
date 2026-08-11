@@ -391,7 +391,25 @@ class InMemoryMemoryStore : MemoryStore {
         conversationId: io.github.kurue.bram.core.domain.ConversationId,
         memory: MemoryRecord,
     ) {
-        values.getOrPut(conversationId.value) { mutableListOf() }.add(memory)
+        val list = values.getOrPut(conversationId.value) { mutableListOf() }
+        list.add(memory)
+        if (memory.kind == io.github.kurue.bram.core.domain.MemoryKind.EPISODE) {
+            trimEpisodes(list)
+        }
+    }
+
+    /**
+     * Keeps only the newest [io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION] episodes
+     * in this conversation's list. Episodes accumulate every substantial turn; this mirrors the cap
+     * the persistent store enforces so the in-memory double behaves the same way in tests.
+     */
+    private fun trimEpisodes(list: MutableList<MemoryRecord>) {
+        val episodes = list.filter { it.kind == io.github.kurue.bram.core.domain.MemoryKind.EPISODE }
+        if (episodes.size <= io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION) return
+        val oldest = episodes
+            .sortedByDescending { it.createdAtEpochMillis }
+            .drop(io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION)
+        list.removeAll(oldest.toSet())
     }
 
     override suspend fun recent(limit: Int): List<MemoryRecord> =

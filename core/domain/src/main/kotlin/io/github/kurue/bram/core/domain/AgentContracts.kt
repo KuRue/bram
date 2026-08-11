@@ -9,6 +9,13 @@ enum class MemoryKind {
     USER_INSTRUCTION,
 }
 
+/**
+ * The most episodes a single conversation keeps. Episodes are produced every substantial turn, so
+ * without a cap a long-running conversation would let them dominate the store and add recall noise;
+ * the store trims to the newest [MAX_EPISODES_PER_CONVERSATION] after each episode is written.
+ */
+const val MAX_EPISODES_PER_CONVERSATION = 20
+
 data class MemoryRecord(
     val id: String,
     val kind: MemoryKind,
