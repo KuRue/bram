@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     The themed-icon layer (Android 13+). The system recolours this to the user's wallpaper palette
-    and throws away everything but the alpha, so the gradients, the wear and the accent are all
-    meaningless here — a flat silhouette is the honest version. Drawn a touch heavier than the
-    colour letter because a single-tone shape at 48dp reads thinner than a lit one.
+    and keeps only the alpha, so the gradients, the wear and the accent all mean nothing here - a
+    flat silhouette is the honest version. Drawn a touch heavier than the colour letter, because a
+    single-tone shape at 48dp reads thinner than a lit one.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -11,7 +11,7 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:pathData="M33,29 H58 A12.5,12.5 0 0 1 58,54 H60 A12.5,12.5 0 0 1 60,79 H33 Z M46,38 H56 A5,5 0 0 1 56,48 H46 Z M46,60 H58 A6,6 0 0 1 58,72 H46 Z"
+        android:pathData="M35,25 H63 L71,33 V47 L64,54 H66 L73,61 V76 L65,83 H35 Z M48,35 H57 L60,38 V42 L57,45 H48 Z M48,63 H59 L62,66 V70 L59,73 H48 Z"
         android:fillType="evenOdd"
         android:fillColor="#FFFFFFFF" />
 </vector>
