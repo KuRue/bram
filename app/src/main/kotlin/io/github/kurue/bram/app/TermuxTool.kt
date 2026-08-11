@@ -187,41 +187,9 @@ class TermuxCommandTool(context: Context) : ToolHandler {
      * RUN_COMMAND intent.
      */
     private fun buildShellInvocation(shellLine: String, workdir: String?): Pair<String, Array<String>> {
-        val statePath = sessionToken
-            ?.takeIf { SESSION_TOKEN.matches(it) }
-            ?.let { id -> "$BRAM_SESSION_DIR/session-$id.cwd" }
-        val snippet = buildString {
-            if (statePath != null) {
-                append("mkdir -p ")
-                append(shellQuote(BRAM_SESSION_DIR))
-                append(" 2>/dev/null; ")
-                if (workdir != null) {
-                    append("cd ")
-                    append(shellQuote(workdir))
-                } else {
-                    append("cd \"\$(cat ")
-                    append(shellQuote(statePath))
-                    append(" 2>/dev/null)\" 2>/dev/null")
-                }
-                append("; ")
-                append(shellLine)
-                append("; __B=\$?; pwd > ")
-                append(shellQuote(statePath))
-                append(" 2>/dev/null; exit \$__B")
-            } else {
-                if (workdir != null) {
-                    append("cd ")
-                    append(shellQuote(workdir))
-                    append("; ")
-                }
-                append(shellLine)
-            }
-        }
+        val snippet = ShellSnippet.build(shellLine, workdir, sessionToken)
         return resolveExecutable("bash") to arrayOf("-c", snippet)
     }
-
-    /** Single-quotes a path so it is a literal inside a bash snippet, even with spaces or $. */
-    private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
     private fun isTermuxInstalled(): Boolean = runCatching {
         appContext.packageManager.getPackageInfo(TERMUX_PACKAGE, 0)
@@ -344,6 +312,50 @@ private const val TERMUX_HOME = "/data/data/com.termux/files/home"
 // home, so Termux's own uid reads and writes it; Bram only hands it the conversation token.
 private const val BRAM_SESSION_DIR = "$TERMUX_HOME/.bram"
 private val SESSION_TOKEN = Regex("\\A[A-Za-z0-9_-]+\\Z")
+
+/**
+ * The bash `-c` snippet for a `shell` call. Pure (no Android, no instance state) so it can be
+ * unit-tested directly: the snippet is where quoting, cwd restore/save, and the token-sanitization
+ * guard all live, and a bug here breaks every shell call.
+ *
+ *  - With no session token (task runs, or chat before the ViewModel bound one) the line runs under
+ *    bash with no cwd machinery, so shell features work but nothing persists.
+ *  - With a token, the line is wrapped to restore the last cwd (or cd into an explicit override),
+ *    run, then save `pwd` back. A token that is not `[A-Za-z0-9_-]+` is ignored, so a malformed
+ *    conversation id can never reach the path or inject into the snippet.
+ */
+/**
+ * The bash `-c` snippet for a `shell` call, as a namespaced object so the androidTest source set
+ * (which cannot see top-level functions in main under this AGP setup) can exercise it directly.
+ * The snippet is where quoting, cwd restore/save, and the token-sanitization guard all live, and a
+ * bug here breaks every shell call.
+ *
+ *  - With no session token (task runs, or chat before the ViewModel bound one) the line runs under
+ *    bash with no cwd machinery, so shell features work but nothing persists.
+ *  - With a token, the line is wrapped to restore the last cwd (or cd into an explicit override),
+ *    run, then save `pwd` back. A token that is not `[A-Za-z0-9_-]+` is ignored, so a malformed
+ *    conversation id can never reach the path or inject into the snippet.
+ */
+object ShellSnippet {
+    fun build(shellLine: String, workdir: String?, sessionToken: String?): String {
+        val statePath = sessionToken
+            ?.takeIf { SESSION_TOKEN.matches(it) }
+            ?.let { id -> "$BRAM_SESSION_DIR/session-$id.cwd" }
+        if (statePath == null) {
+            return if (workdir != null) "cd ${quote(workdir)}; $shellLine" else shellLine
+        }
+        val enter = if (workdir != null) {
+            "cd ${quote(workdir)}"
+        } else {
+            "cd \"\$(cat ${quote(statePath)} 2>/dev/null)\" 2>/dev/null"
+        }
+        return "mkdir -p ${quote(BRAM_SESSION_DIR)} 2>/dev/null; $enter; $shellLine; " +
+            "__B=\$?; pwd > ${quote(statePath)} 2>/dev/null; exit \$__B"
+    }
+
+    /** Single-quotes a value so it is a literal inside a bash snippet, even with spaces, $, or quotes. */
+    fun quote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
+}
 
 // RUN_COMMAND intent extras (com.termux.RUN_COMMAND_*).
 private const val EXTRA_COMMAND_PATH_ACTION = "com.termux.RUN_COMMAND"
