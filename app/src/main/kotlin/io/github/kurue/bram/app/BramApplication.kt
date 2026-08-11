@@ -16,6 +16,7 @@ import io.github.kurue.bram.core.domain.ToolHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import io.github.kurue.bram.platform.android.AndroidDeviceProfiler
 import io.github.kurue.bram.platform.android.ConversationStore
 import io.github.kurue.bram.platform.android.McpServerStore
@@ -29,6 +30,7 @@ import io.github.kurue.bram.runtime.openai.OpenAiCompatibleRuntime
 import io.github.kurue.bram.runtime.llamacpp.LlamaCppRuntime
 import io.github.kurue.bram.runtime.llamacpp.LocalModelStore
 import io.github.kurue.bram.runtime.llamacpp.ModelProfileStore
+import io.github.kurue.bram.runtime.llamacpp.inference.LlamaCppEmbedder
 import io.github.kurue.bram.runtime.llamacpp.inference.LlamaCppServiceClient
 import io.github.kurue.bram.runtime.litertlm.LiteRtEngineManager
 import io.github.kurue.bram.runtime.litertlm.LiteRtLmRuntime
@@ -86,10 +88,21 @@ class AppContainer(application: Application) {
     val taskRunner = AgentTaskRunner(application, appScope, taskStore)
     val automationStore = PersistentAutomationStore(application)
     val automationRunner = AutomationRunner(application, appScope, automationStore, taskRunner)
+    val embeddingModelStore = EmbeddingModelStore(application)
     val llamaCppClient = LlamaCppServiceClient(application)
     val deviceProfiler = AndroidDeviceProfiler(application)
     val conversationStore = ConversationStore(application)
-    val memoryStore = PersistentMemoryStore(application)
+    val memoryStore = PersistentMemoryStore(
+        application,
+        // Skips the IPC entirely when no embedding model is designated, so the common keyword-only
+        // case pays nothing and the inference process is not bound on every memory write.
+        object : io.github.kurue.bram.core.domain.Embedder {
+            override suspend fun embed(text: String): FloatArray? {
+                if (embeddingModelStore.modelId() == null) return null
+                return LlamaCppEmbedder(llamaCppClient).embed(text)
+            }
+        },
+    )
     val runJournal = SqliteRunJournal(application)
     /**
      * Built-ins plus whatever MCP servers contribute. Mutable so a server's tools can be swapped in
@@ -142,6 +155,22 @@ class AppContainer(application: Application) {
         journal = runJournal,
         memoryExtractor = GeneratingMemoryExtractor(),
     )
+
+    init {
+        // Load the designated embedding model into the inference process so recall can cosine-rank
+        // from the first turn. Best-effort: a missing file or a changed path just leaves recall on
+        // keyword (FTS) mode until the user picks a model again.
+        appScope.launch {
+            val path = embeddingModelStore.modelPath()
+            if (!path.isNullOrBlank()) {
+                runCatching { llamaCppClient.loadEmbedder(path, EMBEDDER_THREADS) }
+            }
+        }
+    }
+
+    private companion object {
+        const val EMBEDDER_THREADS = 4
+    }
 }
 
 private class DeviceStatusTool(

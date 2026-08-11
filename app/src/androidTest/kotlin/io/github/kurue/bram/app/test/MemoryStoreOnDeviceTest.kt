@@ -42,23 +42,27 @@ class MemoryStoreOnDeviceTest {
     fun recentAndRemoveAgainstTheRealStore() = runBlocking {
         val store = ApplicationProvider.getApplicationContext<BramApplication>().container.memoryStore
         val conversation = ConversationId("memory-store-verification")
-        val older = MemoryRecord("verify-older", MemoryKind.SEMANTIC_FACT, "Older fact", createdAtEpochMillis = 1_000)
-        val newer = MemoryRecord("verify-newer", MemoryKind.USER_INSTRUCTION, "Newer instruction", createdAtEpochMillis = 9_000)
-        val summary = MemoryRecord("verify-summary", MemoryKind.WORKING_SUMMARY, "Hidden working summary", createdAtEpochMillis = 20_000)
+        // Use near-current timestamps so the test records are genuinely the newest in a shared DB
+        // that may already hold real memories from prior runs.
+        val base = System.currentTimeMillis()
+        val older = MemoryRecord("verify-older", MemoryKind.SEMANTIC_FACT, "Older fact", createdAtEpochMillis = base)
+        val newer = MemoryRecord("verify-newer", MemoryKind.USER_INSTRUCTION, "Newer instruction", createdAtEpochMillis = base + 60_000)
+        val summary = MemoryRecord("verify-summary", MemoryKind.WORKING_SUMMARY, "Hidden working summary", createdAtEpochMillis = base + 120_000)
 
         try {
             store.put(conversation, older)
             store.put(conversation, newer)
             store.put(conversation, summary)
 
-            val recent = store.recent(10)
-            assertTrue("older should be present", recent.any { it.id == "verify-older" })
-            assertTrue("newer should be present", recent.any { it.id == "verify-newer" })
+            val recent = store.recent(100)
+            val mine = recent.filter { it.id in setOf("verify-older", "verify-newer") }
+            assertTrue("older should be present", mine.any { it.id == "verify-older" })
+            assertTrue("newer should be present", mine.any { it.id == "verify-newer" })
             assertFalse("working summaries must be hidden", recent.any { it.id == "verify-summary" })
-            assertEquals("newest first", "verify-newer", recent.first().id)
+            assertTrue("newest first among the test records", mine.indexOfFirst { it.id == "verify-newer" } < mine.indexOfFirst { it.id == "verify-older" })
 
             store.remove("verify-older")
-            val after = store.recent(10)
+            val after = store.recent(100)
             assertFalse("removed id must be gone", after.any { it.id == "verify-older" })
             assertTrue("unrelated id must remain", after.any { it.id == "verify-newer" })
         } finally {
@@ -81,10 +85,14 @@ class MemoryStoreOnDeviceTest {
             store.put(conversation, high)
             store.put(conversation, summary)
 
-            val top = store.mostImportant(10)
-            // Highest importance first, working summaries hidden.
-            assertEquals("verify-high", top.first().id)
-            assertTrue(top.any { it.id == "verify-low" })
+            val top = store.mostImportant(100)
+            val mine = top.filter { it.id in setOf("verify-low", "verify-high") }
+            // Highest importance first among the test records, working summaries hidden.
+            assertTrue("high-importance record present", mine.any { it.id == "verify-high" })
+            assertTrue(
+                "higher importance ranks before lower",
+                mine.indexOfFirst { it.id == "verify-high" } < mine.indexOfFirst { it.id == "verify-low" },
+            )
             assertFalse("working summaries must not be injected", top.any { it.id == "verify-imp-summary" })
         } finally {
             store.remove("verify-low")

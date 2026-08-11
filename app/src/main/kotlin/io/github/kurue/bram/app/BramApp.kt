@@ -375,6 +375,8 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onBack = { panel = AppPanel.CAPABILITIES },
                                 onRemoveMemory = viewModel::removeMemory,
+                                onSetEmbeddingModel = viewModel::setEmbeddingModel,
+                                onClearEmbeddingModel = viewModel::clearEmbeddingModel,
                             )
                             AppPanel.SYSTEM -> SystemScreen(
                                 state = state,
@@ -2598,7 +2600,13 @@ private fun AutomationsScreen(
 }
 
 @Composable
-private fun MemoriesScreen(state: AppUiState, onBack: () -> Unit, onRemoveMemory: (String) -> Unit) {
+private fun MemoriesScreen(
+    state: AppUiState,
+    onBack: () -> Unit,
+    onRemoveMemory: (String) -> Unit,
+    onSetEmbeddingModel: (String) -> Unit,
+    onClearEmbeddingModel: () -> Unit,
+) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -2609,6 +2617,35 @@ private fun MemoriesScreen(state: AppUiState, onBack: () -> Unit, onRemoveMemory
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        GlassSurface(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader("Semantic recall", "Match memories by meaning, not just shared words")
+                state.embeddingModelName?.let { name ->
+                    Text(
+                        "Embedding model: $name",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    TextButton(onClick = onClearEmbeddingModel) { Text("Stop using embeddings") }
+                } ?: run {
+                    Text(
+                        "An embedding model lets recall find a memory like 'dark mode' for the query " +
+                            "'appearance settings'. Import a small embedding GGUF (bge-small-en, " +
+                            "all-MiniLM-L6-v2, or similar) and pick it here.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (state.localModels.isEmpty()) {
+                        Text("No models imported yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        state.localModels.forEach { model ->
+                            TextButton(onClick = { onSetEmbeddingModel(model.id.value) }) {
+                                Text(model.displayName)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (state.memories.isEmpty()) EmptyDestination("No memories yet", "They are gathered automatically as you chat.")
         else state.memories.forEach { MemoryCard(it, onRemoveMemory) }
         state.error?.let { ErrorCard(it) }

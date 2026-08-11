@@ -366,6 +366,8 @@ data class AppUiState(
     val automationStatus: String? = null,
     /** Newest-first remembered facts and instructions, for the memory browser. */
     val memories: List<MemoryRecord> = emptyList(),
+    /** Display name of the resident embedding model, or null when recall is keyword-only. */
+    val embeddingModelName: String? = null,
 ) {
     val selectedLocalModel: LocalModelRecord?
         get() = localModels.firstOrNull { it.id.value == selectedRuntimeId }
@@ -463,6 +465,7 @@ class MainViewModel(
 
     init {
         restoreRoutingSettings()
+        mutableState.update { it.copy(embeddingModelName = container.embeddingModelStore.modelName()) }
         container.llamaCppClient.processFailureListener = { message ->
             mutableState.update {
                 it.copy(
@@ -2064,6 +2067,28 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Loads [modelId] into the resident embedding context in the inference process and remembers it
+     * as the active embedding model, so future memories (and the next query) embed through it.
+     */
+    fun setEmbeddingModel(modelId: String) {
+        val model = mutableState.value.localModels.firstOrNull { it.id.value == modelId } ?: return
+        viewModelScope.launch {
+            container.embeddingModelStore.set(model.id.value, model.localPath, model.displayName)
+            mutableState.update { it.copy(embeddingModelName = model.displayName) }
+            runCatching { container.llamaCppClient.loadEmbedder(model.localPath, EMBEDDER_THREADS) }
+        }
+    }
+
+    /** Drops the resident embedding model; recall falls back to keyword (FTS) only. */
+    fun clearEmbeddingModel() {
+        viewModelScope.launch {
+            runCatching { container.llamaCppClient.unloadEmbedder() }
+            container.embeddingModelStore.clear()
+            mutableState.update { it.copy(embeddingModelName = null) }
+        }
+    }
+
     /** The assistant bubble as it stands mid-turn, so tool steps appear as they happen. */
     private fun inFlightMessage(text: String, activity: List<AgentActivity>) = ConversationMessage(
         role = MessageRole.ASSISTANT,
@@ -2814,6 +2839,9 @@ private const val REFERENCE_TOKENS = 24
 
 /** llama.cpp clamps this to the model's layer count, so it means "offload everything". */
 private const val FULL_GPU_OFFLOAD = 999
+
+/** CPU threads for the resident embedding model; small models are fast enough at four. */
+private const val EMBEDDER_THREADS = 4
 
 /** How many memories the browser shows — newest first, plenty for review without flooding the panel. */
 private const val MEMORY_BROWSER_LIMIT = 200

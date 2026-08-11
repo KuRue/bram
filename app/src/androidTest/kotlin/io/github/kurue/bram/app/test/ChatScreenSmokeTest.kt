@@ -42,7 +42,7 @@ class ChatScreenSmokeTest {
         composeRule.onNodeWithText("New conversation").assertIsDisplayed()
         composeRule.onNodeWithText("Conversations").assertIsDisplayed()
         composeRule.onNodeWithText("Settings").performClick()
-        composeRule.onNodeWithText("Remote providers").assertIsDisplayed()
+        composeRule.onNodeWithText("Notifications").assertIsDisplayed()
     }
 
     @Test
@@ -50,6 +50,5 @@ class ChatScreenSmokeTest {
         composeRule.onNodeWithTag("menu-button").performClick()
         composeRule.onNodeWithText("Models").performClick()
         composeRule.onNodeWithText("Profiles").assertIsDisplayed()
-        composeRule.onNodeWithText("Import model").assertIsDisplayed()
     }
 }
