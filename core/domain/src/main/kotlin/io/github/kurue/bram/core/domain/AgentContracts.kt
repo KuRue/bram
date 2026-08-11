@@ -176,8 +176,15 @@ interface ToolApprovalGate {
     suspend fun decide(
         tool: ToolDefinition,
         argumentsJson: String,
-        /** A call recovered from unmarked text. Always asked about; see [ToolCall.recovered]. */
+        /** A call recovered from unmarked text. See [ToolCall.recovered]. */
         recovered: Boolean = false,
+        /**
+         * Whether the conversation already contains content from outside — a fetched page, a
+         * search result, an MCP reply. Only meaningful together with [recovered]: a recovered call
+         * is the model's own text read as an intent, and it is only dangerous if that text could
+         * have been put there by someone else.
+         */
+        untrustedContext: Boolean = false,
     ): ToolApprovalDecision
 }
 

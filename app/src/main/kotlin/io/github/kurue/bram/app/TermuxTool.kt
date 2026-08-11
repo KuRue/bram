@@ -42,6 +42,9 @@ class TermuxCommandTool(context: Context) : ToolHandler {
 
     override val definition = ToolDefinition(
         name = "termux_exec",
+        // stdout from an arbitrary program. `curl`, `git clone` and `pip install` all end with
+        // somebody else'''s text in the conversation, and Bram cannot tell those runs from `ls`.
+        returnsUntrustedContent = true,
         description = "Run a command in Termux and return its exit code, stdout, and stderr. " +
             "The command must be an executable already installed in Termux (e.g. \"ls\", " +
             "\"git\", \"python\"). Output is truncated to about 50 KB per stream; the original " +

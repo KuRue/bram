@@ -146,8 +146,9 @@ class PermissionAwareApprovalGate(
         tool: ToolDefinition,
         argumentsJson: String,
         recovered: Boolean,
+        untrustedContext: Boolean,
     ): ToolApprovalDecision {
-        val decision = delegate.decide(tool, argumentsJson, recovered)
+        val decision = delegate.decide(tool, argumentsJson, recovered, untrustedContext)
         if (decision == ToolApprovalDecision.DENY) return decision
         val stillMissing = broker.requestMissing(tool.requiredPermissions, timeoutMillis)
         return if (stillMissing.isEmpty()) decision else ToolApprovalDecision.DENY

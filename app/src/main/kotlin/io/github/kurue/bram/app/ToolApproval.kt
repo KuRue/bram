@@ -25,6 +25,8 @@ data class PendingToolApproval(
     val scopeLabel: String,
     /** Read out of unmarked text rather than marked as a call by the model's format. */
     val recovered: Boolean = false,
+    /** Set when the conversation contains fetched content, which is why a recovered call asks. */
+    val untrustedContext: Boolean = false,
     private val answer: CompletableDeferred<ToolApprovalDecision>,
 ) {
     fun resolve(decision: ToolApprovalDecision) {
@@ -137,14 +139,23 @@ class InteractiveApprovalGate(
         tool: ToolDefinition,
         argumentsJson: String,
         recovered: Boolean,
+        untrustedContext: Boolean,
     ): ToolApprovalDecision {
         val current = mode
-        // BYPASS runs what the model asked for without asking again — but not a call recovered from
-        // unmarked text. That is text read as an intent, and `web_fetch` puts pages Bram did not
-        // write into the context, so the text could have come from anywhere. Taking responsibility
-        // for a run is not the same as vouching for every page it reads, which is the one case the
-        // fences on recovered calls exist for.
-        if (current == PermissionMode.BYPASS && !recovered) return ToolApprovalDecision.ALLOW_ONCE
+        // BYPASS runs what the model asked for without asking again. It used to make an exception
+        // for every call recovered from unmarked text, which was the right instinct aimed at the
+        // wrong thing: on a format that never marks its calls — LFM2.5 among them — every call is
+        // recovered, so the exception was the rule and bypass did nothing at all.
+        //
+        // What actually makes a recovered call dangerous is not that it was recovered. It is that
+        // the model's text may be repeating something it read. With no outside content in the
+        // conversation there is nothing to repeat, and the call is the model's own intent — which
+        // is precisely what bypass exists to stop asking about. Once a page has been fetched, the
+        // fence goes back up: taking responsibility for a run is not the same as vouching for
+        // every page it reads.
+        if (current == PermissionMode.BYPASS && !(recovered && untrustedContext)) {
+            return ToolApprovalDecision.ALLOW_ONCE
+        }
 
         val scope = approvalScope(tool, argumentsJson)
         // An explicit "allow always" grant is stronger than the mode, so it holds even in MANUAL —
@@ -170,6 +181,7 @@ class InteractiveApprovalGate(
             readOnly = tool.readOnly,
             scopeLabel = scopeLabel(tool, argumentsJson),
             recovered = recovered,
+            untrustedContext = untrustedContext,
             answer = answer,
         )
         mutablePending.value = request

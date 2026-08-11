@@ -21,6 +21,8 @@ import org.json.JSONObject
 class WebSearchTool : ToolHandler {
     override val definition = ToolDefinition(
         name = "web_search",
+        // Results are titles and snippets written by whoever owns the page.
+        returnsUntrustedContent = true,
         description = "Search the public web (DuckDuckGo) and return the top results as title, " +
             "URL, and a snippet. Use for current or factual information you do not already have.",
         inputSchemaJson = """
@@ -57,6 +59,8 @@ class WebSearchTool : ToolHandler {
 class WebFetchTool : ToolHandler {
     override val definition = ToolDefinition(
         name = "web_fetch",
+        // The whole point of the tool is to put a page Bram did not write into the context.
+        returnsUntrustedContent = true,
         description = "Download a web page and return its text with HTML stripped. Use after " +
             "web_search to read a specific page in full.",
         inputSchemaJson = """

@@ -2060,7 +2060,10 @@ private fun SessionScreen(
             when (state.permissionMode) {
                 PermissionMode.AUTO -> "Ask before tools make changes."
                 PermissionMode.MANUAL -> "Ask before every tool."
-                PermissionMode.BYPASS -> "Never ask. Advanced and risky."
+                // Not quite "never": a call read out of the reply text is still asked about once
+                // the chat contains a fetched page, which is the one case the mode cannot honestly
+                // waive. Said here so the exception is not a surprise when it happens.
+                PermissionMode.BYPASS -> "Never ask, except a call read from text after a web fetch."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2909,9 +2912,14 @@ private fun ToolApprovalCard(
             )
             if (pending.recovered) {
                 // Worth one line: this call was read out of the model's prose rather than marked as
-                // a call, and prose can be echoed from a page Bram read.
+                // a call. On its own that is a caveat; with a fetched page in the conversation it
+                // is the reason the question is being asked at all, so say which.
                 Text(
-                    "Read from the reply text, not a marked call.",
+                    if (pending.untrustedContext) {
+                        "Read from the reply text, and this chat contains a fetched page."
+                    } else {
+                        "Read from the reply text, not a marked call."
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -33,6 +33,9 @@ class McpToolHandler(
         inputSchemaJson = tool.inputSchemaJson,
         requiredPermissions = setOf("internet"),
         readOnly = false,
+        // Whatever the server returns is text from another process, which is the same problem a
+        // fetched page is. Bram cannot see what it wrapped or where the server got it.
+        returnsUntrustedContent = true,
         approvalScopeKeys = scopeKeys(tool.inputSchemaJson),
     )
 
