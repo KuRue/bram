@@ -1827,7 +1827,10 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
                 )
                 progress.candidates.forEachIndexed { index, label ->
                     val result = progress.results.getOrNull(index + 1)
-                    val measuring = !progress.finished && progress.current == label
+                    // measuringIndex is the single source of truth for "this row is the one running
+                    // now"; matching against `current` would flicker, because `current` carries the
+                    // measurement callback's prose mid-run.
+                    val measuring = !progress.finished && progress.measuringIndex == index
                     val (status, color) = when {
                         result != null && result.agrees ->
                             "%.2fx".format(result.speedup) to MaterialTheme.colorScheme.primary
@@ -1839,12 +1842,15 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
                 }
 
                 if (!progress.finished) {
-                    LinearProgressIndicator(
-                        progress = { progress.fraction },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    // Indeterminate and animated: the work is discrete (one backend at a time, then
+                    // the batch tune), each step lasting seconds, so a determinate bar that stalls
+                    // then jumps reads as broken. The rows carry the per-candidate progress; the bar
+                    // just says "still working."
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    // The live activity — "Replaying the reference on Adreno…", then "Tuning prompt
+                    // batch…" — including the batch phase, which previously had no visible indicator.
                     Text(
-                        "Step ${progress.step} of ${progress.total}",
+                        progress.current,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
