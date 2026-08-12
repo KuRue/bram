@@ -5,11 +5,6 @@ import android.content.ClipboardManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -221,6 +216,10 @@ fun BramApp(viewModel: MainViewModel) {
             // sharp behind it. Panels are drawn after, outside the recording, so none of them ends
             // up blurring an image of itself.
             Box(Modifier.fillMaxSize().bramField().recordBackdrop()) {
+                GenerationLattice(
+                    generating = state.isGenerating,
+                    modifier = Modifier.fillMaxSize(),
+                )
                 ChatTranscript(
                     state = state,
                     onRegenerate = viewModel::regenerateLastReply,
@@ -789,9 +788,6 @@ private fun ChatTranscript(
                 onRegenerate = onRegenerate,
                 onEdit = { text -> onEdit(message.id.value, text) },
             )
-        }
-        if (state.isGenerating) {
-            item(key = "working") { WorkingDots() }
         }
         state.pendingApproval?.let { pending ->
             item(key = "approval") {
@@ -2874,43 +2870,6 @@ private fun ChatBubble(
                     TextButton(onClick = onRegenerate) { Text("Retry") }
                 }
             }
-        }
-    }
-}
-
-/**
- * Three dots breathing in turn, to say Bram is still working.
- *
- * The throughput line used to carry this, by changing; it now lives in the top bar, so the chat
- * needed its own sign of life. A local model can sit for seconds between tokens and stillness reads
- * as a hang.
- */
-@Composable
-private fun WorkingDots() {
-    val transition = rememberInfiniteTransition(label = "working")
-    Row(
-        Modifier.padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        repeat(3) { index ->
-            val alpha by transition.animateFloat(
-                initialValue = 0.25f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(600, delayMillis = index * 180),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "dot$index",
-            )
-            Box(
-                Modifier
-                    .size(6.dp)
-                    .background(
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
-                        CircleShape,
-                    ),
-            )
         }
     }
 }
