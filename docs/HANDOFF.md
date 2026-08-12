@@ -185,15 +185,24 @@ against real output before committing.
 invents tools the gate then rejects, and exhausts the tool-turn budget. The tool
 infrastructure is ready; real agent behavior needs a larger tool-capable model.
 
-**`web_fetch` redirect handling hardened (was: loops on bot-hostile sites).**
-developer.android.com used to redirect-loop under plain HTTP regardless of
-headers, costing the full hop cap and failing opaquely. The redirect policy
-now keeps a host-scoped cookie jar (replaying `Set-Cookie` across hops, the
-usual cause of a CDN loop), detects a cycle on the second hit instead of
-bouncing to the hop cap, and refuses an https→http downgrade. A loop that
-still happens now fails fast with a message that says so and, for a plain-http
-loop, nudges toward the https URL. The policy is pure over a single-request
-seam and unit-tested in `WebToolTest`.
+**`web_fetch` redirect handling hardened (verified on device).**
+Redirects used to bounce to the hop cap and fail opaquely on loop-prone sites.
+The redirect policy now keeps a host-scoped cookie jar (replaying `Set-Cookie`
+across hops), detects a cycle on the second hit instead of bouncing to the
+cap, and refuses an https→http downgrade; the policy is pure over a
+single-request seam and unit-tested in `WebToolTest`. Verified live on a phone:
+ordinary pages (`example.com`) fetch unchanged, and a genuine loop now fails
+fast with a clear "Redirect cycle…" message the model can pivot away from.
+
+**One site is still unfetchable, and it is not a bug:** `developer.android.com`
+silently tries to OAuth-sign-in on every page load (`auto_signin=True`,
+`prompt=none` → `accounts.google.com/o/oauth2/v2/auth`), which fails with
+`interaction_required` for an unauthenticated client and redirects home
+forever. No header or cookie a simple `HttpURLConnection` can carry will
+satisfy it — it needs a logged-in browser session. The hardened loop handling
+turns this into a clean cycle error (the model falls back to `web_search`
+snippets) rather than the old opaque hang. Don't treat a fetch of that domain
+as a regression.
 
 **The UI cannot be read by automation while a turn is running.** `uiautomator
 dump` needs an idle window and the send button animates during generation, so the
