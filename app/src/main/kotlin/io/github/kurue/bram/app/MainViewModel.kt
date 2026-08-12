@@ -56,12 +56,14 @@ import java.net.URI
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Outcome of comparing an accelerator against the CPU reference. [matchesCpu] is the acceptance
@@ -458,6 +460,12 @@ class MainViewModel(
     private var generationJob: Job? = null
     /** Whether the app is what the user is looking at. Gates the completion alert. */
     private var appForeground = true
+    /**
+     * Drafted-skill ids already nudged in the current conversation, so a relevant draft is suggested
+     * at most once per thread. Cleared when the conversation changes; a draft that activates or
+     * re-versions is handled by it no longer being a draft (or the caller deduping on id).
+     */
+    private val hintedDraftSkills = mutableSetOf<String>()
     /** Pure candidate scorer; one per ViewModel because it holds no state. */
     private val router = RuleBasedModelRouter()
     /** Prevents catalog refresh from inventing a Primary before persisted assignments arrive. */
@@ -579,6 +587,9 @@ class MainViewModel(
             .takeIf { it.isNotEmpty() }
             ?: return TaskOutcome.Failed("No eligible routing profile. Check the routing and privacy settings.")
         container.approvalGate.setMode(PermissionMode.AUTO)
+        // Tasks are unattended and independent: their Termux calls stay stateless, so a task never
+        // inherits a chat conversation's remembered working directory.
+        container.termuxTool.setSession(null)
         var failure: String? = null
         var reply: String? = null
         var activity = emptyList<String>()
@@ -649,6 +660,12 @@ class MainViewModel(
     /** Reopens the most recent conversation so closing Bram does not discard the thread. */
     private fun restoreConversations() {
         viewModelScope.launch {
+            // Only adopted on a fresh start. A turn already running here — or a message the user
+            // sent while the disk read was in flight — owns the transcript; swapping in the stale
+            // disk copy underneath it would hide the in-flight reply, drop the prompt, and reset
+            // the session counters mid-run.
+            val initial = mutableState.value
+            if (initial.isGenerating || initial.messages.isNotEmpty()) return@launch
             val summaries = runCatching { container.conversationStore.list() }.getOrDefault(emptyList())
             val mostRecent = summaries.firstOrNull()
             val messages = mostRecent
@@ -660,19 +677,27 @@ class MainViewModel(
             val privacy = mostRecent
                 ?.let { runCatching { container.conversationStore.privacyClass(it.id) }.getOrDefault(PrivacyClass.STANDARD) }
                 ?: PrivacyClass.STANDARD
-            mostRecent?.let { conversationId = it.id }
-            container.approvalGate.setMode(mode)
+            var applied = false
             mutableState.update {
-                it.copy(
-                    conversations = summaries,
-                    activeConversationId = mostRecent?.id?.value,
-                    messages = messages,
-                    permissionMode = mode,
-                    privacyClass = privacy,
-                    lastContextTokens = null,
-                    sessionInputTokens = 0,
-                    sessionOutputTokens = 0,
-                )
+                if (it.isGenerating || it.messages.isNotEmpty()) {
+                    it
+                } else {
+                    applied = true
+                    it.copy(
+                        conversations = summaries,
+                        activeConversationId = mostRecent?.id?.value,
+                        messages = messages,
+                        permissionMode = mode,
+                        privacyClass = privacy,
+                        lastContextTokens = null,
+                        sessionInputTokens = 0,
+                        sessionOutputTokens = 0,
+                    )
+                }
+            }
+            if (applied) {
+                mostRecent?.let { conversationId = it.id }
+                container.approvalGate.setMode(mode)
             }
         }
     }
@@ -695,6 +720,7 @@ class MainViewModel(
     fun startNewConversation() {
         if (mutableState.value.isGenerating) return
         conversationId = container.conversationStore.newId()
+        hintedDraftSkills.clear()
         container.approvalGate.setMode(PermissionMode.AUTO)
         mutableState.update {
             it.copy(
@@ -721,6 +747,7 @@ class MainViewModel(
             val mode = runCatching { container.conversationStore.permissionMode(target) }.getOrDefault(PermissionMode.AUTO)
             val privacy = runCatching { container.conversationStore.privacyClass(target) }.getOrDefault(PrivacyClass.STANDARD)
             conversationId = target
+            hintedDraftSkills.clear()
             container.approvalGate.setMode(mode)
             mutableState.update {
                 it.copy(
@@ -1946,6 +1973,22 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Parses the propose_skill arguments (for the human-readable name) and its result (for
+     * success, since a rejected draft returns an error), and posts the review nudge. Best-effort:
+     * a malformed payload simply posts nothing.
+     */
+    private fun maybePostSkillDraftNotification(argumentsJson: String, resultJson: String) {
+        val result = runCatching { JSONObject(resultJson) }.getOrNull() ?: return
+        if (result.has("error")) return
+        val name = runCatching { JSONObject(argumentsJson).optString("name") }.getOrDefault("")
+            .takeIf(String::isNotBlank) ?: return
+        val version = result.optString("version").ifBlank {
+            runCatching { JSONObject(argumentsJson).optString("version") }.getOrDefault("")
+        }
+        AgentTaskService.postSkillDraft(container.appContext, name, version)
+    }
+
     /** Reads a picked skill file and imports it; the file picker hands over the URI, like models. */
     fun importSkillDocument(uri: Uri) {
         viewModelScope.launch {
@@ -2017,9 +2060,27 @@ class MainViewModel(
     private suspend fun runInstructions(snapshot: AppUiState): String {
         val base = snapshot.activeProfile?.systemPrompt.orEmpty()
         val skills = runCatching { container.skillStore.activeSkills() }.getOrDefault(emptyList())
+        // Rank skills by description similarity to this turn's ask, so the ones that matter land
+        // first and the character budget trims the rest. With no embedding model designated the
+        // ranker returns the input unchanged, so every active skill still joins the prompt.
+        val query = snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
+        val ranked = container.skillSelection.rank(skills, query, container.embedder)
+        var prompt = SkillPrompt.append(base, ranked)
+        // One nudge per conversation: surface a drafted (inactive) skill whose description matches
+        // this task so the user learns it exists. Drafts are unreviewed text and are never followed
+        // — only their existence is named — and the set keeps a match from being suggested twice.
+        val packages = runCatching { container.skillStore.packages() }.getOrDefault(emptyList())
+        val draft = container.skillSelection.topDraft(packages, query, container.embedder)
+            ?.takeIf { it.id !in hintedDraftSkills }
+        if (draft != null) {
+            hintedDraftSkills += draft.id
+            draft.versions.firstOrNull { it.version == draft.draftVersion }?.let { version ->
+                prompt = SkillPrompt.appendDraftHint(prompt, draft.name, version.description)
+            }
+        }
         val memories = runCatching { container.memoryStore.mostImportant(MEMORY_INJECTION_LIMIT) }
             .getOrDefault(emptyList())
-        return MemoryPrompt.append(SkillPrompt.append(base, skills), memories)
+        return MemoryPrompt.append(prompt, memories)
     }
 
     fun refreshAutomations() {
@@ -2222,6 +2283,9 @@ class MainViewModel(
         // Bind the gate to this conversation's mode for the duration of the run. Runs are serial,
         // and the mode could have been changed on another conversation in the meantime.
         container.approvalGate.setMode(snapshot.permissionMode)
+        // Bind the Termux shell session to this conversation so `shell` calls keep their working
+        // directory across the turn (and across turns in the same thread).
+        container.termuxTool.setSession(conversationId.value)
         mutableState.update {
             it.copy(
                 messages = requestMessages,
@@ -2232,79 +2296,90 @@ class MainViewModel(
                 lastMetrics = null,
             )
         }
+        // Persist the prompt up front so the thread on disk shows it even if Bram is killed before
+        // the turn settles: what the user sent must never disappear with the reply. Also gives a
+        // cold reopen a truthful transcript instead of hiding the in-flight message.
+        persistActiveConversation(requestMessages)
 
         // Run on the application scope, not the ViewModel's: agent work is expected to continue
         // while the user is elsewhere, and a run tied to the screen would be cancelled the moment
         // the ViewModel is cleared. AgentTaskService keeps the process alive for the duration.
         generationJob = container.appScope.launch {
-            val conversationCharacters = requestMessages.sumOf { it.content.length }
-            val latestRequest = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
-            val workload = RoutingWorkloadClassifier.classify(latestRequest, conversationCharacters)
-            preferredLocalProfile(snapshot, workload)?.let { prepareLocalProfile(it) }
-            val runSnapshot = mutableState.value
-            val plan = routeSelection(
-                runSnapshot,
-                snapshot.privacyClass,
-                preferQuality = workload == RoutingWorkload.DEMANDING,
-            )
-            if (plan.isEmpty()) {
-                mutableState.update {
-                    it.copy(
-                        isGenerating = false,
-                        status = null,
-                        error = "No profile is ready. Check the Primary profile and conversation privacy.",
-                    )
-                }
-                generationJob = null
-                return@launch
+            container.turnMutex.withLock { runTurnInProgress(requestMessages, snapshot) }
+        }
+    }
+
+    private suspend fun runTurnInProgress(
+        requestMessages: List<ConversationMessage>,
+        snapshot: AppUiState,
+    ) {
+        val conversationCharacters = requestMessages.sumOf { it.content.length }
+        val latestRequest = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
+        val workload = RoutingWorkloadClassifier.classify(latestRequest, conversationCharacters)
+        preferredLocalProfile(snapshot, workload)?.let { prepareLocalProfile(it) }
+        val runSnapshot = mutableState.value
+        val plan = routeSelection(
+            runSnapshot,
+            snapshot.privacyClass,
+            preferQuality = workload == RoutingWorkload.DEMANDING,
+        )
+        if (plan.isEmpty()) {
+            mutableState.update {
+                it.copy(
+                    isGenerating = false,
+                    status = null,
+                    error = "No profile is ready. Check the Primary profile and conversation privacy.",
+                )
             }
-            var failure: String? = null
-            var stopped = false
-            for ((index, selection) in plan.withIndex()) {
-                if (index > 0) {
-                    mutableState.update { it.copy(status = "Falling back to ${selection.runtime.model.displayName}…") }
-                }
-                when (val outcome = runTurnAttempt(selection, runSnapshot, requestMessages)) {
-                    is TurnOutcome.Completed -> { stopped = false; break }
-                    is TurnOutcome.Failed -> {
-                        failure = outcome.reason
-                        if (outcome.localAttemptFailed) {
-                            // A local failure means the model is suspect even when the fallback
-                            // succeeds; treat it as unloaded rather than showing a stale warm model.
-                            val failedId = outcome.localRuntimeId
-                            mutableState.update { current ->
-                                if (failedId != null && current.litertlmLoadedId == failedId) {
-                                    current.copy(
-                                        litertlmLoadedId = null,
-                                        litertlmLoadedBackend = null,
-                                        liteRtLoadDetail = null,
-                                    )
-                                } else {
-                                    current.copy(
-                                        loadedModelId = if (failedId == null || current.loadedModelId == failedId) {
-                                            null
-                                        } else {
-                                            current.loadedModelId
-                                        },
-                                        cpuValidated = if (failedId == null || current.loadedModelId == failedId) {
-                                            false
-                                        } else {
-                                            current.cpuValidated
-                                        },
-                                    )
-                                }
+            generationJob = null
+            return
+        }
+        var failure: String? = null
+        var stopped = false
+        for ((index, selection) in plan.withIndex()) {
+            if (index > 0) {
+                mutableState.update { it.copy(status = "Falling back to ${selection.runtime.model.displayName}…") }
+            }
+            when (val outcome = runTurnAttempt(selection, runSnapshot, requestMessages)) {
+                is TurnOutcome.Completed -> { stopped = false; break }
+                is TurnOutcome.Failed -> {
+                    failure = outcome.reason
+                    if (outcome.localAttemptFailed) {
+                        // A local failure means the model is suspect even when the fallback
+                        // succeeds; treat it as unloaded rather than showing a stale warm model.
+                        val failedId = outcome.localRuntimeId
+                        mutableState.update { current ->
+                            if (failedId != null && current.litertlmLoadedId == failedId) {
+                                current.copy(
+                                    litertlmLoadedId = null,
+                                    litertlmLoadedBackend = null,
+                                    liteRtLoadDetail = null,
+                                )
+                            } else {
+                                current.copy(
+                                    loadedModelId = if (failedId == null || current.loadedModelId == failedId) {
+                                        null
+                                    } else {
+                                        current.loadedModelId
+                                    },
+                                    cpuValidated = if (failedId == null || current.loadedModelId == failedId) {
+                                        false
+                                    } else {
+                                        current.cpuValidated
+                                    },
+                                )
                             }
                         }
                     }
-                    is TurnOutcome.Cancelled -> { stopped = true; break }
                 }
+                is TurnOutcome.Cancelled -> { stopped = true; break }
             }
-            if (stopped) {
-                mutableState.update { it.copy(status = "Generation stopped") }
-            } else if (failure != null) {
-                mutableState.update {
-                    it.copy(error = failure, status = "Bram could not prepare an eligible fallback.")
-                }
+        }
+        if (stopped) {
+            mutableState.update { it.copy(status = "Generation stopped") }
+        } else if (failure != null) {
+            mutableState.update {
+                it.copy(error = failure, status = "Bram could not prepare an eligible fallback.")
             }
         }
     }
@@ -2468,7 +2543,12 @@ class MainViewModel(
                             pushModelStatus(ModelPhase.GENERATING)
                             // A proposed skill is persisted the moment the tool returns; refresh so the
                             // draft shows in Settings without waiting for an app restart.
-                            if (event.call.name == "propose_skill") refreshSkills()
+                            if (event.call.name == "propose_skill") {
+                                refreshSkills()
+                                // A draft is untrusted text, so it must not wait unseen: nudge the
+                                // user to review it when they are not already watching the turn.
+                                if (!appForeground) maybePostSkillDraftNotification(event.call.argumentsJson, event.result)
+                            }
                         }
                         is AgentEvent.Usage -> mutableState.update { it.copy(lastUsage = event.usage) }
                         is AgentEvent.Metrics -> mutableState.update {

@@ -7,16 +7,19 @@ import io.github.kurue.bram.core.agent.DefaultAgentOrchestrator
 import io.github.kurue.bram.core.agent.GeneratingMemoryExtractor
 import io.github.kurue.bram.core.agent.MutableToolRegistry
 import io.github.kurue.bram.core.agent.StaticToolRegistry
+import io.github.kurue.bram.core.domain.Embedder
 import io.github.kurue.bram.core.domain.EndpointCredentialResolver
 import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import io.github.kurue.bram.core.domain.SkillSelection
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import io.github.kurue.bram.platform.android.AndroidDeviceProfiler
 import io.github.kurue.bram.platform.android.ConversationStore
 import io.github.kurue.bram.platform.android.McpServerStore
@@ -57,6 +60,14 @@ class AppContainer(application: Application) {
      */
     val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /**
+     * One turn at a time, process-wide. The chat turn guard `isGenerating` lives on the
+     * ViewModel, but an activity recreated in the background gets a fresh ViewModel that believes
+     * a running turn never started; without this mutex its second turn would overlap the first
+     * on the same conversation, and both would later persist competing versions of the thread.
+     */
+    val turnMutex: Mutex = Mutex()
+
     val endpointStore = SecureEndpointStore(application)
     val mcpServerStore = McpServerStore(application)
     val skillStore = PersistentSkillStore(application)
@@ -81,7 +92,12 @@ class AppContainer(application: Application) {
      */
     val runtimePermissionBroker = RuntimePermissionBroker(application)
     val approvalGate = PermissionAwareApprovalGate(
-        InteractiveApprovalGate(toolPermissionStore),
+        InteractiveApprovalGate(toolPermissionStore).apply {
+            // A tool call that needs an answer while nobody is at the card becomes a notification
+            // with Allow/Deny actions that resolve the same request the card would.
+            notifyRequest = { request -> AgentTaskService.postApprovalRequest(application, request) }
+            onRequestResolved = { request -> AgentTaskService.cancelApprovalNotification(application, request.id) }
+        },
         runtimePermissionBroker,
     )
     val taskStore = AgentTaskStore(application)
@@ -92,17 +108,30 @@ class AppContainer(application: Application) {
     val llamaCppClient = LlamaCppServiceClient(application)
     val deviceProfiler = AndroidDeviceProfiler(application)
     val conversationStore = ConversationStore(application)
-    val memoryStore = PersistentMemoryStore(
-        application,
-        // Skips the IPC entirely when no embedding model is designated, so the common keyword-only
-        // case pays nothing and the inference process is not bound on every memory write.
-        object : io.github.kurue.bram.core.domain.Embedder {
-            override suspend fun embed(text: String): FloatArray? {
-                if (embeddingModelStore.modelId() == null) return null
-                return LlamaCppEmbedder(llamaCppClient).embed(text)
-            }
-        },
-    )
+    /**
+     * The one Termux bridge, held so a chat turn can bind its conversation as the active shell
+     * session (working-directory persistence across `shell` calls) and a task run can clear it.
+     */
+    val termuxTool = TermuxCommandTool(application)
+    /**
+     * The guarded embedder shared by semantic memory recall and skill ranking. Returns null when no
+     * embedding model is designated, so the memory store falls back to keyword (FTS) recall and
+     * skill selection falls back to inserting every active skill — both unchanged from the
+     * no-embedder baseline.
+     */
+    val embedder: Embedder = object : Embedder {
+        override suspend fun embed(text: String): FloatArray? {
+            if (embeddingModelStore.modelId() == null) return null
+            return LlamaCppEmbedder(llamaCppClient).embed(text)
+        }
+    }
+    val memoryStore = PersistentMemoryStore(application, embedder)
+    /**
+     * Ranks active skills by description similarity to the turn's query, so the prompt's character
+     * budget trims the least relevant rather than the alphabetically last. Cache lives here so it
+     * survives across per-run orchestrator instances.
+     */
+    val skillSelection = SkillSelection()
     val runJournal = SqliteRunJournal(application)
     /**
      * Built-ins plus whatever MCP servers contribute. Mutable so a server's tools can be swapped in
@@ -125,7 +154,7 @@ class AppContainer(application: Application) {
                 LaunchUriTool(application),
                 ContactsTool(application),
                 CalendarTool(application),
-                TermuxCommandTool(application),
+                termuxTool,
                 MemorySearchTool(memoryStore),
                 ProposeSkillTool(skillStore),
             ),

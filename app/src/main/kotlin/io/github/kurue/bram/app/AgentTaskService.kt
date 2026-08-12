@@ -13,6 +13,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.content.ContextCompat
+import io.github.kurue.bram.core.domain.ToolApprovalDecision
 
 /**
  * Keeps Bram alive while a model is loaded, and reports what it is doing.
@@ -76,7 +77,11 @@ class AgentTaskService : Service() {
         val open = PendingIntent.getActivity(
             this,
             0,
-            Intent(this, MainActivity::class.java),
+            // Deliver to the live MainActivity when it exists instead of stacking a second
+            // instance: a second instance brings a second ViewModel that believes a running turn
+            // never started. With launchMode singleTop the flags make this exact (deliver-to-top).
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return Notification.Builder(this, CHANNEL_ID)
@@ -106,6 +111,14 @@ class AgentTaskService : Service() {
         private const val COMPLETION_NOTIFICATION_ID = 1002
         private const val TASK_CHANNEL_ID = "bram-task-results"
         private const val TASK_NOTIFICATION_ID = 1003
+        private const val APPROVAL_CHANNEL_ID = "bram-approvals"
+        private const val APPROVAL_BASE_NOTIFICATION_ID = 3000
+        private const val SKILL_DRAFT_CHANNEL_ID = "bram-skill-drafts"
+        private const val SKILL_DRAFT_NOTIFICATION_ID = 4000
+
+        const val ACTION_APPROVAL_RESOLVE = "io.github.kurue.bram.action.APPROVAL_RESOLVE"
+        const val EXTRA_APPROVAL_REQUEST_ID = "approvalRequestId"
+        const val EXTRA_APPROVAL_DECISION = "approvalDecision"
 
         private const val EXTRA_MODEL = "model"
         private const val EXTRA_BACKEND = "backend"
@@ -158,7 +171,8 @@ class AgentTaskService : Service() {
             val open = PendingIntent.getActivity(
                 context,
                 0,
-                Intent(context, MainActivity::class.java),
+                Intent(context, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
             val text = summary.take(MAX_SUMMARY_LENGTH) +
@@ -215,6 +229,117 @@ class AgentTaskService : Service() {
             manager.notify(TASK_NOTIFICATION_ID + task.id.hashCode() % 1000, notification)
         }
 
+        /**
+         * Posts the approval card as a high-importance notification with Allow/Deny actions, for
+         * a tool call nobody is at the app to answer. Returns whether it was posted; a caller that
+         * cannot show it (no permission) keeps its old behavior instead of holding a run open for
+         * an ask nobody can see.
+         */
+        fun postApprovalRequest(context: Context, request: PendingToolApproval): Boolean {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return false
+            }
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+            if (Build.VERSION.SDK_INT >= 26 && manager.getNotificationChannel(APPROVAL_CHANNEL_ID) == null) {
+                manager.createNotificationChannel(
+                    NotificationChannel(
+                        APPROVAL_CHANNEL_ID,
+                        "Tool approvals",
+                        NotificationManager.IMPORTANCE_HIGH,
+                    ).apply {
+                        this.description = "Asked when Bram needs approval for a tool call while you are not in the app."
+                    },
+                )
+            }
+            val notification = Notification.Builder(context, APPROVAL_CHANNEL_ID)
+                .setContentTitle("Tool approval needed")
+                .setContentText(request.description.take(MAX_SUMMARY_LENGTH))
+                .setSubText(request.scopeLabel)
+                .setStyle(Notification.BigTextStyle().bigText(request.description))
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentIntent(openPendingIntent(context))
+                .addAction(approvalAction(context, request.id, ToolApprovalDecision.ALLOW_ONCE, "Allow"))
+                .addAction(approvalAction(context, request.id, ToolApprovalDecision.DENY, "Deny"))
+                .build()
+            manager.notify(approvalNotificationId(request.id), notification)
+            return true
+        }
+
+        /**
+         * Posts a nudge that the agent authored a skill draft, so it does not wait unseen in the
+         * Skills panel until the user happens to open it. Read-only by design: a draft is untrusted
+         * text, so the notification only opens for review and never activates the skill from the
+         * shade.
+         */
+        fun postSkillDraft(context: Context, name: String, version: String) {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            if (Build.VERSION.SDK_INT >= 26 && manager.getNotificationChannel(SKILL_DRAFT_CHANNEL_ID) == null) {
+                manager.createNotificationChannel(
+                    NotificationChannel(
+                        SKILL_DRAFT_CHANNEL_ID,
+                        "Skill drafts",
+                        NotificationManager.IMPORTANCE_DEFAULT,
+                    ).apply {
+                        this.description = "Posted when Bram authors a skill draft for you to review."
+                    },
+                )
+            }
+            val notification = Notification.Builder(context, SKILL_DRAFT_CHANNEL_ID)
+                .setContentTitle("Bram drafted a skill")
+                .setContentText("$name v$version — review it in Skills")
+                .setSmallIcon(android.R.drawable.ic_menu_edit)
+                .setContentIntent(openPendingIntent(context))
+                .setAutoCancel(true)
+                .build()
+            manager.notify(SKILL_DRAFT_NOTIFICATION_ID, notification)
+        }
+
+        /** Takes the request's notification down, on whatever path the request settled. */
+        fun cancelApprovalNotification(context: Context, requestId: String) {
+            runCatching {
+                context.getSystemService(NotificationManager::class.java)
+                    ?.cancel(approvalNotificationId(requestId))
+            }
+        }
+
+        /**
+         * The notification id a request's shade entry (and its action intents) always use, so any
+         * of the resolution paths can find it: the receiver from an action, the gate when the
+         * request settles in the app.
+         */
+        fun approvalNotificationId(requestId: String): Int =
+            APPROVAL_BASE_NOTIFICATION_ID + (requestId.hashCode() and 0x7fffffff) % 1000
+
+        private fun approvalAction(
+            context: Context,
+            requestId: String,
+            decision: ToolApprovalDecision,
+            label: String,
+        ): Notification.Action {
+            val intent = Intent(context, ApprovalActionReceiver::class.java)
+                .setAction(ACTION_APPROVAL_RESOLVE)
+                .putExtra(EXTRA_APPROVAL_REQUEST_ID, requestId)
+                .putExtra(EXTRA_APPROVAL_DECISION, decision.name)
+            val open = PendingIntent.getBroadcast(
+                context,
+                approvalNotificationId(requestId) + decision.ordinal,
+                intent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            return Notification.Action.Builder(null, label, open).build()
+        }
+
         private fun notificationManager(context: Context): NotificationManager? {
             if (ContextCompat.checkSelfPermission(
                     context,
@@ -241,7 +366,8 @@ class AgentTaskService : Service() {
         private fun openPendingIntent(context: Context): PendingIntent = PendingIntent.getActivity(
             context,
             0,
-            Intent(context, MainActivity::class.java),
+            Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 

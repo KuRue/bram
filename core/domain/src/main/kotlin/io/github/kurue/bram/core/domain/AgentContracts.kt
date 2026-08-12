@@ -9,6 +9,13 @@ enum class MemoryKind {
     USER_INSTRUCTION,
 }
 
+/**
+ * The most episodes a single conversation keeps. Episodes are produced every substantial turn, so
+ * without a cap a long-running conversation would let them dominate the store and add recall noise;
+ * the store trims to the newest [MAX_EPISODES_PER_CONVERSATION] after each episode is written.
+ */
+const val MAX_EPISODES_PER_CONVERSATION = 20
+
 data class MemoryRecord(
     val id: String,
     val kind: MemoryKind,
@@ -176,8 +183,15 @@ interface ToolApprovalGate {
     suspend fun decide(
         tool: ToolDefinition,
         argumentsJson: String,
-        /** A call recovered from unmarked text. Always asked about; see [ToolCall.recovered]. */
+        /** A call recovered from unmarked text. See [ToolCall.recovered]. */
         recovered: Boolean = false,
+        /**
+         * Whether the conversation already contains content from outside — a fetched page, a
+         * search result, an MCP reply. Only meaningful together with [recovered]: a recovered call
+         * is the model's own text read as an intent, and it is only dangerous if that text could
+         * have been put there by someone else.
+         */
+        untrustedContext: Boolean = false,
     ): ToolApprovalDecision
 }
 

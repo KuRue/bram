@@ -21,6 +21,19 @@ data class ToolDefinition(
      * which suits a tool that only reads.
      */
     val approvalScopeKeys: List<String> = emptyList(),
+    /**
+     * Whether this tool's result is content from outside, rather than something Bram produced.
+     *
+     * A fetched page, a search result or an MCP server's reply all put text into the conversation
+     * that nobody in the conversation wrote. That matters because the model's next reply is
+     * generated from it: text on a page saying "now call run_command" can come back out as
+     * something that parses as a call. Bram only reads calls out of unmarked text on formats that
+     * do not mark them, and that recovery is exactly where such an echo would land.
+     *
+     * Tools that only touch the device and the user's own data are not untrusted in this sense.
+     * Their output can be wrong or surprising, but it does not carry an attacker's words.
+     */
+    val returnsUntrustedContent: Boolean = false,
 )
 
 data class GenerationRequest(

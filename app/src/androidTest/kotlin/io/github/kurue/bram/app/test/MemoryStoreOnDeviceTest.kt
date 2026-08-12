@@ -151,4 +151,33 @@ class MemoryStoreOnDeviceTest {
             store.remove("verify-semantic-fact")
         }
     }
+
+    @Test
+    fun episodesAreCappedToTheNewestNPerConversation() = runBlocking {
+        val store = ApplicationProvider.getApplicationContext<BramApplication>().container.memoryStore
+        // A dedicated conversation so the per-conversation cap is deterministic regardless of what
+        // else the shared store holds from other tests or prior runs.
+        val conversation = ConversationId("memory-episode-cap-verification")
+        val cap = io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION
+        val ids = (0 until cap + 5).map { "verify-epcap-$it" }
+        try {
+            val base = System.currentTimeMillis()
+            ids.forEachIndexed { index, id ->
+                store.put(
+                    conversation,
+                    MemoryRecord(id, MemoryKind.EPISODE, "episode $index", importance = 0.5, createdAtEpochMillis = base + index),
+                )
+            }
+
+            val remaining = store.recent(200).filter { it.id.startsWith("verify-epcap-") }
+            assertEquals("the cap trims to exactly N episodes", cap, remaining.size)
+            // The oldest five are trimmed; the newest N (the last inserted) remain.
+            assertFalse("oldest trimmed", remaining.any { it.id == "verify-epcap-0" })
+            assertFalse("oldest trimmed", remaining.any { it.id == "verify-epcap-4" })
+            assertTrue("newest kept", remaining.any { it.id == "verify-epcap-${cap + 4}" })
+        } finally {
+            // remove() is a no-op on ids the trim already deleted, so all originals are covered.
+            ids.forEach { store.remove(it) }
+        }
+    }
 }

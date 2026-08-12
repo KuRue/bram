@@ -51,6 +51,13 @@ build tree is a synced copy of the same working tree.
   scheduled) run fast-denies a tool that needs approval instead of holding the gate open for ten
   minutes per call. (4) `web_fetch` caps the read and refuses non-text content types, so a huge or
   binary response cannot OOM the tool.
+- **Approvals reach the shade** — a tool call that needs an answer while nobody is at the card
+  (app backgrounded, or a scheduled task) now posts a high-importance notification with Allow /
+  Deny actions instead of the fast-deny above: the run parks on the request and the actions
+  resolve the same pending card the app would. Without notification permission the old fast-deny
+  still applies, so an invisible ask never holds the run. The per-conversation tool-approval mode
+  (bypass / auto / manual) was only reachable through the top pill's routing screen; it now has
+  its own Conversation destination in the drawer, next to System.
 - **Embedding recall, end to end** — the memory store carries a vector index (`memory_vectors`,
   DB v2) with cosine ranking, fused into the keyword (FTS) results via reciprocal-rank fusion
   behind a pluggable `Embedder` interface (`core/domain`). The native llama.cpp embedder is wired:
@@ -118,11 +125,16 @@ servers contribute more at runtime.
   (embedding) ranking via reciprocal-rank fusion: a resident llama.cpp embedder
   in the `:inference` process L2-normalizes mean-pooled vectors, chosen by the
   user on the Memories screen; with none designated, recall falls back to FTS.
-  Still missing: `EPISODE` records are never produced, and per-conversation
-  working summaries are separate from the cross-conversation store.
+  Still missing: per-conversation working summaries are separate from the
+  cross-conversation store. (Episodes are capped to the newest 20 per
+  conversation, so a long-running thread cannot let them dominate.)
 - **Skills gaps.** The SKILL.md lifecycle is shipped (M16), and the agent can now author skill
   drafts through a `propose_skill` tool — they land with no active version (kept out of the
-  system prompt) until the user activates them from Settings.
+  system prompt) until the user activates them from Settings. Active skills are cosine-ranked
+  against the turn's query so the prompt's character budget trims the least relevant; and a
+  drafted skill whose description matches the task is surfaced to the model as a one-line nudge
+  (at most once per conversation, deduped), so the user learns a relevant draft exists without the
+  draft ever being followed before activation. Both need an embedding model designated to rank.
 - **LiteRT.** The `:runtime:litertlm` module is wired end-to-end (import, store,
   routing, UI card) but is blocked from shipping by an upstream AAR crash — see
   Known issues. It is not a usable runtime yet.
@@ -135,18 +147,62 @@ llama.cpp's Jinja engine yields nothing for, so the template raises and Bram
 falls back to a built-in one. Turning reasoning off is the practical fix and is
 the default.
 
-**Tools need the model's own template to render.** Tool definitions go through
-`common_chat_templates_apply`. When a template falls back, that path has no tool
-support; Qwen3.5 is in that state and cannot call a tool.
+**Tools need the model's own template to render (designed, not yet shipped).**
+Tool definitions go through `common_chat_templates_apply`. When a model's
+Jinja template raises (Qwen3.5 iterates `messages[::-1]`, which minja yields
+nothing for), `apply_chat_template` in `runtime/llamacpp/src/main/cpp/bram_llama_jni.cpp`
+catches it and retries with `inputs.use_jinja = false` (lines ~457-466). That
+routes to llama.cpp's built-in templates, and the generic built-in does not
+format tools — so the model never sees what it can call. Qwen3.5 is in that
+state and cannot call a tool.
+
+A naive preamble ("here are your tools") is not enough on its own: Bram's
+recovery only catches one shape — `name(key='value')` (LFM2.5 style) in
+`runtime/llamacpp/.../inference/BareToolCall.kt` — it does not recover the
+Qwen/Hermes `<tool_call>{"name":…,"arguments":…}</tool_call>` JSON convention.
+So the fix needs a tool-capable built-in template *together with* its matching
+parser, ideally matched to the model's family. The native `common_chat_parse`
+already understands family-specific markers once the format is pinned.
+
+Plan, when a fallback model is available to validate against:
+1. On the `use_jinja = false` retry in `apply_chat_template`, pin
+   `inputs.chat_format` to a tool-capable built-in chosen by family heuristics
+   on the model metadata (Qwen3.x → the Qwen tool format; Hermes/ChatML →
+   Hermes; Llama3 → Llama3), instead of letting it resolve to the generic.
+2. Surface the chosen format in `bridge.chatFormat()` (already reported in the
+   start event) so the Kotlin side can pick the right reasoning tags and the
+   recovery path can relax only for the format actually in use.
+3. Only then consider broadening `BareToolCall` — its strictness is deliberate
+   (a model quoting JSON in prose must not become a call).
+
+This is parked because it is model-family-dependent and cannot be validated
+without a real fallback-mode model (Qwen3.5) doing tool calls on a device; the
+emulator has no such model and the suite cannot exercise template/parser
+tuning. Picking it up means loading one and iterating the format choice
+against real output before committing.
 
 **LFM2.5-2.6B is too small for reliable tool use.** It retries failing calls,
 invents tools the gate then rejects, and exhausts the tool-turn budget. The tool
 infrastructure is ready; real agent behavior needs a larger tool-capable model.
 
-**`web_fetch` loops on bot-hostile sites.** developer.android.com redirect-loops
-under plain HTTP regardless of headers; the model should use `web_search`
-snippets or alternate URLs. Ordinary pages (example.com, Wikipedia) fetch fine.
-(On `agent-tools`.)
+**`web_fetch` redirect handling hardened (verified on device).**
+Redirects used to bounce to the hop cap and fail opaquely on loop-prone sites.
+The redirect policy now keeps a host-scoped cookie jar (replaying `Set-Cookie`
+across hops), detects a cycle on the second hit instead of bouncing to the
+cap, and refuses an https→http downgrade; the policy is pure over a
+single-request seam and unit-tested in `WebToolTest`. Verified live on a phone:
+ordinary pages (`example.com`) fetch unchanged, and a genuine loop now fails
+fast with a clear "Redirect cycle…" message the model can pivot away from.
+
+**One site is still unfetchable, and it is not a bug:** `developer.android.com`
+silently tries to OAuth-sign-in on every page load (`auto_signin=True`,
+`prompt=none` → `accounts.google.com/o/oauth2/v2/auth`), which fails with
+`interaction_required` for an unauthenticated client and redirects home
+forever. No header or cookie a simple `HttpURLConnection` can carry will
+satisfy it — it needs a logged-in browser session. The hardened loop handling
+turns this into a clean cycle error (the model falls back to `web_search`
+snippets) rather than the old opaque hang. Don't treat a fetch of that domain
+as a regression.
 
 **The UI cannot be read by automation while a turn is running.** `uiautomator
 dump` needs an idle window and the send button animates during generation, so the

@@ -6,6 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import io.github.kurue.bram.core.domain.ConversationId
 import io.github.kurue.bram.core.domain.Embedder
+import io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.MemoryStore
@@ -182,8 +183,33 @@ class PersistentMemoryStore(
                     }
                 }
             }
+            // Episodes are written every substantial turn; keep only the newest N for this
+            // conversation so a long-running thread cannot let them grow the store and the vector
+            // table without end.
+            if (memory.kind == MemoryKind.EPISODE) {
+                trimEpisodes(conversationId.value)
+            }
             Unit
         }
+
+    /**
+     * Deletes the oldest episodes beyond [MAX_EPISODES_PER_CONVERSATION] for [conversationId], along
+     * with their embedding vectors. `LIMIT -1 OFFSET keep` selects everything after the newest N.
+     */
+    private fun trimEpisodes(conversationId: String) {
+        val removable = database.readableDatabase.rawQuery(
+            "SELECT id FROM memory_records WHERE kind = ? AND conversation_id = ? " +
+                "ORDER BY created_at DESC LIMIT -1 OFFSET ?",
+            arrayOf(MemoryKind.EPISODE.name, conversationId, MAX_EPISODES_PER_CONVERSATION.toString()),
+        ).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+        }
+        for (id in removable) {
+            // The AFTER DELETE trigger on memory_records keeps the FTS index in sync.
+            database.writableDatabase.delete("memory_records", "id = ?", arrayOf(id))
+            database.writableDatabase.delete("memory_vectors", "memory_id = ?", arrayOf(id))
+        }
+    }
 
     override suspend fun recent(limit: Int): List<MemoryRecord> = withContext(Dispatchers.IO) {
         // Working summaries are an internal scratchpad, not something to browse: hide them so the

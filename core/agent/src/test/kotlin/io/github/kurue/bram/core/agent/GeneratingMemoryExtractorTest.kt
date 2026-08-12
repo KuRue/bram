@@ -38,6 +38,23 @@ class GeneratingMemoryExtractorTest {
     }
 
     @Test
+    fun `parses an episode alongside facts`() = runBlocking {
+        val runtime = ScriptedRuntime(
+            extractionReply = """[{"kind":"fact","text":"Uses Kotlin"},{"kind":"episode","text":"Walked through enabling cookie replay in web_fetch"}]""",
+        )
+        val out = GeneratingMemoryExtractor().extract(
+            conversationId = ConversationId("c1"),
+            userMessage = ConversationMessage(role = MessageRole.USER, content = "How do I fix the loop?"),
+            assistantReply = "Add cookie replay across redirects.",
+            runtime = runtime,
+        )
+        assertEquals(2, out.size)
+        assertEquals(MemoryKind.SEMANTIC_FACT, out[0].kind)
+        assertEquals(MemoryKind.EPISODE, out[1].kind)
+        assertEquals("Walked through enabling cookie replay in web_fetch", out[1].text)
+    }
+
+    @Test
     fun `a null or blank user message extracts nothing without calling the runtime`() = runBlocking {
         val runtime = ScriptedRuntime(extractionReply = """[{"kind":"fact","text":"should not happen"}]""")
         val extractor = GeneratingMemoryExtractor()

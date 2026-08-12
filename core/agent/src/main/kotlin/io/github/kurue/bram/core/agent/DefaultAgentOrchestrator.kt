@@ -77,6 +77,9 @@ class DefaultAgentOrchestrator(
         val memories = runCatching { memoryStore.search(request.conversationId, request.memoryQuery, limit = 8) }
             .getOrDefault(emptyList())
         val allowedForRun = mutableSetOf<String>()
+        // Seeded from the history, not assumed fresh: a page fetched three turns ago is still in
+        // the context this run generates from.
+        var untrustedContext = hasUntrustedContent(workingMessages)
         var compacted = false
 
         repeat(request.maxToolTurns + 1) { turn ->
@@ -213,12 +216,20 @@ class DefaultAgentOrchestrator(
             workingMessages += assistantMessage
             for (call in toolCalls) {
                 emit(AgentEvent.ToolStarted(call))
-                val result = executeTool(call, allowedForRun)
+                val result = executeTool(call, allowedForRun, untrustedContext)
                 workingMessages += ConversationMessage(
                     role = MessageRole.TOOL,
                     content = result,
                     toolCallId = call.id,
                 )
+                // Once outside content is in the conversation it stays in it, so this only ever
+                // goes one way within a run. A failed or denied call brought nothing back.
+                if (!untrustedContext &&
+                    toolRegistry.find(call.name)?.definition?.returnsUntrustedContent == true &&
+                    !isErrorResult(result)
+                ) {
+                    untrustedContext = true
+                }
                 emit(AgentEvent.ToolFinished(call, result))
             }
         }
@@ -286,14 +297,23 @@ class DefaultAgentOrchestrator(
         return text.takeIf(String::isNotEmpty)
     }
 
-    private suspend fun executeTool(call: ToolCall, allowedForRun: MutableSet<String>): String {
+    private suspend fun executeTool(
+        call: ToolCall,
+        allowedForRun: MutableSet<String>,
+        untrustedContext: Boolean,
+    ): String {
         val handler = toolRegistry.find(call.name)
             ?: return errorJson("unknown_tool", "No tool named '${call.name}' is registered")
 
         val decision = if (call.name in allowedForRun && !call.recovered) {
             ToolApprovalDecision.ALLOW_ONCE
         } else {
-            approvalGate.decide(handler.definition, call.argumentsJson, call.recovered)
+            approvalGate.decide(
+                handler.definition,
+                call.argumentsJson,
+                call.recovered,
+                untrustedContext,
+            )
         }
 
         when (decision) {
@@ -310,6 +330,35 @@ class DefaultAgentOrchestrator(
         return runCatching { handler.execute(call.argumentsJson) }
             .getOrElse { errorJson("tool_error", it.message ?: it::class.java.simpleName) }
     }
+
+    /**
+     * Whether the conversation already carries content from outside.
+     *
+     * Worked out from the history rather than assumed fresh each run: a page fetched three turns
+     * ago is still in the context the model is generating from, so the run that follows it is in
+     * the same position as the run that fetched it.
+     *
+     * A tool result that is one of Bram's own error envelopes does not count. A denied `web_fetch`
+     * brought back nothing to be echoed, and treating it as though it had would let any refused
+     * call put the conversation into a stricter mode for good.
+     */
+    private fun hasUntrustedContent(messages: List<ConversationMessage>): Boolean {
+        val untrustedCallIds = messages
+            .flatMap(ConversationMessage::toolCalls)
+            .filter { toolRegistry.find(it.name)?.definition?.returnsUntrustedContent == true }
+            .map(ToolCall::id)
+            .toSet()
+        if (untrustedCallIds.isEmpty()) return false
+        return messages.any {
+            it.role == MessageRole.TOOL &&
+                it.toolCallId in untrustedCallIds &&
+                !isErrorResult(it.content)
+        }
+    }
+
+    /** Recognises the envelope [errorJson] writes, so a refusal is not mistaken for a page. */
+    private fun isErrorResult(result: String): Boolean =
+        result.trimStart().startsWith("{\"error\":")
 
     private fun errorJson(code: String, message: String): String {
         val safe = message.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
@@ -342,7 +391,25 @@ class InMemoryMemoryStore : MemoryStore {
         conversationId: io.github.kurue.bram.core.domain.ConversationId,
         memory: MemoryRecord,
     ) {
-        values.getOrPut(conversationId.value) { mutableListOf() }.add(memory)
+        val list = values.getOrPut(conversationId.value) { mutableListOf() }
+        list.add(memory)
+        if (memory.kind == io.github.kurue.bram.core.domain.MemoryKind.EPISODE) {
+            trimEpisodes(list)
+        }
+    }
+
+    /**
+     * Keeps only the newest [io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION] episodes
+     * in this conversation's list. Episodes accumulate every substantial turn; this mirrors the cap
+     * the persistent store enforces so the in-memory double behaves the same way in tests.
+     */
+    private fun trimEpisodes(list: MutableList<MemoryRecord>) {
+        val episodes = list.filter { it.kind == io.github.kurue.bram.core.domain.MemoryKind.EPISODE }
+        if (episodes.size <= io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION) return
+        val oldest = episodes
+            .sortedByDescending { it.createdAtEpochMillis }
+            .drop(io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION)
+        list.removeAll(oldest.toSet())
     }
 
     override suspend fun recent(limit: Int): List<MemoryRecord> =
@@ -415,6 +482,7 @@ class ReadOnlyApprovalGate : ToolApprovalGate {
         tool: ToolDefinition,
         argumentsJson: String,
         recovered: Boolean,
+        untrustedContext: Boolean,
     ): ToolApprovalDecision =
         if (!recovered && tool.readOnly && tool.requiredPermissions.isEmpty()) {
             ToolApprovalDecision.ALLOW_ONCE

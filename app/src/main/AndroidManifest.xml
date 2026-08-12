@@ -82,11 +82,18 @@
 
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTop"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Not exported: only the app's own notification actions address it, and an explicit
+             component keeps it out of the reach of implicit broadcast spam. -->
+        <receiver
+            android:name=".ApprovalActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

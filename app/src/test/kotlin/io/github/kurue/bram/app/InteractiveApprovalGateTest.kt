@@ -60,18 +60,71 @@ class InteractiveApprovalGateTest {
         assertNull(gate.pending.value)
     }
 
+    // Bypass and recovered calls. The exception used to be "recovered", full stop, which on a
+    // format that never marks its calls meant every call was the exception and bypass did nothing.
+    // What makes a recovered call dangerous is not the recovery, it is that the text may be
+    // repeating something the model read.
+
     @Test
-    fun `bypass still asks about a recovered call`() = runTest {
-        // A recovered call is text read as an intent, and web_fetch puts pages Bram did not write
-        // into the context. Trusting a run is not the same as trusting every page it reads, so
-        // this is the one thing bypass does not wave through.
+    fun `bypass runs a recovered call when nothing outside has been read`() = runTest {
+        // With no fetched content in the conversation there is nothing for the model to be
+        // echoing, so the call is its own intent, which is what bypass exists to stop asking about.
         val gate = InteractiveApprovalGate(FakePermissions())
         gate.setMode(PermissionMode.BYPASS)
-        val decision = async { gate.decide(tool(), "{}", recovered = true) }
+        val decision = gate.decide(tool(), "{}", recovered = true, untrustedContext = false)
+        assertEquals(ToolApprovalDecision.ALLOW_ONCE, decision)
+        assertNull(gate.pending.value)
+    }
+
+    @Test
+    fun `bypass asks about a recovered call once a page has been read`() = runTest {
+        // The fence goes back up: taking responsibility for a run is not the same as vouching for
+        // every page it reads.
+        val gate = InteractiveApprovalGate(FakePermissions())
+        gate.setMode(PermissionMode.BYPASS)
+        val decision = async { gate.decide(tool(), "{}", recovered = true, untrustedContext = true) }
         yield()
         assertEquals("send_message", gate.pending.value?.toolName)
         gate.pending.value?.resolve(ToolApprovalDecision.DENY)
         assertEquals(ToolApprovalDecision.DENY, decision.await())
+    }
+
+    @Test
+    fun `bypass runs a marked call even after a page has been read`() = runTest {
+        // Outside content on its own changes nothing. It only matters for a call that was read out
+        // of unmarked text, since that is the only path an echoed instruction could take.
+        val gate = InteractiveApprovalGate(FakePermissions())
+        gate.setMode(PermissionMode.BYPASS)
+        val decision = gate.decide(tool(), "{}", recovered = false, untrustedContext = true)
+        assertEquals(ToolApprovalDecision.ALLOW_ONCE, decision)
+        assertNull(gate.pending.value)
+    }
+
+    @Test
+    fun `outside content does not loosen the other modes`() = runTest {
+        // The untrusted flag is a reason to ask, never a reason not to. In AUTO a recovered call is
+        // asked about whatever the conversation contains.
+        val gate = InteractiveApprovalGate(FakePermissions())
+        val decision = async { gate.decide(tool(), "{}", recovered = true, untrustedContext = false) }
+        yield()
+        assertEquals("send_message", gate.pending.value?.toolName)
+        gate.pending.value?.resolve(ToolApprovalDecision.DENY)
+        assertEquals(ToolApprovalDecision.DENY, decision.await())
+    }
+
+    @Test
+    fun `the card records why it is asking`() = runTest {
+        // So the UI can say "this came from a page" rather than asking an unexplained question in
+        // a mode the user set to stop being asked.
+        val gate = InteractiveApprovalGate(FakePermissions())
+        gate.setMode(PermissionMode.BYPASS)
+        val decision = async { gate.decide(tool(), "{}", recovered = true, untrustedContext = true) }
+        yield()
+        val pending = requireNotNull(gate.pending.value)
+        assertTrue(pending.recovered)
+        assertTrue(pending.untrustedContext)
+        pending.resolve(ToolApprovalDecision.DENY)
+        decision.await()
     }
 
     @Test

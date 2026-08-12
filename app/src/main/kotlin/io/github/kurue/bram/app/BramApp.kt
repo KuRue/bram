@@ -366,6 +366,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onBack = { panel = AppPanel.CAPABILITIES },
                                 onImportSkill = { skillPicker.launch(arrayOf("text/markdown", "text/plain", "application/octet-stream", "*/*")) },
+                                onSaveSkill = viewModel::importSkill,
                                 onActivateSkillDraft = viewModel::activateSkillDraft,
                                 onRollbackSkill = viewModel::rollbackSkill,
                                 onRemoveSkill = viewModel::removeSkill,
@@ -616,6 +617,10 @@ private fun BramDrawer(
                 listOf(
                     listOf("Models" to AppPanel.MODELS, "Tasks" to AppPanel.TASKS),
                     listOf("Capabilities" to AppPanel.CAPABILITIES, "Settings" to AppPanel.SETTINGS),
+                    // The per-conversation tool-approval mode and privacy class live here; before
+                    // the drawer carried them they were only reachable through the top pill's
+                    // routing screen, which made "don't ask for this conversation" undiscoverable.
+                    listOf("Conversation" to AppPanel.SESSION, "System" to AppPanel.SYSTEM),
                 ).forEach { destinations ->
                     Row(
                         Modifier.fillMaxWidth(),
@@ -2060,7 +2065,10 @@ private fun SessionScreen(
             when (state.permissionMode) {
                 PermissionMode.AUTO -> "Ask before tools make changes."
                 PermissionMode.MANUAL -> "Ask before every tool."
-                PermissionMode.BYPASS -> "Never ask. Advanced and risky."
+                // Not quite "never": a call read out of the reply text is still asked about once
+                // the chat contains a fetched page, which is the one case the mode cannot honestly
+                // waive. Said here so the exception is not a surprise when it happens.
+                PermissionMode.BYPASS -> "Never ask, except a call read from text after a web fetch."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2528,10 +2536,46 @@ private fun SkillsScreen(
     state: AppUiState,
     onBack: () -> Unit,
     onImportSkill: () -> Unit,
+    onSaveSkill: (String) -> Unit,
     onActivateSkillDraft: (String) -> Unit,
     onRollbackSkill: (String) -> Unit,
     onRemoveSkill: (String) -> Unit,
 ) {
+    // The editor writes the same SKILL.md document the file importer reads, so authoring in-app
+    // and importing a file land in the same place: a new skill is active, a new version of an
+    // existing one is a draft the user activates.
+    var editorOpen by rememberSaveable { mutableStateOf(false) }
+    var name by rememberSaveable { mutableStateOf("") }
+    var version by rememberSaveable { mutableStateOf("1.0.0") }
+    var description by rememberSaveable { mutableStateOf("") }
+    var instructions by rememberSaveable { mutableStateOf("") }
+
+    fun openEditorForNew() {
+        name = ""; version = "1.0.0"; description = ""; instructions = ""
+        editorOpen = true
+    }
+    fun openEditorForEdit(pkg: SkillPackage) {
+        val source = pkg.versions.firstOrNull { it.version == pkg.activeVersion }
+            ?: pkg.versions.firstOrNull()
+        name = pkg.name
+        version = source?.version ?: "1.0.0"
+        description = source?.description.orEmpty()
+        instructions = source?.instructions.orEmpty()
+        editorOpen = true
+    }
+    fun save() {
+        val document = buildString {
+            appendLine("---")
+            appendLine("name: $name")
+            appendLine("version: $version")
+            appendLine("description: $description")
+            appendLine("---")
+            append(instructions)
+        }
+        onSaveSkill(document)
+        editorOpen = false
+    }
+
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -2543,10 +2587,32 @@ private fun SkillsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         state.skillStatus?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-        if (state.skills.isEmpty()) EmptyDestination("No skills imported", "Import one when you want a repeatable specialist workflow.")
-        else state.skills.forEach { SkillCard(it, onActivateSkillDraft, onRollbackSkill, onRemoveSkill) }
-        Button(onClick = onImportSkill, modifier = Modifier.fillMaxWidth()) { Text("Import skill") }
+        if (state.skills.isEmpty()) EmptyDestination("No skills imported", "Author one, or import a file, when you want a repeatable specialist workflow.")
+        else state.skills.forEach { SkillCard(it, ::openEditorForEdit, onActivateSkillDraft, onRollbackSkill, onRemoveSkill) }
+        if (!editorOpen) {
+            Button(onClick = ::openEditorForNew, modifier = Modifier.fillMaxWidth()) { Text("New skill") }
+            OutlinedButton(onClick = onImportSkill, modifier = Modifier.fillMaxWidth()) { Text("Import skill file") }
+        } else {
+            GlassSurface(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Skill", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(name, { name = it }, label = { Text("Name") }, supportingText = { Text("1–48 chars, no colons") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(version, { version = it }, label = { Text("Version") }, supportingText = { Text("three numbers, like 1.2.0") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(description, { description = it }, label = { Text("Description") }, supportingText = { Text("when Bram should follow this") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        instructions,
+                        { instructions = it },
+                        label = { Text("Instructions") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 4,
+                    )
+                    Button(onClick = ::save, modifier = Modifier.fillMaxWidth()) { Text("Save skill") }
+                    TextButton(onClick = { editorOpen = false }, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
+                }
+            }
+        }
         state.error?.let { ErrorCard(it) }
+        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -2909,9 +2975,14 @@ private fun ToolApprovalCard(
             )
             if (pending.recovered) {
                 // Worth one line: this call was read out of the model's prose rather than marked as
-                // a call, and prose can be echoed from a page Bram read.
+                // a call. On its own that is a caveat; with a fetched page in the conversation it
+                // is the reason the question is being asked at all, so say which.
                 Text(
-                    "Read from the reply text, not a marked call.",
+                    if (pending.untrustedContext) {
+                        "Read from the reply text, and this chat contains a fetched page."
+                    } else {
+                        "Read from the reply text, not a marked call."
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -3140,6 +3211,7 @@ private fun McpServerCard(ui: McpServerUi, onRemove: (String) -> Unit) {
 @Composable
 private fun SkillCard(
     pkg: SkillPackage,
+    onEdit: (SkillPackage) -> Unit,
     onActivateDraft: (String) -> Unit,
     onRollback: (String) -> Unit,
     onRemove: (String) -> Unit,
@@ -3167,6 +3239,7 @@ private fun SkillCard(
                 )
             }
             Row {
+                TextButton(onClick = { onEdit(pkg) }) { Text("Edit") }
                 if (pkg.draftVersion != null) {
                     TextButton(onClick = { onActivateDraft(pkg.id) }) { Text("Activate draft") }
                 }

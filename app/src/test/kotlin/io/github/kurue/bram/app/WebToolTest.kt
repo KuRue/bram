@@ -1,6 +1,8 @@
 package io.github.kurue.bram.app
 
+import java.io.IOException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -115,5 +117,118 @@ class WebToolTest {
         val out = kotlinx.coroutines.runBlocking { WebSearchTool().execute(emptyArgs) }
         val err = org.json.JSONObject(out).getJSONObject("error")
         assertEquals("invalid_query", err.getString("code"))
+    }
+
+    // --- redirect policy -------------------------------------------------------
+    // The policy lives in followRedirects, which is pure over a single-request function. These
+    // drive it with a script of canned responses so the cases that mattered for the
+    // developer.android.com loop — cycle, scheme downgrade, cookie replay, the hop cap — are
+    // covered without a network.
+
+    /** A single-request fake that returns canned [Fetched] responses and records what it was asked. */
+    private class ScriptedFetch(responses: Map<String, Fetched>) {
+        private val responses = responses.toMap()
+        val calls = mutableListOf<Pair<String, String?>>() // url → cookie sent
+        fun fetch(url: java.net.URL, cookie: String?): Fetched {
+            calls += url.toString() to cookie
+            return responses[url.toString()] ?: error("unexpected fetch of $url")
+        }
+    }
+
+    private fun page(body: String) = Fetched(200, null, "text/html", emptyList(), body)
+    private fun redirect(to: String, setCookie: List<String> = emptyList()) =
+        Fetched(302, to, "text/html", setCookie, null)
+
+    @Test
+    fun `follows a redirect chain to the final page`() {
+        val script = ScriptedFetch(
+            mapOf(
+                "http://a/" to redirect("https://a/real"),
+                "https://a/real" to page("the page"),
+            ),
+        )
+        val result = followRedirects(java.net.URL("http://a/"), 5, script::fetch)
+        assertEquals("the page", result.body)
+        // Both hops happened, in order.
+        assertEquals(listOf("http://a/", "https://a/real"), script.calls.map { it.first })
+    }
+
+    @Test
+    fun `refuses an https to http downgrade`() {
+        val script = ScriptedFetch(mapOf("https://a/" to redirect("http://a/insecure")))
+        val error = org.junit.Assert.assertThrows(IOException::class.java) {
+            followRedirects(java.net.URL("https://a/"), 5, script::fetch)
+        }
+        assertTrue("names both ends of the downgrade", error.message!!.contains("Refused insecure redirect"))
+        assertTrue("did not follow the downgrade", script.calls.map { it.first } == listOf("https://a/"))
+    }
+
+    @Test
+    fun `allows an http to https upgrade`() {
+        val script = ScriptedFetch(
+            mapOf(
+                "http://a/" to redirect("https://a/secure"),
+                "https://a/secure" to page("ok"),
+            ),
+        )
+        val result = followRedirects(java.net.URL("http://a/"), 5, script::fetch)
+        assertEquals("ok", result.body)
+    }
+
+    @Test
+    fun `detects a cycle on the second hit instead of bouncing to the hop cap`() {
+        // Points back at itself: with only a hop counter this would run the cap; cycle detection
+        // fails it on the second hit.
+        val script = ScriptedFetch(mapOf("http://a/" to redirect("http://a/")))
+        val error = org.junit.Assert.assertThrows(IOException::class.java) {
+            followRedirects(java.net.URL("http://a/"), 5, script::fetch)
+        }
+        assertTrue("says it is a cycle", error.message!!.contains("Redirect cycle"))
+        assertTrue("nudges toward https for a plain-http loop", error.message!!.contains("https"))
+        assertEquals("only fetched once before failing", 1, script.calls.size)
+    }
+
+    @Test
+    fun `still caps a long legitimate chain`() {
+        // Six distinct hops, cap of five: the backstop fires.
+        val script = ScriptedFetch(
+            mapOf(
+                "http://a/1" to redirect("http://a/2"),
+                "http://a/2" to redirect("http://a/3"),
+                "http://a/3" to redirect("http://a/4"),
+                "http://a/4" to redirect("http://a/5"),
+                "http://a/5" to redirect("http://a/6"),
+                "http://a/6" to redirect("http://a/7"),
+                "http://a/7" to page("done"),
+            ),
+        )
+        val error = org.junit.Assert.assertThrows(IOException::class.java) {
+            followRedirects(java.net.URL("http://a/1"), 5, script::fetch)
+        }
+        assertTrue(error.message!!.contains("Too many redirects"))
+    }
+
+    @Test
+    fun `replays a cookie set on a redirect on the next hop`() {
+        // The case the host-scoped jar exists for: an edge sets a cookie on the 302 and would loop
+        // without it.
+        val script = ScriptedFetch(
+            mapOf(
+                "http://a/" to redirect("http://a/x", setCookie = listOf("session=abc; Path=/")),
+                "http://a/x" to page("ok"),
+            ),
+        )
+        followRedirects(java.net.URL("http://a/"), 5, script::fetch)
+        // The first hop had no cookie to send; the second got the one the first set.
+        assertNull(script.calls[0].second)
+        assertEquals("session=abc", script.calls[1].second)
+    }
+
+    @Test
+    fun `does not follow a 304 not modified`() {
+        val script = ScriptedFetch(mapOf("http://a/" to Fetched(304, null, null, emptyList(), null)))
+        val result = followRedirects(java.net.URL("http://a/"), 5, script::fetch)
+        assertEquals(304, result.code)
+        assertEquals("only the one request", 1, script.calls.size)
     }
 }

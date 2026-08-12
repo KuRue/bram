@@ -100,4 +100,38 @@ class InMemoryMemoryStoreTest {
 
     private fun memory(id: String, text: String, createdAt: Long, importance: Double = 0.5) =
         MemoryRecord(id, MemoryKind.SEMANTIC_FACT, text, importance = importance, createdAtEpochMillis = createdAt)
+
+    private fun episode(id: String, text: String, createdAt: Long) =
+        MemoryRecord(id, MemoryKind.EPISODE, text, importance = 0.5, createdAtEpochMillis = createdAt)
+
+    @Test
+    fun `episodes are capped to the newest N per conversation`() = runBlocking {
+        val store = InMemoryMemoryStore()
+        // N + 5 episodes, oldest first; the cap should keep only the newest N.
+        val cap = io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION
+        for (i in 0 until cap + 5) {
+            store.put(conversation, episode("ep-$i", "episode $i", createdAt = 1_000L + i))
+        }
+
+        val episodes = store.recent(100).filter { it.kind == MemoryKind.EPISODE }
+        assertEquals(cap, episodes.size)
+        // The oldest five (ep-0..ep-4) are gone; the newest N remain.
+        assertTrue(episodes.none { it.id == "ep-0" })
+        assertTrue(episodes.none { it.id == "ep-4" })
+        assertTrue(episodes.any { it.id == "ep-${cap + 4}" })
+    }
+
+    @Test
+    fun `the episode cap does not touch facts or instructions in the same conversation`() = runBlocking {
+        val store = InMemoryMemoryStore()
+        val cap = io.github.kurue.bram.core.domain.MAX_EPISODES_PER_CONVERSATION
+        store.put(conversation, memory("fact", "a real fact", createdAt = 500))
+        for (i in 0 until cap + 1) {
+            store.put(conversation, episode("ep-$i", "episode $i", createdAt = 1_000L + i))
+        }
+
+        val records = store.recent(100)
+        assertEquals(cap, records.count { it.kind == MemoryKind.EPISODE })
+        assertTrue(records.any { it.kind == MemoryKind.SEMANTIC_FACT && it.id == "fact" })
+    }
 }

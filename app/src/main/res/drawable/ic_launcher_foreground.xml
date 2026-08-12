@@ -1,72 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-    The B.
-
-    Bold, rounded and balanced: the bowls are cubics rather than semicircles, because a true
-    half-circle bowl is the bubble-letter tell, and the lower bowl is wider and taller than the
-    upper one. Two equal bowls look top-heavy, since the eye reads a letter's centre as slightly
-    above its middle, which is why making them equal looks wrong without looking like anything in
-    particular.
-
-    Solid, on a smooth diagonal gradient, with the glow carried by two scaled copies behind it.
-    That is as close to an outer glow as a VectorDrawable gets: there are no filters here, so
-    softness is either a gradient or nothing.
-
-    The letter is drawn at full size in the 108 grid and scaled about the centre by the group, so
-    the coordinates stay legible while the far edge of the lower bowl still clears the 66dp safe
-    circle that every launcher mask is guaranteed to leave alone.
--->
+<!-- A tactile dot matrix resolving into a lowercase b. Active copper cells form the mark; the
+     smaller graphite cells preserve the full matrix without competing at launcher size. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-
-    <group
-        android:pivotX="54.0"
-        android:pivotY="54.0"
-        android:scaleX="0.9605"
-        android:scaleY="0.9605"
-        android:translateX="-1.0">
-        <path
-            android:pathData="M38,24 H58 C64.63,24 70,30.05 70,37.5 C70,44.95 64.63,51 58,51 C67.94,51 76,58.39 76,67.5 C76,76.61 67.94,84 58,84 H38 C35.79,84 34,82.21 34,80 V28 C34,25.79 35.79,24 38,24 Z M48,33 H55 C57.21,33 59,35.01 59,37.5 C59,39.99 57.21,42 55,42 H48 Z M48,60 H55 C59.97,60 64,63.36 64,67.5 C64,71.64 59.97,75 55,75 H48 Z"
-            android:fillType="evenOdd"
-            android:fillColor="#1FD9A47C" />
-    </group>
-    <group
-        android:pivotX="54.0"
-        android:pivotY="54.0"
-        android:scaleX="0.9010"
-        android:scaleY="0.9010"
-        android:translateX="-1.0">
-        <path
-            android:pathData="M38,24 H58 C64.63,24 70,30.05 70,37.5 C70,44.95 64.63,51 58,51 C67.94,51 76,58.39 76,67.5 C76,76.61 67.94,84 58,84 H38 C35.79,84 34,82.21 34,80 V28 C34,25.79 35.79,24 38,24 Z M48,33 H55 C57.21,33 59,35.01 59,37.5 C59,39.99 57.21,42 55,42 H48 Z M48,60 H55 C59.97,60 64,63.36 64,67.5 C64,71.64 59.97,75 55,75 H48 Z"
-            android:fillType="evenOdd"
-            android:fillColor="#33D9A47C" />
-    </group>
-
-    <group
-        android:pivotX="54.0"
-        android:pivotY="54.0"
-        android:scaleX="0.85"
-        android:scaleY="0.85"
-        android:translateX="-1.0">
-        <path
-            android:pathData="M38,24 H58 C64.63,24 70,30.05 70,37.5 C70,44.95 64.63,51 58,51 C67.94,51 76,58.39 76,67.5 C76,76.61 67.94,84 58,84 H38 C35.79,84 34,82.21 34,80 V28 C34,25.79 35.79,24 38,24 Z M48,33 H55 C57.21,33 59,35.01 59,37.5 C59,39.99 57.21,42 55,42 H48 Z M48,60 H55 C59.97,60 64,63.36 64,67.5 C64,71.64 59.97,75 55,75 H48 Z"
-            android:fillType="evenOdd">
-            <aapt:attr name="android:fillColor">
-                <gradient
-                    android:type="linear"
-                    android:startX="34"
-                    android:startY="24"
-                    android:endX="76"
-                    android:endY="84">
-                    <item android:offset="0" android:color="#FFF7D3B2" />
-                    <item android:offset="0.5" android:color="#FFD9A47C" />
-                    <item android:offset="1" android:color="#FFBB7B4E" />
-                </gradient>
-            </aapt:attr>
-        </path>
-    </group>
+    <path
+        android:pathData="M45.52,32.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M56.52,32.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M67.52,32.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M45.52,43.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M56.52,43.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M67.52,43.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M45.52,65.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M56.52,65.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z"
+        android:fillColor="#FF4A4A52"
+        android:fillAlpha="0.52" />
+    <path android:pathData="M33.75,32.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M33.75,43.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M33.75,54.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M44.75,54.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M55.75,54.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M66.75,54.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M33.75,65.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M66.75,65.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M33.75,76.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M44.75,76.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M55.75,76.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M66.75,76.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="38"
+                android:startY="32"
+                android:endX="71"
+                android:endY="76">
+                <item android:offset="0" android:color="#FFF7D3B2" />
+                <item android:offset="0.5" android:color="#FFD9A47C" />
+                <item android:offset="1" android:color="#FFBB7B4E" />
+            </gradient>
+        </aapt:attr>
+    </path>
 </vector>

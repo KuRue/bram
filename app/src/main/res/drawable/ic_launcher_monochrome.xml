@@ -1,24 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-    The themed-icon layer (Android 13+). The system recolours this to the user's wallpaper palette
-    and keeps only the alpha, so the gradient, the glow and the accent all mean nothing here: a flat
-    silhouette is the honest version. Scaled a little larger than the colour letter, because a
-    single-tone shape at 48dp reads thinner than a lit one.
--->
+<!-- Android recolours this layer from the user's wallpaper palette. Only the active b silhouette
+     remains; inactive registration points would become visual noise in a one-colour icon. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <group
-        android:pivotX="54.0"
-        android:pivotY="54.0"
-        android:scaleX="0.90"
-        android:scaleY="0.90"
-        android:translateX="-1.0">
-        <path
-            android:pathData="M38,24 H58 C64.63,24 70,30.05 70,37.5 C70,44.95 64.63,51 58,51 C67.94,51 76,58.39 76,67.5 C76,76.61 67.94,84 58,84 H38 C35.79,84 34,82.21 34,80 V28 C34,25.79 35.79,24 38,24 Z M48,33 H55 C57.21,33 59,35.01 59,37.5 C59,39.99 57.21,42 55,42 H48 Z M48,60 H55 C59.97,60 64,63.36 64,67.5 C64,71.64 59.97,75 55,75 H48 Z"
-            android:fillType="evenOdd"
-            android:fillColor="#FFFFFFFF" />
-    </group>
+    <path
+        android:pathData="M33.35,32.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M33.35,43.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M33.35,54.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M44.35,54.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M55.35,54.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M66.35,54.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M33.35,65.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M66.35,65.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M33.35,76.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M44.35,76.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M55.35,76.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z M66.35,76.00 a4.65,4.65 0 1,0 9.30,0 a4.65,4.65 0 1,0 -9.30,0 Z"
+        android:fillColor="#FFFFFFFF" />
 </vector>

@@ -15,6 +15,8 @@ import org.json.JSONObject
 
 /** A tool call waiting on the user, and the answer it is waiting for. */
 data class PendingToolApproval(
+    /** Stable identity for the notification that represents this call in the shade. */
+    val id: String,
     val toolName: String,
     val description: String,
     val argumentsJson: String,
@@ -25,6 +27,8 @@ data class PendingToolApproval(
     val scopeLabel: String,
     /** Read out of unmarked text rather than marked as a call by the model's format. */
     val recovered: Boolean = false,
+    /** Set when the conversation contains fetched content, which is why a recovered call asks. */
+    val untrustedContext: Boolean = false,
     private val answer: CompletableDeferred<ToolApprovalDecision>,
 ) {
     fun resolve(decision: ToolApprovalDecision) {
@@ -101,12 +105,25 @@ class InteractiveApprovalGate(
     private var mode: PermissionMode = PermissionMode.AUTO
 
     /**
-     * Whether someone is around to answer an approval prompt. The card lives in the activity's UI,
-     * so a backgrounded or scheduled run cannot reach it: rather than hold the run for the full
-     * timeout per call, [decide] refuses at once and the model gets a denial it can react to.
+     * Whether someone is around to answer at the card in the activity. An unattended run reaches
+     * the user instead through the notification posted by [notifyRequest]; only when no such
+     * notification can be shown does the gate refuse at once (see [decide]).
      */
     @Volatile
     private var attended: Boolean = true
+
+    /**
+     * Posts a notification representing a request that has nobody watching the card, so a
+     * backgrounded turn or a scheduled task can reach the user instead of being silently denied.
+     * Returns whether the notification could be shown; when it cannot (no permission), the gate
+     * denies at once rather than holding the run for a timeout nobody can answer.
+     */
+    @Volatile
+    var notifyRequest: ((PendingToolApproval) -> Boolean)? = null
+
+    /** Called when a request settles by any path — answered, refused, timed out, cancelled. */
+    @Volatile
+    var onRequestResolved: ((PendingToolApproval) -> Unit)? = null
 
     fun setMode(mode: PermissionMode) {
         this.mode = mode
@@ -114,6 +131,12 @@ class InteractiveApprovalGate(
 
     fun setAttended(value: Boolean) {
         attended = value
+        // The user left while a card was on screen; the request is still live, so it moves into
+        // the shade where they can answer it. A no-op when posting is impossible — the card is
+        // still there when they come back, and the timeout still bounds the wait.
+        if (!value) {
+            mutablePending.value?.let { notifyRequest?.invoke(it) }
+        }
     }
 
     companion object {
@@ -137,14 +160,23 @@ class InteractiveApprovalGate(
         tool: ToolDefinition,
         argumentsJson: String,
         recovered: Boolean,
+        untrustedContext: Boolean,
     ): ToolApprovalDecision {
         val current = mode
-        // BYPASS runs what the model asked for without asking again — but not a call recovered from
-        // unmarked text. That is text read as an intent, and `web_fetch` puts pages Bram did not
-        // write into the context, so the text could have come from anywhere. Taking responsibility
-        // for a run is not the same as vouching for every page it reads, which is the one case the
-        // fences on recovered calls exist for.
-        if (current == PermissionMode.BYPASS && !recovered) return ToolApprovalDecision.ALLOW_ONCE
+        // BYPASS runs what the model asked for without asking again. It used to make an exception
+        // for every call recovered from unmarked text, which was the right instinct aimed at the
+        // wrong thing: on a format that never marks its calls — LFM2.5 among them — every call is
+        // recovered, so the exception was the rule and bypass did nothing at all.
+        //
+        // What actually makes a recovered call dangerous is not that it was recovered. It is that
+        // the model's text may be repeating something it read. With no outside content in the
+        // conversation there is nothing to repeat, and the call is the model's own intent — which
+        // is precisely what bypass exists to stop asking about. Once a page has been fetched, the
+        // fence goes back up: taking responsibility for a run is not the same as vouching for
+        // every page it reads.
+        if (current == PermissionMode.BYPASS && !(recovered && untrustedContext)) {
+            return ToolApprovalDecision.ALLOW_ONCE
+        }
 
         val scope = approvalScope(tool, argumentsJson)
         // An explicit "allow always" grant is stronger than the mode, so it holds even in MANUAL —
@@ -156,13 +188,11 @@ class InteractiveApprovalGate(
             return ToolApprovalDecision.ALLOW_ONCE
         }
 
-        // No one is watching to answer: a backgrounded or scheduled run cannot reach the approval
-        // card, so waiting the full timeout only holds the run open. Deny at once — the model gets
-        // a refusal it can react to instead of a multi-minute hang per call.
-        if (!attended) return ToolApprovalDecision.DENY
-
+        // No one is watching to answer: the card lives in the activity, so the request moves
+        // into the shade below rather than being refused in silence.
         val answer = CompletableDeferred<ToolApprovalDecision>()
         val request = PendingToolApproval(
+            id = java.util.UUID.randomUUID().toString(),
             toolName = tool.name,
             description = tool.description,
             argumentsJson = argumentsJson,
@@ -170,8 +200,15 @@ class InteractiveApprovalGate(
             readOnly = tool.readOnly,
             scopeLabel = scopeLabel(tool, argumentsJson),
             recovered = recovered,
+            untrustedContext = untrustedContext,
             answer = answer,
         )
+        if (!attended) {
+            // No one is at the card. Posting a notification turns the wait into a reachable ask
+            // instead of silence; when nothing can be posted the call is refused at once so an
+            // unattended run reacts to the denial instead of hanging the full timeout.
+            if (notifyRequest?.invoke(request) != true) return ToolApprovalDecision.DENY
+        }
         mutablePending.value = request
         return try {
             val decision = withTimeout(timeoutMillis) { answer.await() }
@@ -185,6 +222,7 @@ class InteractiveApprovalGate(
             // Cleared whatever the outcome, including cancellation of the run, so a stale card
             // cannot outlive the call it belonged to.
             mutablePending.value = null
+            onRequestResolved?.invoke(request)
         }
     }
 }
