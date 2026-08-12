@@ -77,6 +77,8 @@ import kotlinx.coroutines.sync.withLock
  * screen: [step] of [total] says how far in, and [results] fills in as each one finishes so the
  * comparison is readable before the last one lands.
  */
+enum class AutoConfigurePhase { MEASURING, BATCH, DONE }
+
 data class AutoConfigureProgress(
     val profileId: String,
     val modelName: String,
@@ -86,6 +88,14 @@ data class AutoConfigureProgress(
     /** Every accelerator candidate, in measurement order, so the dialog can show all of them. */
     val candidates: List<String> = emptyList(),
     val results: List<BackendMeasurement> = emptyList(),
+    /**
+     * Which candidate (by [candidates] index) is being measured right now, or null between
+     * candidates, during the batch phase, or when finished. The overlay marks exactly one row
+     * "Measuring…" off this rather than off [current], which carries the live callback text and so
+     * would make every row flicker between Measuring and Waiting mid-measurement.
+     */
+    val measuringIndex: Int? = null,
+    val phase: AutoConfigurePhase = AutoConfigurePhase.MEASURING,
     val finished: Boolean = false,
 ) {
     val fraction: Float get() = if (total <= 0) 0f else (step.toFloat() / total).coerceIn(0f, 1f)
@@ -1103,7 +1113,11 @@ class MainViewModel(
                 val (backend, target) = candidate
                 mutableState.update {
                     it.copy(
-                        autoConfigure = it.autoConfigure?.copy(step = index, current = backend.label),
+                        autoConfigure = it.autoConfigure?.copy(
+                            step = index,
+                            measuringIndex = index,
+                            current = backend.label,
+                        ),
                     )
                 }
                 // A backend failing is a result, not an error: it means do not use that one. It is
@@ -1171,7 +1185,13 @@ class MainViewModel(
             // one. Two buttons where one says "configure this for me" was the confusion; this makes
             // the one button mean it.
             mutableState.update {
-                it.copy(autoConfigure = it.autoConfigure?.copy(current = "Tuning prompt batch…"))
+                it.copy(
+                    autoConfigure = it.autoConfigure?.copy(
+                        phase = AutoConfigurePhase.BATCH,
+                        measuringIndex = null,
+                        current = "Tuning prompt batch…",
+                    ),
+                )
             }
             runCatching { runBatchTune(profile.id) }
             val tuned = mutableState.value.profiles.firstOrNull { it.id == profile.id }
@@ -1180,6 +1200,7 @@ class MainViewModel(
                 it.copy(
                     autoConfigure = it.autoConfigure?.copy(
                         finished = true,
+                        phase = AutoConfigurePhase.DONE,
                         current = listOfNotNull(
                             note,
                             tuned?.batchTuneNote?.takeIf(String::isNotBlank),
