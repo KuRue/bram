@@ -2,9 +2,10 @@
 
 Run from anywhere with: python tools/icon.py
 
-The selected mark is a five-by-four tactile dot matrix that resolves into a lowercase b. Keeping
-the coordinates here makes the colour and themed variants mechanically identical and prevents
-small hand-edits from changing the silhouette between Android launcher modes.
+The selected mark is a staggered tactile lattice that resolves into a lowercase b. Its alternating
+half-step rows echo the field behind Bram's chat UI. Keeping the coordinates here makes the colour
+and themed variants mechanically identical and prevents small hand-edits from changing the
+silhouette between Android launcher modes.
 """
 
 from pathlib import Path
@@ -12,24 +13,32 @@ from pathlib import Path
 
 WIDTH = 108
 HEIGHT = 108
-X_POSITIONS = (38, 49, 60, 71)
-Y_POSITIONS = (32, 43, 54, 65, 76)
-COLOR_RADIUS = 4.25
-MONO_RADIUS = 4.65
+EVEN_X_POSITIONS = (41.0, 49.5, 58.0, 66.5)
+ODD_X_POSITIONS = (36.75, 45.25, 53.75, 62.25, 70.75)
+Y_POSITIONS = (31.0, 38.5, 46.0, 53.5, 61.0, 68.5, 76.0)
+COLOR_RADIUS = 3.4
+INACTIVE_RADIUS = 2.3
+MONO_RADIUS = 3.65
 
-# Row-major cells in the four-column matrix. The active cells draw the b; the remaining cells are
-# quiet registration points in the colour icon and disappear from Android's themed silhouette.
+
+def row_x_positions(row: int) -> tuple[float, ...]:
+    return EVEN_X_POSITIONS if row % 2 == 0 else ODD_X_POSITIONS
+
+# Row-major cells in alternating four- and five-column rows. Active cells draw the b; remaining
+# cells are quiet registration points in the colour icon and disappear from the themed silhouette.
 ACTIVE_CELLS = (
     (0, 0),
-    (1, 0),
-    (2, 0), (2, 1), (2, 2), (2, 3),
-    (3, 0), (3, 3),
-    (4, 0), (4, 1), (4, 2), (4, 3),
+    (1, 1),
+    (2, 0),
+    (3, 1), (3, 2), (3, 3),
+    (4, 0), (4, 3),
+    (5, 1), (5, 3),
+    (6, 0), (6, 1), (6, 2),
 )
 INACTIVE_CELLS = tuple(
     (row, column)
     for row in range(len(Y_POSITIONS))
-    for column in range(len(X_POSITIONS))
+    for column in range(len(row_x_positions(row)))
     if (row, column) not in ACTIVE_CELLS
 )
 
@@ -45,7 +54,7 @@ def circle_path(x: float, y: float, radius: float) -> str:
 
 def cells_path(cells: tuple[tuple[int, int], ...], radius: float) -> str:
     return " ".join(
-        circle_path(X_POSITIONS[column], Y_POSITIONS[row], radius)
+        circle_path(row_x_positions(row)[column], Y_POSITIONS[row], radius)
         for row, column in cells
     )
 
@@ -93,10 +102,13 @@ def build_background() -> str:
 
 def build_foreground() -> str:
     active = cells_path(ACTIVE_CELLS, COLOR_RADIUS)
-    inactive = cells_path(INACTIVE_CELLS, COLOR_RADIUS * 0.82)
+    inactive = cells_path(INACTIVE_CELLS, INACTIVE_RADIUS)
+    # VectorDrawable has no blur primitive. Three translucent, round-capped bands create a quiet
+    # feathered light field instead: a straight optical stem and a curve around the bowl.
+    glow = "M43.12,31.00 L43.12,76.00 M43.12,53.50 C54.50,51.00 66.50,52.00 66.50,61.50 C66.50,71.00 56.50,75.00 43.12,75.00"
     return f'''<?xml version="1.0" encoding="utf-8"?>
-<!-- A tactile dot matrix resolving into a lowercase b. Active copper cells form the mark; the
-     smaller graphite cells preserve the full matrix without competing at launcher size. -->
+<!-- A staggered tactile lattice resolving into a lowercase b. A restrained light field optically
+     straightens the stem and rounds the bowl without joining the individual copper cells. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
@@ -104,16 +116,40 @@ def build_foreground() -> str:
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
+        android:pathData="{glow}"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFD9A47C"
+        android:strokeAlpha="0.035"
+        android:strokeWidth="14"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="{glow}"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFE8AF80"
+        android:strokeAlpha="0.055"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="{glow}"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFF0BD91"
+        android:strokeAlpha="0.07"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
         android:pathData="{inactive}"
         android:fillColor="#FF4A4A52"
-        android:fillAlpha="0.52" />
+        android:fillAlpha="0.36" />
     <path android:pathData="{active}">
         <aapt:attr name="android:fillColor">
             <gradient
                 android:type="linear"
-                android:startX="38"
-                android:startY="32"
-                android:endX="71"
+                android:startX="41"
+                android:startY="31"
+                android:endX="66.5"
                 android:endY="76">
                 <item android:offset="0" android:color="#FFF7D3B2" />
                 <item android:offset="0.5" android:color="#FFD9A47C" />

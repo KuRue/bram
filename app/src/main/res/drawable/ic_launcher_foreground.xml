@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A tactile dot matrix resolving into a lowercase b. Active copper cells form the mark; the
-     smaller graphite cells preserve the full matrix without competing at launcher size. -->
+<!-- A staggered tactile lattice resolving into a lowercase b. A restrained light field optically
+     straightens the stem and rounds the bowl without joining the individual copper cells. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
@@ -8,16 +8,40 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:pathData="M45.52,32.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M56.52,32.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M67.52,32.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M45.52,43.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M56.52,43.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M67.52,43.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M45.52,65.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z M56.52,65.00 a3.48,3.48 0 1,0 6.97,0 a3.48,3.48 0 1,0 -6.97,0 Z"
+        android:pathData="M43.12,31.00 L43.12,76.00 M43.12,53.50 C54.50,51.00 66.50,52.00 66.50,61.50 C66.50,71.00 56.50,75.00 43.12,75.00"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFD9A47C"
+        android:strokeAlpha="0.035"
+        android:strokeWidth="14"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M43.12,31.00 L43.12,76.00 M43.12,53.50 C54.50,51.00 66.50,52.00 66.50,61.50 C66.50,71.00 56.50,75.00 43.12,75.00"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFE8AF80"
+        android:strokeAlpha="0.055"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M43.12,31.00 L43.12,76.00 M43.12,53.50 C54.50,51.00 66.50,52.00 66.50,61.50 C66.50,71.00 56.50,75.00 43.12,75.00"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFF0BD91"
+        android:strokeAlpha="0.07"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M47.20,31.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M55.70,31.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M64.20,31.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M34.45,38.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M51.45,38.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M59.95,38.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M68.45,38.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M47.20,46.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M55.70,46.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M64.20,46.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M34.45,53.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M68.45,53.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M47.20,61.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M55.70,61.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M34.45,68.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M51.45,68.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M68.45,68.50 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z M64.20,76.00 a2.30,2.30 0 1,0 4.60,0 a2.30,2.30 0 1,0 -4.60,0 Z"
         android:fillColor="#FF4A4A52"
-        android:fillAlpha="0.52" />
-    <path android:pathData="M33.75,32.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M33.75,43.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M33.75,54.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M44.75,54.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M55.75,54.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M66.75,54.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M33.75,65.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M66.75,65.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M33.75,76.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M44.75,76.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M55.75,76.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z M66.75,76.00 a4.25,4.25 0 1,0 8.50,0 a4.25,4.25 0 1,0 -8.50,0 Z">
+        android:fillAlpha="0.36" />
+    <path android:pathData="M37.60,31.00 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M41.85,38.50 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M37.60,46.00 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M41.85,53.50 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M50.35,53.50 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M58.85,53.50 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M37.60,61.00 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M63.10,61.00 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M41.85,68.50 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M58.85,68.50 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M37.60,76.00 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M46.10,76.00 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z M54.60,76.00 a3.40,3.40 0 1,0 6.80,0 a3.40,3.40 0 1,0 -6.80,0 Z">
         <aapt:attr name="android:fillColor">
             <gradient
                 android:type="linear"
-                android:startX="38"
-                android:startY="32"
-                android:endX="71"
+                android:startX="41"
+                android:startY="31"
+                android:endX="66.5"
                 android:endY="76">
                 <item android:offset="0" android:color="#FFF7D3B2" />
                 <item android:offset="0.5" android:color="#FFD9A47C" />
