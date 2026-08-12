@@ -117,6 +117,7 @@ import io.github.kurue.bram.core.domain.AcceleratorCapability
 import io.github.kurue.bram.core.domain.AgentActivity
 import org.json.JSONObject
 import io.github.kurue.bram.core.domain.Automation
+import io.github.kurue.bram.core.domain.isHybridArchitecture
 import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
@@ -1362,7 +1363,14 @@ private fun ProfileCard(
                         }
                     }
                     Text(
-                        "${model.displayName} · ${model.quantization} · ${formatBytes(model.fileSizeBytes)}",
+                        buildString {
+                            append(model.displayName).append(" · ").append(model.quantization)
+                                .append(" · ").append(formatBytes(model.fileSizeBytes))
+                            // A hybrid (SSM/mamba) arch re-decodes the whole thread every turn, so it
+                            // cannot reuse the prompt cache. Tagged so a model picked for a long chat
+                            // can be a transformer, which does.
+                            if (isHybridArchitecture(model.architecture)) append(" · no prompt cache")
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
