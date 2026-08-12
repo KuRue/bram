@@ -118,6 +118,21 @@ enum class ExecutionMode {
     STORAGE_ASSISTED,
 }
 
+/**
+ * Whether the architecture mixes recurrent/SSM state with attention and so cannot drop the prefix
+ * of a conversation's KV cache: every turn re-decodes the whole thread. llama.cpp's partial cache
+ * trim is refused by these (see `bram_llama_jni.cpp` — LFM2 and Mamba are named there), so the
+ * prompt cache — the biggest lever for multi-turn latency — is unavailable. Surfaced so a person
+ * picking a model for a long thread can prefer a pure transformer, which reuses its cache.
+ */
+fun isHybridArchitecture(architecture: String): Boolean {
+    val arch = architecture.trim().lowercase()
+    return arch.startsWith("mamba") ||
+        arch.startsWith("rwkv") ||
+        arch.startsWith("jamba") ||
+        arch.startsWith("lfm")
+}
+
 data class ExecutionPlan(
     val id: String,
     val mode: ExecutionMode,
