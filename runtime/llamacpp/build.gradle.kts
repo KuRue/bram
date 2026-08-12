@@ -7,6 +7,34 @@ val bramIncludeEmulatorAbi: Boolean =
         ?: providers.gradleProperty("bram.emulatorAbi").orNull)
         ?.toBooleanStrictOrNull() ?: false
 
+// The Hexagon NPU backend needs Qualcomm's proprietary Hexagon SDK, which cannot be fetched
+// automatically and is absent on CI. Enable it only when a developer points HEXAGON_SDK_ROOT at a
+// local install, so every other build is unaffected.
+val hexagonSdkRoot: String? =
+    providers.environmentVariable("HEXAGON_SDK_ROOT").orNull
+        ?: providers.gradleProperty("bram.hexagonSdkRoot").orNull
+val hexagonEnabled: Boolean = !hexagonSdkRoot.isNullOrBlank() && !bramIncludeEmulatorAbi
+
+// A phone build that must carry the NPU backend can opt in (`-Pbram.requireHexagon=true`) to a
+// loud failure at configuration time, so the build does not silently produce a Hexagon-less
+// libbram_llama.so when the SDK is unset. Evaluated eagerly (not inside the cmake block, which
+// AGP defers) so even `./gradlew help` catches it. This does not detect a poisoned CMake cache
+// (SDK set but GGML_HEXAGON cached OFF); the message names that fix, and the packaged .so should
+// still be verified with `strings | grep ggml-hex` after the build.
+val requireHexagon = (findProperty("bram.requireHexagon")?.toString() ?: "false").toBoolean()
+if (requireHexagon) {
+    require(hexagonEnabled) {
+        val why = buildList {
+            if (hexagonSdkRoot.isNullOrBlank()) add("HEXAGON_SDK_ROOT / bram.hexagonSdkRoot is unset")
+            if (bramIncludeEmulatorAbi) add("the emulator ABI is included")
+        }.joinToString(", ")
+        "bram.requireHexagon is set but the Hexagon backend will not compile ($why). " +
+            "If the SDK is set and Hexagon is still absent, the CMake cache has likely poisoned " +
+            "GGML_HEXAGON=OFF — delete runtime/llamacpp/.cxx and rebuild, then verify the packaged " +
+            "libbram_llama.so with `strings | grep ggml-hex`."
+    }
+}
+
 // Where AGP stages the CMake build tree. The default (module/.cxx) nests deeply enough that the
 // llama.cpp Vulkan shader generator's try-compiles exceed MSVC's 250-character object path limit on
 // machines with a long project root. A short absolute path (e.g. C:\Users\<you>\bramcxx) sidesteps
@@ -41,9 +69,7 @@ android {
                 // The Hexagon NPU backend needs Qualcomm's proprietary Hexagon SDK, which cannot be
                 // fetched automatically and is absent on CI. Enable it only when a developer points
                 // HEXAGON_SDK_ROOT at a local install, so every other build is unaffected.
-                val hexagonSdkRoot = providers.environmentVariable("HEXAGON_SDK_ROOT").orNull
-                    ?: providers.gradleProperty("bram.hexagonSdkRoot").orNull
-                if (!hexagonSdkRoot.isNullOrBlank() && !bramIncludeEmulatorAbi) {
+                if (hexagonEnabled) {
                     arguments += listOf(
                         "-DGGML_HEXAGON=ON",
                         "-DHEXAGON_SDK_ROOT=$hexagonSdkRoot",
