@@ -2103,6 +2103,7 @@ class MainViewModel(
             state.isValidatingAccelerator || state.batchTuneProfileId != null ||
             state.tuningProfileId != null
         ) return
+        mutableState.update { it.copy(cooldownOverride = false) }
         viewModelScope.launch { runBatchTune(profileId) }
     }
 
@@ -2120,7 +2121,8 @@ class MainViewModel(
         val restoreLoaded = mutableState.value.loadedModelId
         val backend = resolveLoadBackend(profile.backendId)
         refreshMeasurementFingerprint()
-        mutableState.update { it.copy(cooldownOverride = false) }
+        // The override is not reset here: a run inside auto-configure inherits the pass's
+        // Continue-anyway, so one tap covers every remaining dimension instead of just one.
         sweepGate()?.let { reason ->
             mutableState.update { it.copy(error = reason) }
             return
@@ -2421,6 +2423,7 @@ class MainViewModel(
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator ||
             state.batchTuneProfileId != null || state.tuningProfileId != null
         ) return
+        mutableState.update { it.copy(cooldownOverride = false) }
         viewModelScope.launch { runDimensionTune(profileId, dimension, fromAutoConfigure = false) }
     }
 
@@ -2567,7 +2570,8 @@ class MainViewModel(
         val backend = resolveLoadBackend(profile.backendId)
         val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         refreshMeasurementFingerprint()
-        mutableState.update { it.copy(cooldownOverride = false) }
+        // The override is not reset here: a run inside auto-configure inherits the pass's
+        // Continue-anyway, so one tap covers every remaining dimension instead of just one.
         sweepGate()?.let { reason ->
             mutableState.update { it.copy(error = reason) }
             finishDimensionTune()
