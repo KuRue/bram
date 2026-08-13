@@ -159,7 +159,7 @@ endif()
 FetchContent_Declare(
     llama_cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-    GIT_TAG 132753bf4e52b1a8bda8f6ec33f1785bd80470da
+    GIT_TAG a94d563ed801d1da1b8c2432946de07d0231bb3d
     GIT_SHALLOW FALSE
     GIT_PROGRESS TRUE
 )

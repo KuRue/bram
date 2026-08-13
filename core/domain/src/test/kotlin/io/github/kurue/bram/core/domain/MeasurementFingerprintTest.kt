@@ -11,11 +11,11 @@ class MeasurementFingerprintTest {
         val fingerprint = MeasurementFingerprint(
             device = "abc123",
             appBuild = "0.2.0/2",
-            engineBuild = "132753bf",
+            engineBuild = "a94d563e",
             cpuFeatures = "NEON=1|DOTPROD=1|MATMUL_INT8=1|SVE=1|SME=0",
         )
         assertEquals(
-            "d=abc123|app=0.2.0/2|engine=132753bf|cpu=NEON=1|DOTPROD=1|MATMUL_INT8=1|SVE=1|SME=0",
+            "d=abc123|app=0.2.0/2|engine=a94d563e|cpu=NEON=1|DOTPROD=1|MATMUL_INT8=1|SVE=1|SME=0",
             fingerprint.key,
         )
         assertEquals(fingerprint.key, fingerprint.copy().key)

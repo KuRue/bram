@@ -89,7 +89,7 @@ android {
         buildConfigField(
             "String",
             "LLAMA_CPP_COMMIT",
-            "\"132753bf4e52b1a8bda8f6ec33f1785bd80470da\"",
+            "\"a94d563ed801d1da1b8c2432946de07d0231bb3d\"",
         )
     }
 
