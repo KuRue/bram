@@ -104,6 +104,12 @@ data class TuningPlanPhase(
     val dimension: TuningDimension? = null,
     val isBackends: Boolean = false,
     val isBatch: Boolean = false,
+    /**
+     * Live per-row results, parallel to [candidates]: a row flips to its outcome the moment the
+     * sweep decides it (timed out, measured) instead of waiting for the whole sweep's note to
+     * land. The landed note's results take precedence once they exist.
+     */
+    val results: List<TuneCandidateResult> = emptyList(),
 )
 
 data class AutoConfigureProgress(
@@ -1089,6 +1095,47 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Flips a plan row to "timed out" the moment the sweep abandons it, so the row does not sit
+     * on "Measuring…" or fall back to "Waiting" until the whole sweep's note lands.
+     */
+    private fun markPlanCandidateTimedOut(phaseIndex: Int?, candidateIndex: Int) {
+        if (phaseIndex == null || phaseIndex < 0) return
+        mutableState.update {
+            it.copy(
+                autoConfigure = it.autoConfigure?.let { progress ->
+                    progress.copy(
+                        plan = progress.plan.mapIndexed { index, phase ->
+                            if (index != phaseIndex) {
+                                phase
+                            } else {
+                                val results = phase.results.toMutableList()
+                                while (results.size <= candidateIndex) {
+                                    results += TuneCandidateResult(
+                                        label = phase.candidates.getOrNull(results.size).orEmpty(),
+                                        promptTokPerSec = 0.0,
+                                        decodeTokPerSec = 0.0,
+                                        agreed = false,
+                                    )
+                                }
+                                results[candidateIndex] = TuneCandidateResult(
+                                    label = phase.candidates.getOrNull(candidateIndex).orEmpty(),
+                                    promptTokPerSec = 0.0,
+                                    decodeTokPerSec = 0.0,
+                                    agreed = false,
+                                    timedOut = true,
+                                )
+                                phase.copy(results = results)
+                            }
+                        },
+                        measuringPlanPhase = null,
+                        measuringPlanCandidate = null,
+                    )
+                },
+            )
+        }
+    }
+
     fun selectLocalModel(modelId: String) {
         mutableState.update { it.copy(selectedRuntimeId = modelId, error = null) }
     }
@@ -1569,6 +1616,32 @@ class MainViewModel(
     }
 
     /**
+     * Drops candidates the profile's own saved note already recorded as timed out, when the note
+     * was measured under the current fingerprint. A timed-out candidate hangs in the engine — on
+     * the S25 Ultra the CPU-mask configs and 8 threads have never once completed — and the device,
+     * app build, engine build, and CPU features are all unchanged, so re-running one would just
+     * hang again and burn its probe window. A fingerprint change (new build, new engine, new
+     * device) clears the slate. Always keeps the whole list when pruning would leave fewer than
+     * two candidates to compare.
+     */
+    private fun prunePreviouslyTimedOut(
+        candidates: List<TuningCandidate>,
+        priorResults: List<TuneCandidateResult>,
+        fingerprintFresh: Boolean,
+    ): List<TuningCandidate> {
+        if (!fingerprintFresh) return candidates
+        val timedOutLabels = priorResults.filter { it.timedOut }.map { it.label }.toSet()
+        if (timedOutLabels.isEmpty()) return candidates
+        val kept = candidates.filterNot { it.label in timedOutLabels }
+        if (kept.size < 2) return candidates
+        android.util.Log.d(
+            "BramTune",
+            "skipping previously timed-out candidates: ${candidates.map { it.label }.filter { it in timedOutLabels }}",
+        )
+        return kept
+    }
+
+    /**
      * The whole run, laid out before the first measurement: backends, every decode dimension with
      * its candidate labels, and the batch — so the overlay lists every row from the start and
      * marks each one as it runs, instead of later phases appearing only when they finish.
@@ -1580,6 +1653,8 @@ class MainViewModel(
     ): List<TuningPlanPhase> {
         val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         val clusters = CpuTopology.clusters()
+        val fingerprintFresh = profile.measuredFingerprint.isNotBlank() &&
+            profile.measuredFingerprint == mutableState.value.measurementFingerprint
         val backendPhase = TuningPlanPhase(
             title = "Backends",
             candidates = backendCandidates.map { it.second.label },
@@ -1588,16 +1663,32 @@ class MainViewModel(
         val dimensions = autoConfigureDimensions(
             resolveLoadBackend(profile.backendId),
         ).map { dimension ->
+            val candidates = prunePreviouslyTimedOut(
+                dimensionCandidates(dimension, profile, visibleCores, clusters),
+                profile.tuning.firstOrNull { it.dimension == dimension }?.results.orEmpty(),
+                fingerprintFresh,
+            )
             TuningPlanPhase(
                 title = dimension.label,
-                candidates = dimensionCandidates(dimension, profile, visibleCores, clusters)
-                    .map { it.label },
+                candidates = candidates.map { it.label },
                 dimension = dimension,
             )
         }
+        val batchPairs = if (fingerprintFresh) {
+            val timedOutLabels = profile.tuning
+                .firstOrNull { it.dimension == TuningDimension.BATCH }
+                ?.results.orEmpty()
+                .filter { it.timedOut }
+                .map { it.label }
+                .toSet()
+            val kept = BATCH_CANDIDATES.filterNot { (batch, ubatch) -> "$batch/$ubatch" in timedOutLabels }
+            if (kept.size >= 2) kept else BATCH_CANDIDATES
+        } else {
+            BATCH_CANDIDATES
+        }
         val batchPhase = TuningPlanPhase(
             title = TuningDimension.BATCH.label,
-            candidates = BATCH_CANDIDATES.map { (batch, ubatch) -> "$batch/$ubatch" },
+            candidates = batchPairs.map { (batch, ubatch) -> "$batch/$ubatch" },
             isBatch = true,
         )
         return buildList {
@@ -2018,31 +2109,72 @@ class MainViewModel(
             runCatching {
                 // The reference is always recorded on CPU at the default batch, so every candidate
                 // is scored against the same yardstick and "fastest" can never mean "wrong the
-                // same way twice".
-                container.llamaCppClient.load(
-                    model,
-                    threads,
-                    gpuLayers = 0,
-                    enableThinking = profile.thinkingEnabled,
-                    flashAttention = profile.flashAttention,
-                    kvCacheType = profile.kvCacheType,
-                )
-                val cpuReference = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
-                val reference = cpuReference.optJSONArray("tokens").toIntList()
+                // same way twice". A reference that takes minutes means the CPU is clock-limited
+                // even when Android's thermal status still reads "none", so a slow one is retried
+                // after a park — numbers taken through it would be lies with timestamps.
+                var cpuReference: JSONObject? = null
+                while (cpuReference == null) {
+                    container.llamaCppClient.load(
+                        model,
+                        threads,
+                        gpuLayers = 0,
+                        enableThinking = profile.thinkingEnabled,
+                        flashAttention = profile.flashAttention,
+                        kvCacheType = profile.kvCacheType,
+                    )
+                    val candidate = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                    val millis = candidate.optLong("promptMillis", 0L) + candidate.optLong("decodeMillis", 0L)
+                    if (millis <= MAX_REFERENCE_MILLIS || mutableState.value.cooldownOverride) {
+                        cpuReference = candidate
+                        break
+                    }
+                    android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
+                    mutableState.update {
+                        it.copy(
+                            status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
+                            autoConfigure = it.autoConfigure?.copy(
+                                current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
+                            ),
+                        )
+                    }
+                    withContext(Dispatchers.Default) { delay(60_000) }
+                }
+                val cpuRef = cpuReference!!
+                val reference = cpuRef.optJSONArray("tokens").toIntList()
                 check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
                 val forced = reference.toIntArray()
                 // The yardstick's own wall time scales the candidate deadlines, so a thermally
                 // throttled phone gets a window its decode can actually fit in instead of being
                 // misread as hung by the fixed bounds.
-                val referenceMillis = cpuReference.optLong("promptMillis", 0L) +
-                    cpuReference.optLong("decodeMillis", 0L)
+                val referenceMillis = cpuRef.optLong("promptMillis", 0L) +
+                    cpuRef.optLong("decodeMillis", 0L)
                 val probeDeadlineMillis = maxOf(PROBE_TIMEOUT_MILLIS, referenceMillis * 2 + 5_000L)
                 val candidateDeadlineMillis = maxOf(CANDIDATE_TIMEOUT_MILLIS, referenceMillis * 4 + 10_000L)
                 // The default (512/128) is in the list so there is always a baseline to fall back
                 // to, and the wide end covers the Hexagon reference configuration, which runs
                 // ubatch 1024 — the backend batches prompt work in chunks that size.
-                val candidates = BATCH_CANDIDATES
+                val fingerprintFresh = profile.measuredFingerprint.isNotBlank() &&
+                    profile.measuredFingerprint == mutableState.value.measurementFingerprint
+                val timedOutBatches = profile.tuning
+                    .firstOrNull { it.dimension == TuningDimension.BATCH }
+                    ?.results.orEmpty()
+                    .filter { it.timedOut }
+                    .map { it.label }
+                    .toSet()
+                val candidates = if (fingerprintFresh && timedOutBatches.isNotEmpty()) {
+                    val kept = BATCH_CANDIDATES.filterNot { (batch, ubatch) -> "$batch/$ubatch" in timedOutBatches }
+                    if (kept.size >= 2) {
+                        android.util.Log.d("BramTune", "skipping previously timed-out batches: $timedOutBatches")
+                        kept
+                    } else {
+                        BATCH_CANDIDATES
+                    }
+                } else {
+                    BATCH_CANDIDATES
+                }
                 val scored = mutableListOf<BatchScore>()
+                val batchPlanPhaseIndex = mutableState.value.autoConfigure?.plan
+                    ?.indexOfFirst { phase -> phase.isBatch } ?: -1
                 for ((batchIndex, pair) in candidates.withIndex()) {
                     val (batch, ubatch) = pair
                     waitForCooldown()
@@ -2051,8 +2183,7 @@ class MainViewModel(
                             status = "Measuring batch $batch/$ubatch on ${backend.label}…",
                             autoConfigure = it.autoConfigure?.copy(
                                 current = "Measuring batch $batch/$ubatch…",
-                                measuringPlanPhase = it.autoConfigure.plan.indexOfFirst { phase -> phase.isBatch }
-                                    .takeIf { index -> index >= 0 },
+                                measuringPlanPhase = batchPlanPhaseIndex.takeIf { index -> index >= 0 },
                                 measuringPlanCandidate = batchIndex,
                             ),
                         )
@@ -2081,10 +2212,12 @@ class MainViewModel(
                                 container.llamaCppClient.referenceDecode(PROBE_TOKENS)
                             }
                         }.onFailure { error ->
-                            android.util.Log.d(
-                                "BramTune",
-                                "probe $batch/$ubatch error: ${error::class.simpleName}: ${error.message}",
-                            )
+                            if (error !is android.os.DeadObjectException) {
+                                android.util.Log.d(
+                                    "BramTune",
+                                    "probe $batch/$ubatch error: ${error::class.simpleName}: ${error.message}",
+                                )
+                            }
                         }
                     }
                     val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
@@ -2097,6 +2230,7 @@ class MainViewModel(
                         android.util.Log.d("BramTune", "batch $batch/$ubatch hung in probe; abandoned")
                         runCatching { container.llamaCppClient.restartInferenceProcess() }
                         tried += "$batch/$ubatch (timed out)"
+                        markPlanCandidateTimedOut(batchPlanPhaseIndex, batchIndex)
                         mutableState.update {
                             it.copy(autoConfigure = it.autoConfigure?.copy(current = "$batch/$ubatch timed out"))
                         }
@@ -2142,10 +2276,12 @@ class MainViewModel(
                                 }
                             }
                         }.onFailure { error ->
-                            android.util.Log.d(
-                                "BramTune",
-                                "measure $batch/$ubatch error: ${error::class.simpleName}: ${error.message}",
-                            )
+                            if (error !is android.os.DeadObjectException) {
+                                android.util.Log.d(
+                                    "BramTune",
+                                    "measure $batch/$ubatch error: ${error::class.simpleName}: ${error.message}",
+                                )
+                            }
                         }
                     }
                     val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
@@ -2158,6 +2294,7 @@ class MainViewModel(
                         android.util.Log.d("BramTune", "batch $batch/$ubatch TIMED OUT")
                         runCatching { container.llamaCppClient.restartInferenceProcess() }
                         tried += "$batch/$ubatch (timed out)"
+                        markPlanCandidateTimedOut(batchPlanPhaseIndex, batchIndex)
                         mutableState.update {
                             it.copy(autoConfigure = it.autoConfigure?.copy(current = "$batch/$ubatch timed out"))
                         }
@@ -2172,7 +2309,7 @@ class MainViewModel(
                         "against the CPU reference (${tried.joinToString(", ")} all failed)"
                 }
                 val best = scored.minBy { it.promptMillis }
-                val promptTokens = cpuReference.optInt("promptTokens", 0)
+                val promptTokens = cpuRef.optInt("promptTokens", 0)
                 val rate = if (best.promptMillis > 0 && promptTokens > 0) {
                     promptTokens * 1000 / best.promptMillis
                 } else {
@@ -2406,11 +2543,17 @@ class MainViewModel(
             return
         }
         waitForCooldown()
-        val candidates = dimensionCandidates(
-            dimension,
-            profile,
-            visibleCores,
-            CpuTopology.clusters(),
+        val fingerprintFresh = profile.measuredFingerprint.isNotBlank() &&
+            profile.measuredFingerprint == mutableState.value.measurementFingerprint
+        val candidates = prunePreviouslyTimedOut(
+            dimensionCandidates(
+                dimension,
+                profile,
+                visibleCores,
+                CpuTopology.clusters(),
+            ),
+            profile.tuning.firstOrNull { it.dimension == dimension }?.results.orEmpty(),
+            fingerprintFresh,
         )
         if (dimension == TuningDimension.HEX_FLAGS && backend != RuntimeBackend.HEXAGON) {
             finishDimensionTune()
@@ -2450,25 +2593,49 @@ class MainViewModel(
             // is part of it: the reference must open the assistant turn the same way the
             // candidates do, or a thinking-enabled profile measures two different prompts and
             // every candidate fails the agreement bar on the first token.
-            container.llamaCppClient.load(
-                model = model.copy(preferredContextTokens = profile.contextTokens),
-                threads = referenceThreads,
-                gpuLayers = 0,
-                enableThinking = profile.thinkingEnabled,
-                flashAttention = profile.flashAttention,
-                kvCacheType = profile.kvCacheType,
-                batchTokens = profile.batchTokens,
-                ubatchTokens = profile.ubatchTokens,
-            )
-            val cpuReference = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
-            val reference = cpuReference.optJSONArray("tokens").toIntList()
+            // The reference is also the throttle detector: a 24-token reference that takes
+            // minutes says the CPU is clock-limited even when Android's thermal status still
+            // reads "none" (it tracks skin temperature, not CPU banding). A slow reference is
+            // retried after a park instead of being used — numbers taken through it would be
+            // lies with timestamps, and the park lets the phone actually cool down.
+            var cpuReference: JSONObject? = null
+            while (cpuReference == null) {
+                container.llamaCppClient.load(
+                    model = model.copy(preferredContextTokens = profile.contextTokens),
+                    threads = referenceThreads,
+                    gpuLayers = 0,
+                    enableThinking = profile.thinkingEnabled,
+                    flashAttention = profile.flashAttention,
+                    kvCacheType = profile.kvCacheType,
+                    batchTokens = profile.batchTokens,
+                    ubatchTokens = profile.ubatchTokens,
+                )
+                val candidate = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                val millis = candidate.optLong("promptMillis", 0L) + candidate.optLong("decodeMillis", 0L)
+                if (millis <= MAX_REFERENCE_MILLIS || mutableState.value.cooldownOverride) {
+                    cpuReference = candidate
+                    break
+                }
+                android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
+                mutableState.update {
+                    it.copy(
+                        status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
+                        autoConfigure = it.autoConfigure?.copy(
+                            current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
+                        ),
+                    )
+                }
+                withContext(Dispatchers.Default) { delay(60_000) }
+            }
+            val cpuRef = cpuReference!!
+            val reference = cpuRef.optJSONArray("tokens").toIntList()
             check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
             val forced = reference.toIntArray()
             // The yardstick's own wall time scales the candidate deadlines: the fixed bounds
             // catch hangs on a fast device, but a thermally throttled phone can legitimately
             // need minutes for a decode the fixed probe window would misread as a hang.
-            val referenceMillis = cpuReference.optLong("promptMillis", 0L) +
-                cpuReference.optLong("decodeMillis", 0L)
+            val referenceMillis = cpuRef.optLong("promptMillis", 0L) +
+                cpuRef.optLong("decodeMillis", 0L)
             val probeDeadlineMillis = maxOf(PROBE_TIMEOUT_MILLIS, referenceMillis * 2 + 5_000L)
             val candidateDeadlineMillis = maxOf(CANDIDATE_TIMEOUT_MILLIS, referenceMillis * 4 + 10_000L)
             android.util.Log.d(
@@ -2476,6 +2643,8 @@ class MainViewModel(
                 "reference took ${referenceMillis}ms; probe deadline ${probeDeadlineMillis}ms, candidate ${candidateDeadlineMillis}ms",
             )
             val gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0
+            val planPhaseIndex = mutableState.value.autoConfigure?.plan
+                ?.indexOfFirst { phase -> phase.dimension == dimension } ?: -1
             val tried = mutableListOf<String>()
             val scored = mutableListOf<DimensionScore>()
             val timedOutCandidates = mutableSetOf<TuningCandidate>()
@@ -2497,9 +2666,7 @@ class MainViewModel(
                         status = "Measuring ${candidate.label} on ${backend.label}…",
                         autoConfigure = it.autoConfigure?.copy(
                             current = "Measuring ${candidate.label}…",
-                            measuringPlanPhase = it.autoConfigure.plan.indexOfFirst { phase ->
-                                phase.dimension == dimension
-                            }.takeIf { index -> index >= 0 },
+                            measuringPlanPhase = planPhaseIndex.takeIf { index -> index >= 0 },
                             measuringPlanCandidate = candidateIndex,
                         ),
                     )
@@ -2530,10 +2697,12 @@ class MainViewModel(
                             container.llamaCppClient.referenceDecode(PROBE_TOKENS)
                         }
                     }.onFailure { error ->
-                        android.util.Log.d(
-                            "BramTune",
-                            "probe ${candidate.label} error: ${error::class.simpleName}: ${error.message}",
-                        )
+                        if (error !is android.os.DeadObjectException) {
+                            android.util.Log.d(
+                                "BramTune",
+                                "probe ${candidate.label} error: ${error::class.simpleName}: ${error.message}",
+                            )
+                        }
                     }
                 }
                 val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
@@ -2547,6 +2716,7 @@ class MainViewModel(
                     runCatching { container.llamaCppClient.restartInferenceProcess() }
                     timedOutCandidates += candidate
                     tried += "${candidate.label} (timed out)"
+                    markPlanCandidateTimedOut(planPhaseIndex, candidateIndex)
                     mutableState.update {
                         it.copy(autoConfigure = it.autoConfigure?.copy(current = "${candidate.label} timed out"))
                     }
@@ -2576,10 +2746,12 @@ class MainViewModel(
                             )
                         }
                     }.onFailure { error ->
-                        android.util.Log.d(
-                            "BramTune",
-                            "measure ${candidate.label} error: ${error::class.simpleName}: ${error.message}",
-                        )
+                        if (error !is android.os.DeadObjectException) {
+                            android.util.Log.d(
+                                "BramTune",
+                                "measure ${candidate.label} error: ${error::class.simpleName}: ${error.message}",
+                            )
+                        }
                     }
                 }
                 val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
@@ -2595,6 +2767,7 @@ class MainViewModel(
                     // process itself has to go. Restart it, and the next load binds fresh.
                     runCatching { container.llamaCppClient.restartInferenceProcess() }
                     timedOutCandidates += candidate
+                    markPlanCandidateTimedOut(planPhaseIndex, candidateIndex)
                     mutableState.update {
                         it.copy(autoConfigure = it.autoConfigure?.copy(current = "${candidate.label} timed out"))
                     }
@@ -2648,7 +2821,7 @@ class MainViewModel(
             }
             val best = scored.minBy { it.totalMillis }
             val winner = best.candidate
-            val promptTokens = cpuReference.optInt("promptTokens", 0)
+            val promptTokens = cpuRef.optInt("promptTokens", 0)
             val promptRate = if (best.promptMillis > 0 && promptTokens > 0) {
                 promptTokens * 1000 / best.promptMillis
             } else {
@@ -4111,6 +4284,10 @@ internal fun remoteRuntimeId(endpointId: String): String = "$REMOTE_PREFIX$endpo
 
 /** Tokens compared between backends. Long enough to catch drift, short enough to stay quick. */
 private const val REFERENCE_TOKENS = 24
+// A 24-token reference decode that takes longer than this is a throttled CPU, not a healthy
+// measurement: on a cool phone it takes under a second, and even a warm one stays well under
+// 30s. Sweeps park and retry the reference instead of using a number taken through throttling.
+private const val MAX_REFERENCE_MILLIS = 30_000L
 // A broken backend kernel can hang a load or decode without ever reporting an error, so a
 // candidate measurement is bounded: 5 minutes is 30-60x the expected time for a phone-sized
 // model, which turns a hang into a recorded failure instead of a stall.

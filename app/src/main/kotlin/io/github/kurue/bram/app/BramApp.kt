@@ -2067,7 +2067,7 @@ private fun BoxScope.AutoConfigureOverlay(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     phase.candidates.forEachIndexed { candidateIndex, label ->
-                        val result: Any? = if (phase.isBackends) {
+                        val landedResult = if (phase.isBackends) {
                             progress.results.getOrNull(candidateIndex + 1)
                         } else {
                             progress.dimensions
@@ -2078,6 +2078,10 @@ private fun BoxScope.AutoConfigureOverlay(
                                 ?.results
                                 ?.firstOrNull { it.label == label }
                         }
+                        // Live row results (a timed-out abandonment flips the row immediately);
+                        // the landed note's results take precedence once they exist.
+                        val result: Any? = landedResult
+                            ?: if (!phase.isBackends) phase.results.getOrNull(candidateIndex) else null
                         val measuring = !progress.finished && when {
                             phase.isBackends -> progress.measuringIndex == candidateIndex
                             else -> progress.measuringPlanPhase == phaseIndex &&
