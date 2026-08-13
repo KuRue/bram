@@ -93,6 +93,19 @@ import kotlinx.coroutines.withContext
  */
 enum class AutoConfigurePhase { MEASURING, BATCH, TUNING, DONE }
 
+/**
+ * One phase of the auto-configure run, known before the first measurement: its candidate rows
+ * are listed from the start so the overlay can show every run up front and mark each row as it
+ * is measured, instead of the later phases appearing out of nowhere when they finish.
+ */
+data class TuningPlanPhase(
+    val title: String,
+    val candidates: List<String>,
+    val dimension: TuningDimension? = null,
+    val isBackends: Boolean = false,
+    val isBatch: Boolean = false,
+)
+
 data class AutoConfigureProgress(
     val profileId: String,
     val modelName: String,
@@ -120,6 +133,13 @@ data class AutoConfigureProgress(
      */
     val thermalStatus: String = "",
     val waitingForCooldown: Boolean = false,
+    /** Every phase and its candidate rows, fixed before the first measurement. */
+    val plan: List<TuningPlanPhase> = emptyList(),
+    /** The plan row being measured now: phase and candidate index, or null between phases. */
+    val measuringPlanPhase: Int? = null,
+    val measuringPlanCandidate: Int? = null,
+    /** When the run started; notes older than this belong to earlier sessions. */
+    val startedAtEpochMillis: Long = System.currentTimeMillis(),
 ) {
     val fraction: Float get() = if (total <= 0) 0f else (step.toFloat() / total).coerceIn(0f, 1f)
 }
@@ -1297,6 +1317,7 @@ class MainViewModel(
                         current = RuntimeBackend.CPU.label,
                         candidates = candidates.map { it.second.label },
                         results = listOf(reference),
+                        plan = autoConfigurePlan(profile, backends, candidates),
                     ),
                 )
             }
@@ -1468,6 +1489,8 @@ class MainViewModel(
                     autoConfigure = it.autoConfigure?.copy(
                         phase = AutoConfigurePhase.TUNING,
                         measuringIndex = null,
+                        measuringPlanPhase = null,
+                        measuringPlanCandidate = null,
                         current = "Tuning decode settings…",
                     ),
                 )
@@ -1475,13 +1498,7 @@ class MainViewModel(
             val tuningBackend = resolveLoadBackend(
                 mutableState.value.profiles.firstOrNull { it.id == profile.id }?.backendId.orEmpty(),
             )
-            val dimensions = buildList {
-                add(TuningDimension.THREADS)
-                add(TuningDimension.CPU_MASK)
-                add(TuningDimension.POLL)
-                add(TuningDimension.LOAD_MODE)
-                if (tuningBackend == RuntimeBackend.HEXAGON) add(TuningDimension.HEX_FLAGS)
-            }
+            val dimensions = autoConfigureDimensions(tuningBackend)
             for (dimension in dimensions) {
                 runCatching { runDimensionTune(profile.id, dimension, fromAutoConfigure = true) }
                 val landed = mutableState.value.profiles.firstOrNull { it.id == profile.id }?.tuning
@@ -1500,6 +1517,8 @@ class MainViewModel(
                     autoConfigure = it.autoConfigure?.copy(
                         phase = AutoConfigurePhase.BATCH,
                         measuringIndex = null,
+                        measuringPlanPhase = null,
+                        measuringPlanCandidate = null,
                         current = "Tuning prompt batch…",
                     ),
                 )
@@ -1514,6 +1533,8 @@ class MainViewModel(
                         finished = true,
                         phase = AutoConfigurePhase.DONE,
                         waitingForCooldown = false,
+                        measuringPlanPhase = null,
+                        measuringPlanCandidate = null,
                         dimensions = tuned?.tuning.orEmpty().sortedByDescending { note -> note.measuredAtEpochMillis },
                         current = buildString {
                             append(note)
@@ -1536,6 +1557,54 @@ class MainViewModel(
     /** Closes the auto-configure dialog. The run itself has already finished by then. */
     fun dismissAutoConfigure() {
         mutableState.update { it.copy(autoConfigure = null, cooldownOverride = false) }
+    }
+
+    /** The decode-shaped dimensions auto-configure runs, in dependency order. */
+    private fun autoConfigureDimensions(backend: RuntimeBackend): List<TuningDimension> = buildList {
+        add(TuningDimension.THREADS)
+        add(TuningDimension.CPU_MASK)
+        add(TuningDimension.POLL)
+        add(TuningDimension.LOAD_MODE)
+        if (backend == RuntimeBackend.HEXAGON) add(TuningDimension.HEX_FLAGS)
+    }
+
+    /**
+     * The whole run, laid out before the first measurement: backends, every decode dimension with
+     * its candidate labels, and the batch — so the overlay lists every row from the start and
+     * marks each one as it runs, instead of later phases appearing only when they finish.
+     */
+    private suspend fun autoConfigurePlan(
+        profile: ModelProfile,
+        backends: List<RuntimeBackend>,
+        backendCandidates: List<Pair<RuntimeBackend, AcceleratorTarget>>,
+    ): List<TuningPlanPhase> {
+        val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val clusters = CpuTopology.clusters()
+        val backendPhase = TuningPlanPhase(
+            title = "Backends",
+            candidates = backendCandidates.map { it.second.label },
+            isBackends = true,
+        )
+        val dimensions = autoConfigureDimensions(
+            resolveLoadBackend(profile.backendId),
+        ).map { dimension ->
+            TuningPlanPhase(
+                title = dimension.label,
+                candidates = dimensionCandidates(dimension, profile, visibleCores, clusters)
+                    .map { it.label },
+                dimension = dimension,
+            )
+        }
+        val batchPhase = TuningPlanPhase(
+            title = TuningDimension.BATCH.label,
+            candidates = BATCH_CANDIDATES.map { (batch, ubatch) -> "$batch/$ubatch" },
+            isBatch = true,
+        )
+        return buildList {
+            add(backendPhase)
+            addAll(dimensions)
+            add(batchPhase)
+        }
     }
 
     private fun today(): String = java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault())
@@ -1972,21 +2041,20 @@ class MainViewModel(
                 // The default (512/128) is in the list so there is always a baseline to fall back
                 // to, and the wide end covers the Hexagon reference configuration, which runs
                 // ubatch 1024 — the backend batches prompt work in chunks that size.
-                val candidates = listOf(
-                    256 to 128,
-                    512 to 128,
-                    512 to 256,
-                    1024 to 128,
-                    1024 to 256,
-                    1024 to 512,
-                )
+                val candidates = BATCH_CANDIDATES
                 val scored = mutableListOf<BatchScore>()
-                for ((batch, ubatch) in candidates) {
+                for ((batchIndex, pair) in candidates.withIndex()) {
+                    val (batch, ubatch) = pair
                     waitForCooldown()
                     mutableState.update {
                         it.copy(
                             status = "Measuring batch $batch/$ubatch on ${backend.label}…",
-                            autoConfigure = it.autoConfigure?.copy(current = "Measuring batch $batch/$ubatch…"),
+                            autoConfigure = it.autoConfigure?.copy(
+                                current = "Measuring batch $batch/$ubatch…",
+                                measuringPlanPhase = it.autoConfigure.plan.indexOfFirst { phase -> phase.isBatch }
+                                    .takeIf { index -> index >= 0 },
+                                measuringPlanCandidate = batchIndex,
+                            ),
                         )
                     }
                     // The same cheap probe as the dimension sweeps: a batch that hangs is
@@ -2029,6 +2097,9 @@ class MainViewModel(
                         android.util.Log.d("BramTune", "batch $batch/$ubatch hung in probe; abandoned")
                         runCatching { container.llamaCppClient.restartInferenceProcess() }
                         tried += "$batch/$ubatch (timed out)"
+                        mutableState.update {
+                            it.copy(autoConfigure = it.autoConfigure?.copy(current = "$batch/$ubatch timed out"))
+                        }
                         continue
                     }
                     val batchScore = AtomicReference<BatchScore?>()
@@ -2087,6 +2158,9 @@ class MainViewModel(
                         android.util.Log.d("BramTune", "batch $batch/$ubatch TIMED OUT")
                         runCatching { container.llamaCppClient.restartInferenceProcess() }
                         tried += "$batch/$ubatch (timed out)"
+                        mutableState.update {
+                            it.copy(autoConfigure = it.autoConfigure?.copy(current = "$batch/$ubatch timed out"))
+                        }
                         continue
                     }
                     batchScore.get()?.let { scored += it }
@@ -2162,7 +2236,11 @@ class MainViewModel(
                 it.copy(
                     batchTuneProfileId = null,
                     status = null,
-                    autoConfigure = it.autoConfigure?.copy(waitingForCooldown = false),
+                    autoConfigure = it.autoConfigure?.copy(
+                        waitingForCooldown = false,
+                        measuringPlanPhase = null,
+                        measuringPlanCandidate = null,
+                    ),
                 )
             }
             refreshDeviceProfile()
@@ -2402,7 +2480,7 @@ class MainViewModel(
             val scored = mutableListOf<DimensionScore>()
             val timedOutCandidates = mutableSetOf<TuningCandidate>()
             var agreed = 0
-            for (candidate in candidates) {
+            for ((candidateIndex, candidate) in candidates.withIndex()) {
                 waitForCooldown()
                 val tuned = candidate.apply(profile)
                 val candidateThreads = if (tuned.threads > 0) {
@@ -2417,7 +2495,13 @@ class MainViewModel(
                 mutableState.update {
                     it.copy(
                         status = "Measuring ${candidate.label} on ${backend.label}…",
-                        autoConfigure = it.autoConfigure?.copy(current = "Measuring ${candidate.label}…"),
+                        autoConfigure = it.autoConfigure?.copy(
+                            current = "Measuring ${candidate.label}…",
+                            measuringPlanPhase = it.autoConfigure.plan.indexOfFirst { phase ->
+                                phase.dimension == dimension
+                            }.takeIf { index -> index >= 0 },
+                            measuringPlanCandidate = candidateIndex,
+                        ),
                     )
                 }
                 // A cheap probe first: the candidate's load plus a handful of tokens. A config
@@ -2463,6 +2547,9 @@ class MainViewModel(
                     runCatching { container.llamaCppClient.restartInferenceProcess() }
                     timedOutCandidates += candidate
                     tried += "${candidate.label} (timed out)"
+                    mutableState.update {
+                        it.copy(autoConfigure = it.autoConfigure?.copy(current = "${candidate.label} timed out"))
+                    }
                     continue
                 }
                 // The full measurement: a broken backend kernel can hang a load or decode without
@@ -2508,6 +2595,9 @@ class MainViewModel(
                     // process itself has to go. Restart it, and the next load binds fresh.
                     runCatching { container.llamaCppClient.restartInferenceProcess() }
                     timedOutCandidates += candidate
+                    mutableState.update {
+                        it.copy(autoConfigure = it.autoConfigure?.copy(current = "${candidate.label} timed out"))
+                    }
                     null
                 } else {
                     measured.get()
@@ -2515,10 +2605,46 @@ class MainViewModel(
                 tried += if (agreedNow == null) "${candidate.label} (timed out)" else candidate.label
                 if (agreedNow == true) agreed++
             }
-            check(scored.isNotEmpty()) {
-                "None of the ${dimension.label.lowercase()} configurations met the " +
-                    "${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% agreement bar " +
-                    "against the CPU reference (${tried.joinToString(", ")} all failed)"
+            if (scored.isEmpty()) {
+                // Nothing met the bar is a recorded fact, not an error: the note carries
+                // per-candidate results so the overlay's up-front rows can say which ones timed
+                // out and which simply did not agree, and the profile stays on the default.
+                val failureResults = candidates.map { candidate ->
+                    TuneCandidateResult(
+                        label = candidate.label,
+                        promptTokPerSec = 0.0,
+                        decodeTokPerSec = 0.0,
+                        agreed = false,
+                        timedOut = candidate in timedOutCandidates,
+                    )
+                }
+                val failedNote = DimensionTuneNote(
+                    dimension = dimension,
+                    chosen = "Default",
+                    note = "${dimension.label} tuning failed (None of the ${dimension.label.lowercase()} " +
+                        "configurations met the ${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% " +
+                        "agreement bar against the CPU reference " +
+                        "(${tried.joinToString(", ")} all failed)); left at the device default.",
+                    measuredAtEpochMillis = System.currentTimeMillis(),
+                    results = failureResults,
+                )
+                container.modelProfileStore.save(
+                    profile.copy(
+                        tuning = listOf(failedNote) + profile.tuning.filterNot { it.dimension == dimension },
+                        measuredFingerprint = mutableState.value.measurementFingerprint,
+                    ),
+                )
+                syncProfiles(mutableState.value.localModels, profile.id)
+                mutableState.update {
+                    it.copy(
+                        error = "None of the ${dimension.label.lowercase()} configurations met the " +
+                            "agreement bar; ${dimension.label} stays at the device default.",
+                        autoConfigure = it.autoConfigure?.copy(
+                            current = "${dimension.label}: every candidate timed out or disagreed",
+                        ),
+                    )
+                }
+                return@runCatching
             }
             val best = scored.minBy { it.totalMillis }
             val winner = best.candidate
@@ -2614,7 +2740,11 @@ class MainViewModel(
                 tuningProfileId = null,
                 tuningDimension = null,
                 status = null,
-                autoConfigure = it.autoConfigure?.copy(waitingForCooldown = false),
+                autoConfigure = it.autoConfigure?.copy(
+                    waitingForCooldown = false,
+                    measuringPlanPhase = null,
+                    measuringPlanCandidate = null,
+                ),
             )
         }
     }
@@ -3985,6 +4115,18 @@ private const val REFERENCE_TOKENS = 24
 // candidate measurement is bounded: 5 minutes is 30-60x the expected time for a phone-sized
 // model, which turns a hang into a recorded failure instead of a stall.
 private const val CANDIDATE_TIMEOUT_MILLIS = 5 * 60 * 1_000L
+// The prompt batches the batch sweep compares. The default (512/128) is in the list so there is
+// always a baseline to fall back to, and the wide end covers the Hexagon reference
+// configuration, which runs ubatch 1024. Shared with the overlay's up-front plan.
+private val BATCH_CANDIDATES = listOf(
+    256 to 128,
+    512 to 128,
+    512 to 256,
+    1024 to 128,
+    1024 to 256,
+    1024 to 512,
+)
+
 // Before the full measurement, every candidate runs a cheap probe — its load, a full
 // teacher-forced replay, and a handful of decode tokens — so a configuration that hangs is
 // abandoned faster than the full measurement timeout. The floor is generous on purpose: a
@@ -3992,7 +4134,7 @@ private const val CANDIDATE_TIMEOUT_MILLIS = 5 * 60 * 1_000L
 // ~45s for the same probe, and calling that a hang poisons the sweep; the real hang guard is
 // the measurement timeout, and the probe only shortens the wait for configurations that stop
 // responding entirely.
-private const val PROBE_TIMEOUT_MILLIS = 2 * 60 * 1_000L
+private const val PROBE_TIMEOUT_MILLIS = 90_000L
 private const val PROBE_TOKENS = 4
 // Sweeps measure the device itself, so they refuse to run through throttling or memory pressure:
 // a number taken while throttling or swapping is a lie with a timestamp.

@@ -2019,7 +2019,10 @@ private fun BoxScope.AutoConfigureOverlay(
             tint = Glass.panelTint,
         ) {
             Column(
-                Modifier.padding(16.dp),
+                Modifier
+                    .padding(16.dp)
+                    .heightIn(max = 720.dp)
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
@@ -2052,57 +2055,56 @@ private fun BoxScope.AutoConfigureOverlay(
                         state = state,
                     )
                 }
-                progress.candidates.forEachIndexed { index, label ->
-                    val result = progress.results.getOrNull(index + 1)
-                    // measuringIndex is the single source of truth for "this row is the one running
-                    // now"; matching against `current` would flicker, because `current` carries the
-                    // measurement callback's prose mid-run.
-                    val measuring = !progress.finished && progress.measuringIndex == index
-                    val state = when {
-                        measuring -> RunState.MEASURING
-                        result == null -> RunState.WAITING
-                        !result.agrees -> RunState.FAILED
-                        result.backendId == winnerBackendId -> RunState.WINNER
-                        else -> RunState.LOSER
-                    }
-                    RunRow(
-                        label = label,
-                        value = when {
-                            measuring -> "Measuring…"
-                            result == null -> "Waiting"
-                            !result.agrees -> "FAIL"
-                            else -> "%.0f tok/s".format(result.promptTokPerSec)
-                        },
-                        state = state,
-                    )
-                }
 
-                // Each tuning sweep is a small header with its candidates as rows.
-                progress.dimensions.asReversed().forEach { note ->
-                    if (note.results.isNotEmpty()) {
-                        HorizontalDivider()
-                        Text(
-                            note.dimension.label,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        note.results.forEach { result ->
-                            val state = when {
-                                result.winner -> RunState.WINNER
-                                result.timedOut -> RunState.FAILED
-                                result.agreed -> RunState.LOSER
-                                else -> RunState.LOSER
-                            }
-                            RunRow(
-                                label = result.label,
-                                value = when {
-                                    result.timedOut -> "timed out"
-                                    !result.agreed -> "no match"
-                                    else -> "%.0f tok/s".format(result.promptTokPerSec)
-                                },
-                                state = state,
-                            )
+                // The whole run is laid out up front: every phase with every candidate row, each
+                // one marked as it is measured, so Load mode and Batch are visible from the start
+                // instead of appearing only when they finish.
+                progress.plan.forEachIndexed { phaseIndex, phase ->
+                    HorizontalDivider()
+                    Text(
+                        phase.title,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    phase.candidates.forEachIndexed { candidateIndex, label ->
+                        val result: Any? = if (phase.isBackends) {
+                            progress.results.getOrNull(candidateIndex + 1)
+                        } else {
+                            progress.dimensions
+                                .firstOrNull { note ->
+                                    note.dimension == phase.dimension &&
+                                        note.measuredAtEpochMillis >= progress.startedAtEpochMillis
+                                }
+                                ?.results
+                                ?.firstOrNull { it.label == label }
                         }
+                        val measuring = !progress.finished && when {
+                            phase.isBackends -> progress.measuringIndex == candidateIndex
+                            else -> progress.measuringPlanPhase == phaseIndex &&
+                                progress.measuringPlanCandidate == candidateIndex
+                        }
+                        val state = when {
+                            measuring -> RunState.MEASURING
+                            result == null -> RunState.WAITING
+                            result is BackendMeasurement && !result.agrees -> RunState.FAILED
+                            result is BackendMeasurement && result.backendId == winnerBackendId -> RunState.WINNER
+                            result is TuneCandidateResult && (result.timedOut || !result.agreed) -> RunState.FAILED
+                            result is TuneCandidateResult && result.winner -> RunState.WINNER
+                            else -> RunState.LOSER
+                        }
+                        RunRow(
+                            label = label,
+                            value = when {
+                                measuring -> "Measuring…"
+                                result == null -> "Waiting"
+                                result is BackendMeasurement && !result.agrees -> "FAIL"
+                                result is TuneCandidateResult && result.timedOut -> "timed out"
+                                result is TuneCandidateResult && !result.agreed -> "no match"
+                                result is BackendMeasurement -> "%.0f tok/s".format(result.promptTokPerSec)
+                                else -> "%.0f tok/s".format((result as TuneCandidateResult).promptTokPerSec)
+                            },
+                            state = state,
+                        )
                     }
                 }
 
