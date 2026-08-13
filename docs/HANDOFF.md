@@ -20,7 +20,7 @@ build tree is a synced copy of the same working tree.
 ## Landed since the previous refresh
 
 - **Milestone 19 — device-adaptive tuning, KleidiAI CPU kernels, and measurement fingerprints**
-  (working tree, uncommitted at last write). Full design in `docs/DEVICE_ADAPTATION.md`, research
+  (committed `8811fd1`, pushed). Full design in `docs/DEVICE_ADAPTATION.md`, research
   in `docs/PERFORMANCE_OPTIONS.md`. The runtime settings the pin exposes but Bram never used
   (threads, cpu mask, poll, load mode, `GGML_HEXAGON_*` flags) became profile fields, JNI
   threadpool plumbing, and teacher-forced tuning dimensions: every candidate must reproduce the
@@ -39,6 +39,22 @@ build tree is a synced copy of the same working tree.
   (a hung HTP kernel now unwedges the process and is recorded), the async `reloadProfiles` race
   that let tuning phases overwrite each other's writes, and a stuck-state after auto-configure
   that blocked all later tunes.
+- **Visual tuning results** (committed `738aa88`, pushed) — measurements carry absolute
+  prompt/decode tok/s and every sweep records per-candidate results; winner selection ranks by
+  absolute throughput so the chart and the choice always agree. A follow-up pass (`b7c3deb`)
+  condensed the profile card and the auto-configure overlay to compact run rows — name and
+  tok/s per run, winner marked, no bars — with only Done dismissing the overlay, and the card
+  keeping just the winning config's tok/s. The fingerprint is also computed at startup (it used
+  to exist only inside sweeps, so every measured profile falsely warned on cold start).
+- **Import compatibility and on-device quant conversion** (committed `738aa88`, pushed) —
+  `GgufMetadataReader` reads the bounded tensor table (per-tensor quant counts), the card shows
+  a Compatibility chip row (CPU/GPU/NPU share of a file's weight tensors), and a profile whose
+  file the NPU cannot fully take offers Convert to Q4_0/Q8_0 via `llama_model_quantize` in the
+  isolated process, then registers the result like an import and auto-configures it. Validated
+  on the emulator end to end (a Q4_0 → Q8_0 conversion produced a correct 763.78 MiB file and a
+  second catalog record); the "stalled" auto-configure after conversion turned out to be a
+  candidate hang that the timeout + unwedge handled as designed, with the overlay showing the
+  timed-out run in red. Phone path still unvalidated (phone disconnected).
 - **`milestone-8b-profile-first` (#17)** — profile-first UI, merged.
 - **`milestone-8c-opencl` (#18)** — OpenCL for Adreno, validated: 96% (23/24) teacher-forced
   agreement, 1.11x vs CPU on Qwen3.5-Q4_0 on the S25 Ultra. The load abort was `ggml_backend_sched_new`
@@ -346,15 +362,19 @@ addresses.
 
 ## Next
 
-0. **Phase 3 — import compatibility and quantization** (`docs/DEVICE_ADAPTATION.md`): extend
-   `GgufMetadataReader` with per-tensor quant counts, a backend×quant compatibility report at
-   import ("this Q4_K_M can only fully offload to the GPU"), and on-device quant conversion
-   via `llama_model_quantize` with a foreground-service progress path. Also worth revisiting:
-   the KleidiAI SVE kernels (same object-library mechanism) and the deferred power hints.
-1. A larger tool-capable model for agentic use. The web tools and approval gate
+0. **Phone validation** — everything since the KleidiAI run (visual tuning results, Phase 3
+   import compatibility and quant conversion) has emulator proof only. When the S25 Ultra
+   reconnects: one auto-configure and one conversion on the LFM2.5 profile closes the gap.
+1. **Phase 4 — multi-vendor runtime coverage** (`docs/DEVICE_ADAPTATION.md`): first slice is
+   unblocking LiteRT-LM via the documented callback workaround (litertlm-android 0.14.0's
+   `SendChannel.close$default` crash), then the runtime-neutral tuning seam. Also worth
+   revisiting: the KleidiAI SVE kernels (same object-library mechanism), the deferred power
+   hints, and moving quant conversion off the service's single executor (chat waits while it
+   runs).
+2. A larger tool-capable model for agentic use. The web tools and approval gate
    work; LFM2.5-2.6B cannot chain tools reliably. Add one through the Models
    screen's import picker once it is on the device.
-2. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
+3. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
    the validated GPU path, so chasing Vulkan is low priority unless OpenCL's
    1.11x needs replacing.
 

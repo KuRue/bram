@@ -1445,7 +1445,7 @@ private fun ProfileCard(
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (profile.measurements.isNotEmpty()) {
-                        BackendBars(profile.measurements, Modifier.fillMaxWidth())
+                        WinningRun(profile.measurements, Modifier.fillMaxWidth())
                     } else {
                         profile.autoConfiguredNote.takeIf(String::isNotBlank)?.let { note ->
                             Text(
@@ -1703,43 +1703,34 @@ private fun ProfileCard(
                         )
                     }
                     profile.tuning.firstOrNull { it.dimension == TuningDimension.BATCH }
-                        ?.takeIf { it.results.isNotEmpty() }?.let { batchNote ->
-                            CandidateChart(
-                                dimension = TuningDimension.BATCH,
-                                chosen = batchNote.chosen,
-                                results = batchNote.results,
-                            )
-                        } ?: profile.batchTuneNote.takeIf(String::isNotBlank)?.let { note ->
+                        ?.chosen?.takeIf(String::isNotBlank)?.let { batch ->
                             Text(
-                                note,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                "Batch $batch",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold,
                             )
                         }
 
                     // The decode-shaped dimensions follow the batch pattern: a measured choice is a
-                    // chart beside a Tune button, and Default is always one tap away. Each one only
+                    // label beside a Tune button, and Default is always one tap away. Each one only
                     // matters on the hardware that exposes it, so the Hexagon row appears only when
                     // this profile loads onto the NPU.
                     SectionLabel("Decode tuning")
                     TuningDimensionRow(
                         label = "Threads",
-                        dimension = TuningDimension.THREADS,
                         isDefault = profile.threads == 0,
                         chosen = profile.threads.takeIf { it > 0 }?.let { "$it threads" },
                         measuring = tuningDimension == TuningDimension.THREADS,
-                        results = profile.tuning.firstOrNull { it.dimension == TuningDimension.THREADS }?.results,
                         enabled = !busy,
                         onDefault = { onUpdateProfile(profile.copy(threads = 0)) },
                         onTune = { onTuneDimension(TuningDimension.THREADS) },
                     )
                     TuningDimensionRow(
                         label = "CPU mask",
-                        dimension = TuningDimension.CPU_MASK,
                         isDefault = profile.cpuMask.isEmpty(),
                         chosen = profile.cpuMask.takeIf(String::isNotEmpty)?.let { "0x$it" },
                         measuring = tuningDimension == TuningDimension.CPU_MASK,
-                        results = profile.tuning.firstOrNull { it.dimension == TuningDimension.CPU_MASK }?.results,
                         enabled = !busy,
                         onDefault = {
                             onUpdateProfile(profile.copy(cpuMask = "", cpuStrict = false))
@@ -1748,11 +1739,9 @@ private fun ProfileCard(
                     )
                     TuningDimensionRow(
                         label = "Poll",
-                        dimension = TuningDimension.POLL,
                         isDefault = profile.poll < 0,
                         chosen = profile.poll.takeIf { it >= 0 }?.let { "$it" },
                         measuring = tuningDimension == TuningDimension.POLL,
-                        results = profile.tuning.firstOrNull { it.dimension == TuningDimension.POLL }?.results,
                         enabled = !busy,
                         onDefault = { onUpdateProfile(profile.copy(poll = -1)) },
                         onTune = { onTuneDimension(TuningDimension.POLL) },
@@ -1779,22 +1768,12 @@ private fun ProfileCard(
                             )
                         }
                     }
-                    profile.tuning.firstOrNull { it.dimension == TuningDimension.LOAD_MODE }
-                        ?.takeIf { it.results.isNotEmpty() }?.let { loadNote ->
-                            CandidateChart(
-                                dimension = TuningDimension.LOAD_MODE,
-                                chosen = loadNote.chosen,
-                                results = loadNote.results,
-                            )
-                        }
                     if (backend == RuntimeBackend.HEXAGON) {
                         TuningDimensionRow(
                             label = "Hexagon",
-                            dimension = TuningDimension.HEX_FLAGS,
                             isDefault = profile.hexFlags.isDefault,
                             chosen = if (profile.hexFlags.isDefault) null else "HMX + host buffers",
                             measuring = tuningDimension == TuningDimension.HEX_FLAGS,
-                            results = profile.tuning.firstOrNull { it.dimension == TuningDimension.HEX_FLAGS }?.results,
                             enabled = !busy,
                             onDefault = { onUpdateProfile(profile.copy(hexFlags = HexFlags())) },
                             onTune = { onTuneDimension(TuningDimension.HEX_FLAGS) },
@@ -1942,191 +1921,65 @@ private fun CompatChip(label: String, sharePercent: Int, container: Color) {
     }
 }
 
-/** One thin horizontal bar of a [fraction] of the row width, over a track of the same width. */
+/** One measured run in a sweep: name on the left, tok/s on the right, winner marked. */
 @Composable
-private fun ThroughputBar(fraction: Double, color: Color, height: Dp, modifier: Modifier = Modifier) {    val track = MaterialTheme.colorScheme.surfaceContainerHighest
-    Box(
-        modifier
-            .fillMaxWidth()
-            .height(height)
-            .clip(RoundedCornerShape(percent = 50))
-            .background(track),
-    ) {
-        if (fraction > 0.0) {
-            Box(
-                Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(fraction.coerceIn(0.0, 1.0).toFloat())
-                    .clip(RoundedCornerShape(percent = 50))
-                    .background(color),
-            )
-        }
-    }
-}
-
-/** The prompt/decode throughput of one measurement as two bars and the numbers, right-aligned. */
-@Composable
-private fun ThroughputReading(
-    promptTokPerSec: Double,
-    decodeTokPerSec: Double,
-    maxPrompt: Double,
-    maxDecode: Double,
-    tint: Color,
+private fun RunRow(
+    label: String,
+    value: String,
+    state: RunState,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        ThroughputBar(promptTokPerSec / maxPrompt, tint.copy(alpha = 0.9f), 8.dp)
-        ThroughputBar(decodeTokPerSec / maxDecode, tint.copy(alpha = 0.4f), 4.dp)
+    val (tint, weight) = when (state) {
+        RunState.WINNER -> MaterialTheme.colorScheme.primary to FontWeight.SemiBold
+        RunState.MEASURING -> MaterialTheme.colorScheme.primary to FontWeight.SemiBold
+        RunState.FAILED -> MaterialTheme.colorScheme.error to FontWeight.SemiBold
+        RunState.WAITING -> MaterialTheme.colorScheme.onSurfaceVariant to FontWeight.Normal
+        RunState.REFERENCE -> MaterialTheme.colorScheme.onSurfaceVariant to FontWeight.Normal
+        RunState.LOSER -> MaterialTheme.colorScheme.onSurfaceVariant to FontWeight.Normal
+    }
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         Text(
-            "%.0f / %.0f tok/s".format(promptTokPerSec, decodeTokPerSec),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-/** One processor's measured throughput: name, bars, and the agreement that lets speed count. */
-@Composable
-private fun BackendResultRow(
-    measurement: BackendMeasurement?,
-    measuring: Boolean,
-    maxPrompt: Double,
-    maxDecode: Double,
-    modifier: Modifier = Modifier,
-) {
-    val failed = measurement != null && !measurement.agrees && !measurement.isReference
-    val tint = when {
-        measuring -> MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
-        failed -> MaterialTheme.colorScheme.error
-        measurement?.isReference == true -> MaterialTheme.colorScheme.onSurfaceVariant
-        else -> MaterialTheme.colorScheme.primary
-    }
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                measurement?.label ?: "…",
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.weight(1f),
-            )
-            when {
-                measuring -> Text(
-                    "Measuring…",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = tint,
-                )
-                measurement == null -> Text(
-                    "Waiting",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                failed -> Text(
-                    "FAIL",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = tint,
-                )
-                measurement.isReference -> Text(
-                    "reference",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                else -> Text(
-                    "✓ ${(measurement.agreement * 100).toInt()}%",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = tint,
-                )
-            }
-        }
-        if (measurement != null && !measuring) {
-            ThroughputReading(
-                promptTokPerSec = measurement.promptTokPerSec,
-                decodeTokPerSec = measurement.decodeTokPerSec,
-                maxPrompt = maxPrompt,
-                maxDecode = maxDecode,
-                tint = tint,
-                modifier = Modifier.padding(start = 14.dp),
-            )
-        }
-    }
-}
-
-/** The backends of one profile as a comparison of measured throughput. */
-@Composable
-private fun BackendBars(measurements: List<BackendMeasurement>, modifier: Modifier = Modifier) {
-    if (measurements.isEmpty()) return
-    val maxPrompt = maxOf(1.0, measurements.maxOfOrNull { it.promptTokPerSec } ?: 1.0)
-    val maxDecode = maxOf(1.0, measurements.maxOfOrNull { it.decodeTokPerSec } ?: 1.0)
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        measurements.forEach { measurement ->
-            BackendResultRow(
-                measurement = measurement,
-                measuring = false,
-                maxPrompt = maxPrompt,
-                maxDecode = maxDecode,
-            )
-        }
-    }
-}
-
-/** One tuning sweep's candidates as a comparison of measured throughput. */
-@Composable
-private fun CandidateChart(
-    dimension: TuningDimension,
-    chosen: String?,
-    results: List<TuneCandidateResult>,
-    modifier: Modifier = Modifier,
-) {
-    if (results.isEmpty()) return
-    val maxPrompt = maxOf(1.0, results.maxOfOrNull { it.promptTokPerSec } ?: 1.0)
-    val maxDecode = maxOf(1.0, results.maxOfOrNull { it.decodeTokPerSec } ?: 1.0)
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            dimension.label,
+            label,
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+            color = tint,
+            fontWeight = weight,
         )
-        chosen?.let {
-            Text(
-                "$it wins",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.SemiBold,
+        Text(
+            if (state == RunState.WINNER) "✓ $value" else value,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = weight,
+            color = tint,
+        )
+    }
+}
+
+enum class RunState { WINNER, LOSER, MEASURING, WAITING, FAILED, REFERENCE }
+
+/** The winning backend's throughput in one line, for the profile card. */
+@Composable
+private fun WinningRun(measurements: List<BackendMeasurement>, modifier: Modifier = Modifier) {
+    val winner = measurements
+        .filter { it.agrees && !it.isReference }
+        .maxByOrNull { it.promptTokPerSec }
+    if (winner == null) {
+        val reference = measurements.firstOrNull { it.isReference }
+        if (reference != null) {
+            RunRow(
+                label = "CPU",
+                value = "%.0f tok/s".format(reference.promptTokPerSec),
+                state = RunState.WINNER,
+                modifier = modifier,
             )
         }
-        results.forEach { result ->
-            val tint = when {
-                result.timedOut -> MaterialTheme.colorScheme.error
-                result.winner -> MaterialTheme.colorScheme.primary
-                result.agreed -> MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
-                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    result.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.width(120.dp),
-                    color = tint,
-                    fontWeight = if (result.winner) FontWeight.SemiBold else FontWeight.Normal,
-                )
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    ThroughputBar(result.promptTokPerSec / maxPrompt, tint, 6.dp)
-                    ThroughputBar(result.decodeTokPerSec / maxDecode, tint.copy(alpha = 0.4f), 3.dp)
-                }
-                Text(
-                    when {
-                        result.timedOut -> "timed out"
-                        !result.agreed -> "no match"
-                        else -> "%.0f".format(result.promptTokPerSec)
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.width(64.dp),
-                    textAlign = TextAlign.End,
-                )
-            }
-        }
+        return
     }
+    RunRow(
+        label = winner.label,
+        value = "%.0f tok/s".format(winner.promptTokPerSec),
+        state = RunState.WINNER,
+        modifier = modifier,
+    )
 }
 
 /**
@@ -2134,18 +1987,18 @@ private fun CandidateChart(
  *
  * An overlay in the app tree rather than a Dialog window, because this takes minutes and replaces
  * every setting underneath it — a person needs to see that something is happening to it. Every
- * processor gets a row of measured throughput that fills in as its measurement lands, and every
- * tuning sweep lands as a chart of its candidates, so the whole run reads as bars rather than
- * sentences.
+ * measured run is one compact row — name and tok/s — with the winner marked, so the whole run
+ * reads as a ledger of numbers rather than sentences or charts.
  *
  * It is drawn here rather than in its own window for the same reason the panels and drawer are: a
  * separate window has nothing of the app behind it to sample, so it can never be frosted. Inside
- * the tree it blurs the recorded backdrop like any other panel.
+ * the tree it blurs the recorded backdrop like any other panel. Only Done dismisses it; tapping
+ * anywhere else does nothing.
  */
 @Composable
 private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDismiss: () -> Unit) {
     Box(Modifier.matchParentSize().zIndex(10f)) {
-        Scrim(onDismiss = { if (progress.finished) onDismiss() })
+        Scrim(onDismiss = {})
         GlassSurface(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -2156,8 +2009,8 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
             tint = Glass.panelTint,
         ) {
             Column(
-                Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
                     if (progress.finished) "Configured" else "Auto-configure",
@@ -2166,53 +2019,77 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
                 )
                 Text(
                     progress.modelName,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 HorizontalDivider()
 
-                SectionLabel("Processors")
-                val maxPrompt = maxOf(1.0, progress.results.maxOfOrNull { it.promptTokPerSec } ?: 1.0)
-                val maxDecode = maxOf(1.0, progress.results.maxOfOrNull { it.decodeTokPerSec } ?: 1.0)
-                // The CPU is the reference the others are measured against, so it is a row like
-                // every candidate rather than a footnote to them.
-                BackendResultRow(
-                    measurement = progress.results.firstOrNull { it.isReference },
-                    measuring = false,
-                    maxPrompt = maxPrompt,
-                    maxDecode = maxDecode,
-                )
+                val winnerId = progress.results
+                    .filter { it.agrees && !it.isReference }
+                    .maxByOrNull { it.promptTokPerSec }?.backendId
+                val reference = progress.results.firstOrNull { it.isReference }
+                reference?.let {
+                    RunRow(
+                        label = "CPU",
+                        value = "%.0f tok/s".format(it.promptTokPerSec),
+                        state = RunState.REFERENCE,
+                    )
+                }
                 progress.candidates.forEachIndexed { index, label ->
                     val result = progress.results.getOrNull(index + 1)
                     // measuringIndex is the single source of truth for "this row is the one running
                     // now"; matching against `current` would flicker, because `current` carries the
                     // measurement callback's prose mid-run.
                     val measuring = !progress.finished && progress.measuringIndex == index
-                    BackendResultRow(
-                        measurement = result,
-                        measuring = measuring,
-                        maxPrompt = maxPrompt,
-                        maxDecode = maxDecode,
+                    val state = when {
+                        measuring -> RunState.MEASURING
+                        result == null -> RunState.WAITING
+                        !result.agrees -> RunState.FAILED
+                        result.backendId == winnerId -> RunState.WINNER
+                        else -> RunState.LOSER
+                    }
+                    RunRow(
+                        label = label,
+                        value = when {
+                            measuring -> "Measuring…"
+                            result == null -> "Waiting"
+                            !result.agrees -> "FAIL"
+                            else -> "%.0f tok/s".format(result.promptTokPerSec)
+                        },
+                        state = state,
                     )
                 }
 
-                if (progress.dimensions.isNotEmpty() || progress.phase != AutoConfigurePhase.MEASURING) {
-                    HorizontalDivider()
-                    SectionLabel("Tuning")
-                    progress.dimensions.asReversed().forEach { note ->
-                        CandidateChart(
-                            dimension = note.dimension,
-                            chosen = note.chosen,
-                            results = note.results,
+                // Each tuning sweep is a small header with its candidates as rows.
+                progress.dimensions.asReversed().forEach { note ->
+                    if (note.results.isNotEmpty()) {
+                        HorizontalDivider()
+                        Text(
+                            note.dimension.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        note.results.forEach { result ->
+                            val state = when {
+                                result.winner -> RunState.WINNER
+                                result.timedOut -> RunState.FAILED
+                                result.agreed -> RunState.LOSER
+                                else -> RunState.LOSER
+                            }
+                            RunRow(
+                                label = result.label,
+                                value = when {
+                                    result.timedOut -> "timed out"
+                                    !result.agreed -> "no match"
+                                    else -> "%.0f tok/s".format(result.promptTokPerSec)
+                                },
+                                state = state,
+                            )
+                        }
                     }
                 }
 
                 if (!progress.finished) {
-                    // Indeterminate and animated: the work is discrete (one backend at a time,
-                    // then one dimension at a time), each step lasting seconds, so a determinate
-                    // bar that stalls then jumps reads as broken. The rows carry the per-candidate
-                    // progress; the bar just says "still working."
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     Text(
                         progress.current,
@@ -2230,53 +2107,41 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
 }
 
 /**
- * One tuning dimension on the profile card: label, the measured choice when there is one, the
- * sweep's candidate chart, and a Tune button that re-runs the same teacher-forced sweep. Default
- * restores the device default, which is what an untouched profile runs.
+ * One tuning dimension on the profile card: label, the measured choice when there is one, and a
+ * Tune button that re-runs the same teacher-forced sweep. Default restores the device default,
+ * which is what an untouched profile runs.
  */
 @Composable
 private fun TuningDimensionRow(
     label: String,
-    dimension: TuningDimension,
     isDefault: Boolean,
     chosen: String?,
     measuring: Boolean,
-    results: List<TuneCandidateResult>?,
     enabled: Boolean,
     onDefault: () -> Unit,
     onTune: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        chosen?.let {
             Text(
-                label,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
+                it,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(end = 8.dp),
             )
-            chosen?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(end = 8.dp),
-                )
-            }
-            TextButton(onClick = onDefault, enabled = enabled && !isDefault) {
-                Text("Default", style = MaterialTheme.typography.labelMedium)
-            }
-            TextButton(onClick = onTune, enabled = enabled) {
-                Text(
-                    if (measuring) "Tuning…" else "Tune",
-                    style = MaterialTheme.typography.labelMedium,
-                )
-            }
         }
-        results?.takeIf(List<TuneCandidateResult>::isNotEmpty)?.let { chart ->
-            CandidateChart(
-                dimension = dimension,
-                chosen = if (isDefault) null else chosen,
-                results = chart,
-                modifier = Modifier.padding(start = 8.dp),
+        TextButton(onClick = onDefault, enabled = enabled && !isDefault) {
+            Text("Default", style = MaterialTheme.typography.labelMedium)
+        }
+        TextButton(onClick = onTune, enabled = enabled) {
+            Text(
+                if (measuring) "Tuning…" else "Tune",
+                style = MaterialTheme.typography.labelMedium,
             )
         }
     }
