@@ -1292,6 +1292,45 @@ class MainViewModel(
                     report.acceleratorPromptTokPerSec > report.cpuPromptTokPerSec
                 }
 
+            // When no accelerator exists, no report ever lands to fill the CPU row's throughput,
+            // so the reference decode runs once for its own numbers — the reference bar is part of
+            // the comparison either way.
+            if (measured.isEmpty()) {
+                val cpuTiming = runCatching {
+                    container.llamaCppClient.load(
+                        model = model.copy(preferredContextTokens = profile.contextTokens),
+                        threads = threads,
+                        gpuLayers = 0,
+                        flashAttention = profile.flashAttention,
+                        kvCacheType = profile.kvCacheType,
+                    )
+                    container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                }.getOrNull()
+                if (cpuTiming != null) {
+                    mutableState.update {
+                        it.copy(
+                            autoConfigure = it.autoConfigure?.let { progress ->
+                                progress.copy(results = progress.results.map { entry ->
+                                    if (entry.isReference) {
+                                        entry.copy(
+                                            promptTokPerSec = if (cpuTiming.optLong("promptMillis", 0L) > 0) {
+                                                val promptTokens = cpuTiming.optInt("promptTokens", 0)
+                                                if (promptTokens > 0) promptTokens * 1000.0 / cpuTiming.optLong("promptMillis") else 0.0
+                                            } else 0.0,
+                                            decodeTokPerSec = if (cpuTiming.optLong("decodeMillis", 0L) > 0) {
+                                                REFERENCE_TOKENS * 1000.0 / cpuTiming.optLong("decodeMillis")
+                                            } else 0.0,
+                                        )
+                                    } else {
+                                        entry
+                                    }
+                                })
+                            },
+                        )
+                    }
+                }
+            }
+
             val note = when {
                 best != null -> {
                     val (backend, report) = best

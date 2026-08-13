@@ -426,11 +426,14 @@ many backend `.so` files ever becomes acceptable.
 - Validated on the emulator: import recorded counts, the card rendered "CPU 100% · GPU 100% ·
   NPU 52%" with the convert buttons, and Q4_0 → Q8_0 conversion produced a correct 763.78 MiB
   file (8.52 BPW) with a second catalog record and profile.
-- Known loose end: the automatic auto-configure kick-off for the converted profile did not
-  complete on the emulator (no native loads after the conversion). Manual re-run and the
-  guard/snapshot ordering in `convertQuant` are the next place to look; the phone path is
-  unvalidated. Also: conversion currently blocks the service's single executor (chat waits),
-  which is acceptable but should be stated in the UI.
+- Resolved (2026-08-13, emulator): the "stalled" auto-configure after conversion was neither a
+  stall nor a kick-off bug — the converted Q8_0 model hung once during a teacher-forced replay,
+  the 5-minute candidate timeout fired, the process unwedged via the restart path, and the sweep
+  continued to completion (the earlier "empty profile" was checked mid-run). The overlay shows
+  the timed-out candidate in red, as designed. One polish followed: with no accelerators on the
+  device, the CPU reference bar now gets its own tok/s from a direct reference decode instead of
+  showing 0/0. Remaining note: conversion still blocks the service's single executor (chat
+  waits), and the phone path is unvalidated.
 
 ## Sources
 
