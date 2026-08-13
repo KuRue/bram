@@ -1874,6 +1874,13 @@ class MainViewModel(
                 val reference = cpuReference.optJSONArray("tokens").toIntList()
                 check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
                 val forced = reference.toIntArray()
+                // The yardstick's own wall time scales the candidate deadlines, so a thermally
+                // throttled phone gets a window its decode can actually fit in instead of being
+                // misread as hung by the fixed bounds.
+                val referenceMillis = cpuReference.optLong("promptMillis", 0L) +
+                    cpuReference.optLong("decodeMillis", 0L)
+                val probeDeadlineMillis = maxOf(PROBE_TIMEOUT_MILLIS, referenceMillis * 2 + 5_000L)
+                val candidateDeadlineMillis = maxOf(CANDIDATE_TIMEOUT_MILLIS, referenceMillis * 4 + 10_000L)
                 // The default (512/128) is in the list so there is always a baseline to fall back
                 // to, and the wide end covers the Hexagon reference configuration, which runs
                 // ubatch 1024 — the backend batches prompt work in chunks that size.
@@ -1920,7 +1927,7 @@ class MainViewModel(
                             )
                         }
                     }
-                    val probeDeadline = System.currentTimeMillis() + PROBE_TIMEOUT_MILLIS
+                    val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
                     while (probeThread.isAlive && System.currentTimeMillis() < probeDeadline) {
                         withContext(Dispatchers.Default) { delay(250) }
                     }
@@ -1976,7 +1983,7 @@ class MainViewModel(
                             )
                         }
                     }
-                    val measureDeadline = System.currentTimeMillis() + CANDIDATE_TIMEOUT_MILLIS
+                    val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
                     while (measureThread.isAlive && System.currentTimeMillis() < measureDeadline) {
                         withContext(Dispatchers.Default) { delay(500) }
                     }
@@ -2271,6 +2278,17 @@ class MainViewModel(
             val reference = cpuReference.optJSONArray("tokens").toIntList()
             check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
             val forced = reference.toIntArray()
+            // The yardstick's own wall time scales the candidate deadlines: the fixed bounds
+            // catch hangs on a fast device, but a thermally throttled phone can legitimately
+            // need minutes for a decode the fixed probe window would misread as a hang.
+            val referenceMillis = cpuReference.optLong("promptMillis", 0L) +
+                cpuReference.optLong("decodeMillis", 0L)
+            val probeDeadlineMillis = maxOf(PROBE_TIMEOUT_MILLIS, referenceMillis * 2 + 5_000L)
+            val candidateDeadlineMillis = maxOf(CANDIDATE_TIMEOUT_MILLIS, referenceMillis * 4 + 10_000L)
+            android.util.Log.d(
+                "BramTune",
+                "reference took ${referenceMillis}ms; probe deadline ${probeDeadlineMillis}ms, candidate ${candidateDeadlineMillis}ms",
+            )
             val gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0
             val tried = mutableListOf<String>()
             val scored = mutableListOf<DimensionScore>()
@@ -2316,7 +2334,7 @@ class MainViewModel(
                         )
                     }
                 }
-                val probeDeadline = System.currentTimeMillis() + PROBE_TIMEOUT_MILLIS
+                val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
                 while (probeThread.isAlive && System.currentTimeMillis() < probeDeadline) {
                     withContext(Dispatchers.Default) { delay(250) }
                 }
@@ -2357,7 +2375,7 @@ class MainViewModel(
                         )
                     }
                 }
-                val measureDeadline = System.currentTimeMillis() + CANDIDATE_TIMEOUT_MILLIS
+                val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
                 while (measureThread.isAlive && System.currentTimeMillis() < measureDeadline) {
                     withContext(Dispatchers.Default) { delay(500) }
                 }
