@@ -435,6 +435,19 @@ many backend `.so` files ever becomes acceptable.
   showing 0/0. Remaining note: conversion still blocks the service's single executor (chat
   waits), and the phone path is unvalidated.
 
+- Phone validation (2026-08-13, S25 Ultra): the full pipeline ran on-device — compatibility
+  chips (NPU 52%) and Convert buttons, a Q4_0 → Q8_0 conversion whose output SHA matched the
+  emulator's byte-for-byte (deterministic quantize), and a complete auto-configure on the
+  converted profile: CPU 404/52 tok/s (KleidiAI reference), OpenCL 129/44, NPU 148/27, Vulkan
+  FAIL — CPU won, and the condensed run-row overlay rendered it live. Known issue found: the
+  converted Q8_0 model intermittently HANGS during teacher-forced replay under non-default
+  configs (strict CPU masks, explicit poll, alternate load modes) on both arm64 and x86_64 at
+  this pin; the timeout + unwedge + failure-note machinery handled every instance (sweeps
+  completed with "timed out" recorded and the profile left on defaults). Also fixed: the
+  profile store persisted with `apply()` instead of `commit()`, so a profile created by a
+  conversion could be lost if the process died right after — the Q8_0 profile vanished this
+  way once on-device.
+
 ## Sources
 
 - PERFORMANCE_OPTIONS.md (pin analysis, Hexagon reference config, KleidiAI, LiteRT-LM

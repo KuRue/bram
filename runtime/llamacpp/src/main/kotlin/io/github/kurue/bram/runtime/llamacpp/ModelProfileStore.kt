@@ -107,7 +107,11 @@ class ModelProfileStore(context: Context) {
     private fun write(profiles: List<ModelProfile>) {
         val array = JSONArray()
         profiles.forEach { array.put(it.toJson()) }
-        preferences.edit().putString(KEY_PROFILES, array.toString()).apply()
+        // commit(), not apply(): a profile created by a conversion (or a tuning run) must be on
+        // disk before the process can be killed, or a force-stop right after silently loses it.
+        check(preferences.edit().putString(KEY_PROFILES, array.toString()).commit()) {
+            "Could not persist the model profiles"
+        }
     }
 
     private fun decode(raw: String?): List<ModelProfile> {
