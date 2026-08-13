@@ -2024,15 +2024,22 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
                 )
                 HorizontalDivider()
 
-                val winnerId = progress.results
-                    .filter { it.agrees && !it.isReference }
+                // The winner is the fastest agreeing run, CPU reference included — the CPU is a
+                // valid answer and wins often, so it must get the mark too.
+                val winnerBackendId = progress.results
+                    .filter { it.agrees }
                     .maxByOrNull { it.promptTokPerSec }?.backendId
                 val reference = progress.results.firstOrNull { it.isReference }
                 reference?.let {
+                    val state = if (winnerBackendId != null && it.backendId == winnerBackendId) {
+                        RunState.WINNER
+                    } else {
+                        RunState.REFERENCE
+                    }
                     RunRow(
                         label = "CPU",
                         value = "%.0f tok/s".format(it.promptTokPerSec),
-                        state = RunState.REFERENCE,
+                        state = state,
                     )
                 }
                 progress.candidates.forEachIndexed { index, label ->
@@ -2045,7 +2052,7 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
                         measuring -> RunState.MEASURING
                         result == null -> RunState.WAITING
                         !result.agrees -> RunState.FAILED
-                        result.backendId == winnerId -> RunState.WINNER
+                        result.backendId == winnerBackendId -> RunState.WINNER
                         else -> RunState.LOSER
                     }
                     RunRow(

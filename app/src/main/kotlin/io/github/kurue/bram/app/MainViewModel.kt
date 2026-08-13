@@ -60,19 +60,24 @@ import io.github.kurue.bram.platform.android.CpuTopology
 import io.github.kurue.bram.platform.android.RoutingSettingsStore
 import io.github.kurue.bram.runtime.llamacpp.ModelImportProgress
 import java.net.URI
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 import java.util.UUID
+import kotlin.concurrent.thread
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 
 /**
  * Outcome of comparing an accelerator against the CPU reference. [matchesCpu] is the acceptance
@@ -1885,36 +1890,103 @@ class MainViewModel(
                     mutableState.update {
                         it.copy(status = "Measuring batch $batch/$ubatch on ${backend.label}…")
                     }
-                    container.llamaCppClient.load(
-                        model,
-                        threads,
-                        gpuLayers = gpuLayers,
-                        deviceFilter = backend.devicePrefix,
-                        enableThinking = profile.thinkingEnabled,
-                        flashAttention = profile.flashAttention,
-                        kvCacheType = profile.kvCacheType,
-                        batchTokens = batch,
-                        ubatchTokens = ubatch,
-                    )
-                    val predicted = container.llamaCppClient.teacherForced(forced)
-                        .optJSONArray("predictions").toIntList()
-                    // Exact equality is the wrong bar here: a quantized accelerator legitimately
-                    // disagrees with the fp32 CPU on near-ties (the same one bisection finds at a
-                    // fixed offload depth). The batch must hold the same ground the accelerator
-                    // comparison does — usable, not identical.
-                    val agreement = AcceleratorAgreement.score(reference, predicted)
-                    if (AcceleratorAgreement.isUsable(agreement)) {
-                        // The agreement check already ran the same graph shape, but the score that
-                        // decides anything is the wall time of the actual greedy reference path.
-                        val decode = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
-                        scored += BatchScore(
-                            batch = batch,
-                            ubatch = ubatch,
-                            promptMillis = decode.optLong("promptMillis", 0L),
-                            decodeMillis = decode.optLong("decodeMillis", 0L),
-                            agreement = agreement,
-                        )
+                    // The same cheap probe as the dimension sweeps: a batch that hangs is
+                    // abandoned in seconds instead of holding the sweep for the full timeout.
+                    // Thread-watched for the same reason as the dimension probe: a wedged native
+                    // call also wedges coroutine cancellation, so withTimeout cannot be relied on.
+                    val probeThread = thread(name = "bram-tune-probe") {
+                        runCatching {
+                            runBlocking {
+                                container.llamaCppClient.load(
+                                    model,
+                                    threads,
+                                    gpuLayers = gpuLayers,
+                                    deviceFilter = backend.devicePrefix,
+                                    enableThinking = profile.thinkingEnabled,
+                                    flashAttention = profile.flashAttention,
+                                    kvCacheType = profile.kvCacheType,
+                                    batchTokens = batch,
+                                    ubatchTokens = ubatch,
+                                )
+                                // Same paths as the full measurement: full forced replay plus a
+                                // short decode, so a batch that hangs is caught here.
+                                container.llamaCppClient.teacherForced(forced)
+                                container.llamaCppClient.referenceDecode(PROBE_TOKENS)
+                            }
+                        }.onFailure { error ->
+                            android.util.Log.d(
+                                "BramTune",
+                                "probe $batch/$ubatch error: ${error::class.simpleName}: ${error.message}",
+                            )
+                        }
                     }
+                    val probeDeadline = System.currentTimeMillis() + PROBE_TIMEOUT_MILLIS
+                    while (probeThread.isAlive && System.currentTimeMillis() < probeDeadline) {
+                        withContext(Dispatchers.Default) { delay(250) }
+                    }
+                    if (probeThread.isAlive) {
+                        android.util.Log.d("BramTune", "batch $batch/$ubatch hung in probe; abandoned")
+                        runCatching { container.llamaCppClient.restartInferenceProcess() }
+                        tried += "$batch/$ubatch (timed out)"
+                        continue
+                    }
+                    val batchScore = AtomicReference<BatchScore?>()
+                    val measureThread = thread(name = "bram-tune-measure") {
+                        runCatching {
+                            runBlocking {
+                                container.llamaCppClient.load(
+                                    model,
+                                    threads,
+                                    gpuLayers = gpuLayers,
+                                    deviceFilter = backend.devicePrefix,
+                                    enableThinking = profile.thinkingEnabled,
+                                    flashAttention = profile.flashAttention,
+                                    kvCacheType = profile.kvCacheType,
+                                    batchTokens = batch,
+                                    ubatchTokens = ubatch,
+                                )
+                                val predicted = container.llamaCppClient.teacherForced(forced)
+                                    .optJSONArray("predictions").toIntList()
+                                // Exact equality is the wrong bar here: a quantized accelerator
+                                // legitimately disagrees with the fp32 CPU on near-ties (the same
+                                // one bisection finds at a fixed offload depth). The batch must
+                                // hold the same ground the accelerator comparison does — usable,
+                                // not identical.
+                                val agreement = AcceleratorAgreement.score(reference, predicted)
+                                if (AcceleratorAgreement.isUsable(agreement)) {
+                                    // The agreement check already ran the same graph shape, but
+                                    // the score that decides anything is the wall time of the
+                                    // actual greedy reference path.
+                                    val decode = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+                                    batchScore.set(
+                                        BatchScore(
+                                            batch = batch,
+                                            ubatch = ubatch,
+                                            promptMillis = decode.optLong("promptMillis", 0L),
+                                            decodeMillis = decode.optLong("decodeMillis", 0L),
+                                            agreement = agreement,
+                                        ),
+                                    )
+                                }
+                            }
+                        }.onFailure { error ->
+                            android.util.Log.d(
+                                "BramTune",
+                                "measure $batch/$ubatch error: ${error::class.simpleName}: ${error.message}",
+                            )
+                        }
+                    }
+                    val measureDeadline = System.currentTimeMillis() + CANDIDATE_TIMEOUT_MILLIS
+                    while (measureThread.isAlive && System.currentTimeMillis() < measureDeadline) {
+                        withContext(Dispatchers.Default) { delay(500) }
+                    }
+                    if (measureThread.isAlive) {
+                        android.util.Log.d("BramTune", "batch $batch/$ubatch TIMED OUT")
+                        runCatching { container.llamaCppClient.restartInferenceProcess() }
+                        tried += "$batch/$ubatch (timed out)"
+                        continue
+                    }
+                    batchScore.get()?.let { scored += it }
                     tried += "$batch/$ubatch"
                 }
                 check(scored.isNotEmpty()) {
@@ -2044,6 +2116,38 @@ class MainViewModel(
     }
 
     /**
+     * Loads a candidate's configuration. Shared by the cheap hang probe and the full
+     * measurement, so both exercise exactly the same load request.
+     */
+    private suspend fun loadTunedCandidate(
+        tuned: ModelProfile,
+        profile: ModelProfile,
+        model: LocalModelRecord,
+        backend: RuntimeBackend,
+        referenceThreads: Int,
+        visibleCores: Int,
+        gpuLayers: Int,
+    ) {
+        container.llamaCppClient.load(
+            model = model.copy(preferredContextTokens = profile.contextTokens),
+            threads = if (tuned.threads > 0) tuned.threads.coerceIn(1, visibleCores) else referenceThreads,
+            gpuLayers = gpuLayers,
+            deviceFilter = backend.devicePrefix,
+            enableThinking = profile.thinkingEnabled,
+            flashAttention = profile.flashAttention,
+            kvCacheType = profile.kvCacheType,
+            batchTokens = profile.batchTokens,
+            ubatchTokens = profile.ubatchTokens,
+            cpuMask = tuned.cpuMask,
+            cpuStrict = tuned.cpuStrict,
+            poll = tuned.poll,
+            threadPriority = tuned.threadPriority,
+            loadMode = tuned.loadMode,
+            hexFlags = tuned.hexFlags,
+        )
+    }
+
+    /**
      * Loads one tuning candidate, replays the CPU reference through it under teacher forcing,
      * and — when it agrees — times the greedy reference path. Returns true when the candidate
      * agreed; a candidate that does not agree is recorded by the caller either way.
@@ -2067,22 +2171,14 @@ class MainViewModel(
                 autoConfigure = it.autoConfigure?.copy(current = "Measuring ${candidate.label}…"),
             )
         }
-        container.llamaCppClient.load(
-            model = model.copy(preferredContextTokens = profile.contextTokens),
-            threads = if (tuned.threads > 0) tuned.threads.coerceIn(1, visibleCores) else referenceThreads,
+        loadTunedCandidate(
+            tuned = tuned,
+            profile = profile,
+            model = model,
+            backend = backend,
+            referenceThreads = referenceThreads,
+            visibleCores = visibleCores,
             gpuLayers = gpuLayers,
-            deviceFilter = backend.devicePrefix,
-            enableThinking = profile.thinkingEnabled,
-            flashAttention = profile.flashAttention,
-            kvCacheType = profile.kvCacheType,
-            batchTokens = profile.batchTokens,
-            ubatchTokens = profile.ubatchTokens,
-            cpuMask = tuned.cpuMask,
-            cpuStrict = tuned.cpuStrict,
-            poll = tuned.poll,
-            threadPriority = tuned.threadPriority,
-            loadMode = tuned.loadMode,
-            hexFlags = tuned.hexFlags,
         )
         val predicted = container.llamaCppClient.teacherForced(forced)
             .optJSONArray("predictions").toIntList()
@@ -2188,27 +2284,84 @@ class MainViewModel(
                     referenceThreads
                 }
                 android.util.Log.d("BramTune", "candidate=${candidate.label} hex=${tuned.hexFlags} starting")
-                // A broken backend kernel can hang a load or decode without ever reporting an
-                // error — the HMX path on Snapdragon 8 Elite is one. A stuck candidate must be a
-                // recorded failure, not a stall the user waits out forever, so each measurement
-                // is bounded and a timeout lands in the note like any other failure.
-                val agreedNow = try {
-                    withTimeout(CANDIDATE_TIMEOUT_MILLIS) {
-                        measureDimensionCandidate(
-                            candidate = candidate,
-                            tuned = tuned,
-                            profile = profile,
-                            model = model,
-                            backend = backend,
-                            reference = reference,
-                            forced = forced,
-                            referenceThreads = referenceThreads,
-                            visibleCores = visibleCores,
-                            gpuLayers = gpuLayers,
-                            scored = scored,
+                // A cheap probe first: the candidate's load plus a handful of tokens. A config
+                // that hangs is abandoned in seconds and recorded, instead of burning the full
+                // measurement timeout — the converted-Q8_0 hangs showed that pathological
+                // candidates, not healthy ones, dominate tuning time.
+                // The probe runs on its own thread and the sweep watches the thread, not the
+                // coroutine: a wedged native call also wedges coroutine cancellation (a blocked
+                // binder call never resumes), so withTimeout cannot be relied on here.
+                val probeThread = thread(name = "bram-tune-probe") {
+                    runCatching {
+                        runBlocking {
+                            loadTunedCandidate(
+                                tuned = tuned,
+                                profile = profile,
+                                model = model,
+                                backend = backend,
+                                referenceThreads = referenceThreads,
+                                visibleCores = visibleCores,
+                                gpuLayers = gpuLayers,
+                            )
+                            // The hang lives in the teacher-forced replay, so the probe runs the
+                            // same path the measurement will. It is sub-second on healthy
+                            // candidates.
+                            container.llamaCppClient.teacherForced(forced)
+                            container.llamaCppClient.referenceDecode(PROBE_TOKENS)
+                        }
+                    }.onFailure { error ->
+                        android.util.Log.d(
+                            "BramTune",
+                            "probe ${candidate.label} error: ${error::class.simpleName}: ${error.message}",
                         )
                     }
-                } catch (_: TimeoutCancellationException) {
+                }
+                val probeDeadline = System.currentTimeMillis() + PROBE_TIMEOUT_MILLIS
+                while (probeThread.isAlive && System.currentTimeMillis() < probeDeadline) {
+                    withContext(Dispatchers.Default) { delay(250) }
+                }
+                if (probeThread.isAlive) {
+                    android.util.Log.d("BramTune", "candidate=${candidate.label} hung in probe; abandoned")
+                    runCatching { container.llamaCppClient.restartInferenceProcess() }
+                    timedOutCandidates += candidate
+                    tried += "${candidate.label} (timed out)"
+                    continue
+                }
+                // The full measurement: a broken backend kernel can hang a load or decode without
+                // ever reporting an error — the HMX path on Snapdragon 8 Elite is one. A stuck
+                // candidate must be a recorded failure, not a stall the user waits out forever.
+                val measured = AtomicBoolean(false)
+                val measureThread = thread(name = "bram-tune-measure") {
+                    runCatching {
+                        runBlocking {
+                            measured.set(
+                                measureDimensionCandidate(
+                                    candidate = candidate,
+                                    tuned = tuned,
+                                    profile = profile,
+                                    model = model,
+                                    backend = backend,
+                                    reference = reference,
+                                    forced = forced,
+                                    referenceThreads = referenceThreads,
+                                    visibleCores = visibleCores,
+                                    gpuLayers = gpuLayers,
+                                    scored = scored,
+                                ),
+                            )
+                        }
+                    }.onFailure { error ->
+                        android.util.Log.d(
+                            "BramTune",
+                            "measure ${candidate.label} error: ${error::class.simpleName}: ${error.message}",
+                        )
+                    }
+                }
+                val measureDeadline = System.currentTimeMillis() + CANDIDATE_TIMEOUT_MILLIS
+                while (measureThread.isAlive && System.currentTimeMillis() < measureDeadline) {
+                    withContext(Dispatchers.Default) { delay(500) }
+                }
+                val agreedNow = if (measureThread.isAlive) {
                     android.util.Log.d("BramTune", "candidate=${candidate.label} TIMED OUT")
                     // A hung native call wedges the inference process's single executor thread,
                     // so the app-side timeout alone cannot make the next candidate runnable: the
@@ -2216,6 +2369,8 @@ class MainViewModel(
                     runCatching { container.llamaCppClient.restartInferenceProcess() }
                     timedOutCandidates += candidate
                     null
+                } else {
+                    measured.get()
                 }
                 tried += if (agreedNow == null) "${candidate.label} (timed out)" else candidate.label
                 if (agreedNow == true) agreed++
@@ -2276,6 +2431,7 @@ class MainViewModel(
             )
             syncProfiles(mutableState.value.localModels, profile.id)
         }.onFailure { error ->
+            android.util.Log.d("BramTune", "dim=${dimension.wire} sweep failed: ${error::class.simpleName}: ${error.message}")
             mutableState.update {
                 it.copy(error = error.message ?: "Could not tune ${dimension.label.lowercase()}")
             }
@@ -3682,6 +3838,11 @@ private const val REFERENCE_TOKENS = 24
 // candidate measurement is bounded: 5 minutes is 30-60x the expected time for a phone-sized
 // model, which turns a hang into a recorded failure instead of a stall.
 private const val CANDIDATE_TIMEOUT_MILLIS = 5 * 60 * 1_000L
+// Before the full measurement, every candidate runs a cheap probe — its load plus a handful of
+// tokens under a tight timeout — so a configuration that hangs is abandoned in seconds rather
+// than minutes. Healthy measurements take 10-30s, so 30s still leaves generous headroom.
+private const val PROBE_TIMEOUT_MILLIS = 30_000L
+private const val PROBE_TOKENS = 4
 // Sweeps measure the device itself, so they refuse to run through throttling or memory pressure:
 // a number taken while throttling or swapping is a lie with a timestamp.
 private val ALLOWED_SWEEP_THERMAL = setOf("none", "light")

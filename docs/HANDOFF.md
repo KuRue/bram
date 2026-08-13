@@ -1,13 +1,13 @@
 # Session handoff
 
-Last updated: 2026-08-12
+Last updated: 2026-08-13
 
 ## Current source of truth
 
 | Item | Value |
 |---|---|
 | Repository | Private `KuRue/bram` |
-| main | [`8d0429d`](https://github.com/KuRue/bram/commit/8d0429d) — UI smoke tests land; in-app model downloader removed |
+| main | [`908f040`](https://github.com/KuRue/bram/commit/908f040) - record of the phone validation of Phase 3 |
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
 | Test emulator | AVD `Pixel_9a`, x86_64, 6 GB RAM / 16 GB storage |
 | Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone, tool-capable), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
@@ -18,6 +18,29 @@ auto-configure overlay) is merged as #20. The local Windows checkout is on `main
 build tree is a synced copy of the same working tree.
 
 ## Landed since the previous refresh
+
+- **Probe-first hang detection, thread-watched timeouts** (this commit) — every tuning candidate
+  now runs a cheap probe first (its load, the full teacher-forced replay, and a 4-token decode on
+  a raw `bram-tune-probe` thread watched by a wall-clock deadline), so a config that hangs is
+  abandoned in ~30s and recorded instead of holding the sweep for the full 5-minute measurement
+  timeout. The probes and measurements both moved off `withTimeout`: on-device investigation
+  showed that once a binder call into a wedged native call is in flight, **the coroutine never
+  resumes and `withTimeout` never fires** (a plain `delay` on the same dispatchers works, and
+  the JVM semantics with `Thread.sleep` differ — a fresh-process diagnostic proved the timers
+  are fine until a candidate wedges). The sweeps now run each candidate on its own raw thread
+  (`runBlocking` inside `kotlin.concurrent.thread`) and the sweep coroutine polls `isAlive`
+  against `System.currentTimeMillis()` deadlines, which the cancellation machinery cannot
+  defeat. Also fixed while tracing this: `InferenceProcessService.onDestroy` blocked forever on
+  a hung executor (an unbounded `.get()`), which could keep the wedged process alive exactly
+  when the restart path needs it dead. The intermittent Q8_0 hang itself (no_mmap reloads +
+  teacher-forced replay; instrumentation showed the load's self-test completing and the next
+  native call never arriving) matches that lost-resumption failure mode. After the change, two
+  consecutive load-mode sweeps and a six-candidate batch sweep completed cleanly on the phone —
+  the Q8_0 profile now carries no_mmap, threads 4, batch 256/128 at 437 prompt tok/s.
+- **Winner mark includes the CPU reference** (this commit) — the auto-configure overlay picks
+  the fastest agreeing run across every row, CPU reference included, and marks it ✓. Previously
+  the reference row could never win even when it was the fastest agreeing backend, so the card
+  showed a winning config that was not marked.
 
 - **Milestone 19 — device-adaptive tuning, KleidiAI CPU kernels, and measurement fingerprints**
   (committed `8811fd1`, pushed). Full design in `docs/DEVICE_ADAPTATION.md`, research

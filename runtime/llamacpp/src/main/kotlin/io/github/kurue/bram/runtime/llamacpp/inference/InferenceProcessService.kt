@@ -278,7 +278,9 @@ class InferenceProcessService : Service() {
         bridge.cancel()
         requests.values.forEach { it.cancel(true) }
         requests.clear()
-        runCatching { executor.submit<String> { unloadModel() }.get() }
+        // Never wait on the executor here: a hung native call occupies it forever, and blocking
+        // onDestroy would keep the process alive exactly when the client needs it dead so a fresh
+        // one can take over. The process teardown frees the model.
         executor.shutdownNow()
         super.onDestroy()
     }
