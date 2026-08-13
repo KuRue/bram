@@ -143,9 +143,56 @@ class LocalModelStore(
             layerCount = metadata.layerCount,
             hasChatTemplate = metadata.hasChatTemplate,
             preferredContextTokens = recommendInitialContext(metadata.trainedContextTokens),
+            tensorTypeCounts = metadata.tensorTypeCounts,
         )
         addOrReplace(record, uri.toString())
         progress(ModelImportProgress("Verified", document.size, document.size))
+        record
+    }
+
+    /**
+     * Registers a GGUF that is already in app-private storage (a quant conversion's output):
+     * hashes it, reads its metadata, and adds the catalog record. There is no provider URI to
+     * keep, so the content source is blank and the file path is the replace key.
+     */
+    suspend fun registerLocalFile(
+        file: java.io.File,
+        displayNameSuffix: String,
+    ): LocalModelRecord = withContext(Dispatchers.IO) {
+        require(file.isFile) { "The converted GGUF is missing" }
+        val digest = MessageDigest.getInstance("SHA-256")
+        java.io.FileInputStream(file).use { input ->
+            val buffer = ByteArray(HASH_BUFFER_BYTES)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (count == 0) continue
+                digest.update(buffer, 0, count)
+            }
+        }
+        val hash = digest.digest().joinToString("") { "%02x".format(it) }
+        val metadata = java.io.FileInputStream(file).use(metadataReader::read)
+        val record = LocalModelRecord(
+            id = ModelId("local:${hash.take(24)}"),
+            // The quant suffix disambiguates: the metadata name is identical for a converted
+            // copy, and two records named the same thing are indistinguishable on the card.
+            displayName = displayNameFor(metadata.name, file.name) +
+                if (displayNameSuffix.isBlank()) "" else " · $displayNameSuffix",
+            fileName = file.name,
+            contentUri = "",
+            localPath = file.absolutePath,
+            fileSizeBytes = file.length(),
+            sha256 = hash,
+            ggufVersion = metadata.version,
+            architecture = metadata.architecture,
+            quantization = metadata.quantization,
+            trainedContextTokens = metadata.trainedContextTokens,
+            layerCount = metadata.layerCount,
+            hasChatTemplate = metadata.hasChatTemplate,
+            preferredContextTokens = recommendInitialContext(metadata.trainedContextTokens),
+            tensorTypeCounts = metadata.tensorTypeCounts,
+        )
+        addOrReplace(record, file.absolutePath)
         record
     }
 
@@ -258,6 +305,12 @@ class LocalModelStore(
         .put("preferredContextTokens", preferredContextTokens)
         .put("preferredBackendId", preferredBackendId)
         .put("thinkingEnabled", thinkingEnabled)
+        .put(
+            "tensorTypeCounts",
+            JSONObject().also { counts ->
+                tensorTypeCounts.forEach { (type, count) -> counts.put(type, count) }
+            },
+        )
 
     private fun JSONObject.toRecord(): LocalModelRecord = LocalModelRecord(
         id = ModelId(getString("id")),
@@ -277,6 +330,11 @@ class LocalModelStore(
         preferredContextTokens = getInt("preferredContextTokens"),
         preferredBackendId = optString("preferredBackendId"),
         thinkingEnabled = optBoolean("thinkingEnabled", false),
+        tensorTypeCounts = optJSONObject("tensorTypeCounts")?.let { counts ->
+            buildMap {
+                counts.keys().forEach { key -> put(key, counts.getInt(key)) }
+            }
+        }.orEmpty(),
     )
 
     /**

@@ -109,6 +109,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.Manifest
 import android.content.pm.PackageManager
@@ -128,7 +129,9 @@ import io.github.kurue.bram.core.domain.KvCacheType
 import io.github.kurue.bram.core.domain.LoadMode
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
+import io.github.kurue.bram.core.domain.QuantCompatibility
 import io.github.kurue.bram.core.domain.TuningDimension
+import io.github.kurue.bram.core.domain.TuneCandidateResult
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
@@ -335,6 +338,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onTuneBatch = viewModel::tuneBatch,
                                 onTuneDimension = viewModel::tuneDimension,
                                 tuningDimension = state.tuningDimension,
+                                onConvertQuant = viewModel::convertQuant,
                             )
                             AppPanel.ROUTING -> RoutingSummaryScreen(
                                 state = state,
@@ -925,6 +929,8 @@ private fun ModelsScreen(
     onTuneDimension: (String, TuningDimension) -> Unit,
     /** The dimension being measured right now, so its row can say "Tuning…". */
     tuningDimension: TuningDimension?,
+    /** Starts a quant conversion for a profile's file. */
+    onConvertQuant: (String, String) -> Unit,
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var addingProfile by rememberSaveable { mutableStateOf(false) }
@@ -991,7 +997,8 @@ private fun ModelsScreen(
                         state.loadedModelId == model.id.value && state.cpuValidated,
                     loading = state.isLoadingModel && state.activeProfileId == profile.id,
                     busy = state.isGenerating || state.isValidatingAccelerator ||
-                        state.batchTuneProfileId != null || state.tuningProfileId != null,
+                        state.batchTuneProfileId != null || state.tuningProfileId != null ||
+                        state.convertingProfileId != null,
                     tuning = state.batchTuneProfileId == profile.id || state.tuningProfileId == profile.id,
                     tuneStatus = state.status?.takeIf {
                         state.batchTuneProfileId == profile.id || state.tuningProfileId == profile.id
@@ -1009,8 +1016,11 @@ private fun ModelsScreen(
                     onTuneBatch = { onTuneBatch(profile.id) },
                     onTuneDimension = { dimension -> onTuneDimension(profile.id, dimension) },
                     tuningDimension = tuningDimension,
-                    staleMeasurement = profile.measuredFingerprint.isNotBlank() &&
+                    staleMeasurement = state.measurementFingerprint.isNotBlank() &&
+                        profile.measuredFingerprint.isNotBlank() &&
                         profile.measuredFingerprint != state.measurementFingerprint,
+                    converting = state.convertingProfileId == profile.id,
+                    onConvertQuant = { target -> onConvertQuant(profile.id, target) },
                 )
             }
         }
@@ -1344,6 +1354,10 @@ private fun ProfileCard(
     tuningDimension: TuningDimension?,
     /** True when the profile's measurements were recorded under a different device/build. */
     staleMeasurement: Boolean = false,
+    /** A quant conversion of this profile's file in flight. */
+    converting: Boolean = false,
+    /** Starts a quant conversion of this profile's file to the given ggml type ("q4_0"). */
+    onConvertQuant: (String) -> Unit = {},
 ) {
     // Settings the runtime reads at load time cannot change under a loaded model.
     val locked = loaded || loading || busy
@@ -1431,7 +1445,7 @@ private fun ProfileCard(
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (profile.measurements.isNotEmpty()) {
-                        MeasurementPills(profile.measurements, Modifier.fillMaxWidth())
+                        BackendBars(profile.measurements, Modifier.fillMaxWidth())
                     } else {
                         profile.autoConfiguredNote.takeIf(String::isNotBlank)?.let { note ->
                             Text(
@@ -1451,6 +1465,54 @@ private fun ProfileCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
+                    }
+                    // What this file means for each processor, from the import's per-tensor quant
+                    // counts: how much of it a backend can actually compute. A file the NPU can't
+                    // fully take offers a conversion to one it can.
+                    if (model.tensorTypeCounts.isNotEmpty()) {
+                        val report = QuantCompatibility.report(model.tensorTypeCounts)
+                        SectionLabel("Compatibility")
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            CompatChip("CPU", 100, MaterialTheme.colorScheme.surfaceContainerHighest)
+                            CompatChip(
+                                "GPU",
+                                report.gpu.sharePercent,
+                                if (report.gpu.sharePercent >= 100) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                                },
+                            )
+                            CompatChip(
+                                "NPU",
+                                report.npu.sharePercent,
+                                if (report.npu.sharePercent >= 100) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                                },
+                            )
+                        }
+                        if (report.npu.sharePercent < 100) {
+                            Text(
+                                "The NPU can only run ${report.npu.sharePercent}% of this file's " +
+                                    "weight tensors; the rest would fall back to the CPU. " +
+                                    "Convert a copy to a type it can run fully:",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TextButton(onClick = { onConvertQuant("q4_0") }, enabled = !busy && !converting) {
+                                    Text(if (converting) "Converting…" else "To Q4_0")
+                                }
+                                TextButton(onClick = { onConvertQuant("q8_0") }, enabled = !busy && !converting) {
+                                    Text("To Q8_0")
+                                }
+                            }
+                        }
                     }
                 HorizontalDivider()
 
@@ -1640,35 +1702,44 @@ private fun ProfileCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    profile.batchTuneNote.takeIf(String::isNotBlank)?.let { note ->
-                        Text(
-                            note,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    profile.tuning.firstOrNull { it.dimension == TuningDimension.BATCH }
+                        ?.takeIf { it.results.isNotEmpty() }?.let { batchNote ->
+                            CandidateChart(
+                                dimension = TuningDimension.BATCH,
+                                chosen = batchNote.chosen,
+                                results = batchNote.results,
+                            )
+                        } ?: profile.batchTuneNote.takeIf(String::isNotBlank)?.let { note ->
+                            Text(
+                                note,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
 
                     // The decode-shaped dimensions follow the batch pattern: a measured choice is a
-                    // note beside a Tune button, and Default is always one tap away. Each one only
+                    // chart beside a Tune button, and Default is always one tap away. Each one only
                     // matters on the hardware that exposes it, so the Hexagon row appears only when
                     // this profile loads onto the NPU.
                     SectionLabel("Decode tuning")
                     TuningDimensionRow(
                         label = "Threads",
+                        dimension = TuningDimension.THREADS,
                         isDefault = profile.threads == 0,
                         chosen = profile.threads.takeIf { it > 0 }?.let { "$it threads" },
                         measuring = tuningDimension == TuningDimension.THREADS,
-                        note = profile.tuning.firstOrNull { it.dimension == TuningDimension.THREADS }?.note,
+                        results = profile.tuning.firstOrNull { it.dimension == TuningDimension.THREADS }?.results,
                         enabled = !busy,
                         onDefault = { onUpdateProfile(profile.copy(threads = 0)) },
                         onTune = { onTuneDimension(TuningDimension.THREADS) },
                     )
                     TuningDimensionRow(
                         label = "CPU mask",
+                        dimension = TuningDimension.CPU_MASK,
                         isDefault = profile.cpuMask.isEmpty(),
                         chosen = profile.cpuMask.takeIf(String::isNotEmpty)?.let { "0x$it" },
                         measuring = tuningDimension == TuningDimension.CPU_MASK,
-                        note = profile.tuning.firstOrNull { it.dimension == TuningDimension.CPU_MASK }?.note,
+                        results = profile.tuning.firstOrNull { it.dimension == TuningDimension.CPU_MASK }?.results,
                         enabled = !busy,
                         onDefault = {
                             onUpdateProfile(profile.copy(cpuMask = "", cpuStrict = false))
@@ -1677,10 +1748,11 @@ private fun ProfileCard(
                     )
                     TuningDimensionRow(
                         label = "Poll",
+                        dimension = TuningDimension.POLL,
                         isDefault = profile.poll < 0,
                         chosen = profile.poll.takeIf { it >= 0 }?.let { "$it" },
                         measuring = tuningDimension == TuningDimension.POLL,
-                        note = profile.tuning.firstOrNull { it.dimension == TuningDimension.POLL }?.note,
+                        results = profile.tuning.firstOrNull { it.dimension == TuningDimension.POLL }?.results,
                         enabled = !busy,
                         onDefault = { onUpdateProfile(profile.copy(poll = -1)) },
                         onTune = { onTuneDimension(TuningDimension.POLL) },
@@ -1707,21 +1779,22 @@ private fun ProfileCard(
                             )
                         }
                     }
-                    profile.tuning.firstOrNull { it.dimension == TuningDimension.LOAD_MODE }?.note
-                        ?.takeIf(String::isNotBlank)?.let { note ->
-                            Text(
-                                note,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    profile.tuning.firstOrNull { it.dimension == TuningDimension.LOAD_MODE }
+                        ?.takeIf { it.results.isNotEmpty() }?.let { loadNote ->
+                            CandidateChart(
+                                dimension = TuningDimension.LOAD_MODE,
+                                chosen = loadNote.chosen,
+                                results = loadNote.results,
                             )
                         }
                     if (backend == RuntimeBackend.HEXAGON) {
                         TuningDimensionRow(
                             label = "Hexagon",
+                            dimension = TuningDimension.HEX_FLAGS,
                             isDefault = profile.hexFlags.isDefault,
                             chosen = if (profile.hexFlags.isDefault) null else "HMX + host buffers",
                             measuring = tuningDimension == TuningDimension.HEX_FLAGS,
-                            note = profile.tuning.firstOrNull { it.dimension == TuningDimension.HEX_FLAGS }?.note,
+                            results = profile.tuning.firstOrNull { it.dimension == TuningDimension.HEX_FLAGS }?.results,
                             enabled = !busy,
                             onDefault = { onUpdateProfile(profile.copy(hexFlags = HexFlags())) },
                             onTune = { onTuneDimension(TuningDimension.HEX_FLAGS) },
@@ -1849,47 +1922,207 @@ private fun SamplerControls(
     )
 }
 
-/**
- * What the processors scored, side by side.
- *
- * A row of pills rather than a sentence about the winner: "NPU 1.4x" beside "Vulkan failed" says
- * what this device can do in one glance, where prose about the winner hides everything it rejected.
- * A failure is red because it is not a slower option, it is a wrong one. The pills wrap rather than
- * scroll, because a result someone measured and had to read is a result, not a feed.
- */
+/** How much of a file one processor can compute: a chip with its share. */
 @Composable
-private fun MeasurementPills(measurements: List<BackendMeasurement>, modifier: Modifier = Modifier) {
-    FlowRow(
-        modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+private fun CompatChip(label: String, sharePercent: Int, container: Color) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(container)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        measurements.forEach { measurement ->
-            val failed = !measurement.agrees && !measurement.isReference
-            val container = when {
-                failed -> MaterialTheme.colorScheme.error.copy(alpha = 0.22f)
-                measurement.isReference -> MaterialTheme.colorScheme.surfaceContainerHighest
-                else -> MaterialTheme.colorScheme.primaryContainer
-            }
-            val ink = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-            Row(
+        Text(label, style = MaterialTheme.typography.labelMedium)
+        Text(
+            "$sharePercent%",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/** One thin horizontal bar of a [fraction] of the row width, over a track of the same width. */
+@Composable
+private fun ThroughputBar(fraction: Double, color: Color, height: Dp, modifier: Modifier = Modifier) {    val track = MaterialTheme.colorScheme.surfaceContainerHighest
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(height)
+            .clip(RoundedCornerShape(percent = 50))
+            .background(track),
+    ) {
+        if (fraction > 0.0) {
+            Box(
                 Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(fraction.coerceIn(0.0, 1.0).toFloat())
                     .clip(RoundedCornerShape(percent = 50))
-                    .background(container)
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                Text(
-                    measurement.label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = ink,
-                )
-                Text(
-                    if (failed) "FAIL" else "%.2fx".format(measurement.speedup),
-                    style = MaterialTheme.typography.labelMedium,
+                    .background(color),
+            )
+        }
+    }
+}
+
+/** The prompt/decode throughput of one measurement as two bars and the numbers, right-aligned. */
+@Composable
+private fun ThroughputReading(
+    promptTokPerSec: Double,
+    decodeTokPerSec: Double,
+    maxPrompt: Double,
+    maxDecode: Double,
+    tint: Color,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        ThroughputBar(promptTokPerSec / maxPrompt, tint.copy(alpha = 0.9f), 8.dp)
+        ThroughputBar(decodeTokPerSec / maxDecode, tint.copy(alpha = 0.4f), 4.dp)
+        Text(
+            "%.0f / %.0f tok/s".format(promptTokPerSec, decodeTokPerSec),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** One processor's measured throughput: name, bars, and the agreement that lets speed count. */
+@Composable
+private fun BackendResultRow(
+    measurement: BackendMeasurement?,
+    measuring: Boolean,
+    maxPrompt: Double,
+    maxDecode: Double,
+    modifier: Modifier = Modifier,
+) {
+    val failed = measurement != null && !measurement.agrees && !measurement.isReference
+    val tint = when {
+        measuring -> MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+        failed -> MaterialTheme.colorScheme.error
+        measurement?.isReference == true -> MaterialTheme.colorScheme.onSurfaceVariant
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                measurement?.label ?: "…",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f),
+            )
+            when {
+                measuring -> Text(
+                    "Measuring…",
+                    style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold,
-                    color = ink,
+                    color = tint,
+                )
+                measurement == null -> Text(
+                    "Waiting",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                failed -> Text(
+                    "FAIL",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = tint,
+                )
+                measurement.isReference -> Text(
+                    "reference",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                else -> Text(
+                    "✓ ${(measurement.agreement * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = tint,
+                )
+            }
+        }
+        if (measurement != null && !measuring) {
+            ThroughputReading(
+                promptTokPerSec = measurement.promptTokPerSec,
+                decodeTokPerSec = measurement.decodeTokPerSec,
+                maxPrompt = maxPrompt,
+                maxDecode = maxDecode,
+                tint = tint,
+                modifier = Modifier.padding(start = 14.dp),
+            )
+        }
+    }
+}
+
+/** The backends of one profile as a comparison of measured throughput. */
+@Composable
+private fun BackendBars(measurements: List<BackendMeasurement>, modifier: Modifier = Modifier) {
+    if (measurements.isEmpty()) return
+    val maxPrompt = maxOf(1.0, measurements.maxOfOrNull { it.promptTokPerSec } ?: 1.0)
+    val maxDecode = maxOf(1.0, measurements.maxOfOrNull { it.decodeTokPerSec } ?: 1.0)
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        measurements.forEach { measurement ->
+            BackendResultRow(
+                measurement = measurement,
+                measuring = false,
+                maxPrompt = maxPrompt,
+                maxDecode = maxDecode,
+            )
+        }
+    }
+}
+
+/** One tuning sweep's candidates as a comparison of measured throughput. */
+@Composable
+private fun CandidateChart(
+    dimension: TuningDimension,
+    chosen: String?,
+    results: List<TuneCandidateResult>,
+    modifier: Modifier = Modifier,
+) {
+    if (results.isEmpty()) return
+    val maxPrompt = maxOf(1.0, results.maxOfOrNull { it.promptTokPerSec } ?: 1.0)
+    val maxDecode = maxOf(1.0, results.maxOfOrNull { it.decodeTokPerSec } ?: 1.0)
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            dimension.label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        chosen?.let {
+            Text(
+                "$it wins",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        results.forEach { result ->
+            val tint = when {
+                result.timedOut -> MaterialTheme.colorScheme.error
+                result.winner -> MaterialTheme.colorScheme.primary
+                result.agreed -> MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    result.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.width(120.dp),
+                    color = tint,
+                    fontWeight = if (result.winner) FontWeight.SemiBold else FontWeight.Normal,
+                )
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    ThroughputBar(result.promptTokPerSec / maxPrompt, tint, 6.dp)
+                    ThroughputBar(result.decodeTokPerSec / maxDecode, tint.copy(alpha = 0.4f), 3.dp)
+                }
+                Text(
+                    when {
+                        result.timedOut -> "timed out"
+                        !result.agreed -> "no match"
+                        else -> "%.0f".format(result.promptTokPerSec)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.width(64.dp),
+                    textAlign = TextAlign.End,
                 )
             }
         }
@@ -1900,9 +2133,10 @@ private fun MeasurementPills(measurements: List<BackendMeasurement>, modifier: M
  * Auto-configure while it runs.
  *
  * An overlay in the app tree rather than a Dialog window, because this takes minutes and replaces
- * every setting underneath it — a person needs to see that something is happening to it. Each
- * processor gets a row that moves from Waiting to Measuring to its score, so the arrival of every
- * result is visible rather than a number appearing at the bottom.
+ * every setting underneath it — a person needs to see that something is happening to it. Every
+ * processor gets a row of measured throughput that fills in as its measurement lands, and every
+ * tuning sweep lands as a chart of its candidates, so the whole run reads as bars rather than
+ * sentences.
  *
  * It is drawn here rather than in its own window for the same reason the panels and drawer are: a
  * separate window has nothing of the app behind it to sample, so it can never be frosted. Inside
@@ -1937,12 +2171,16 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
                 )
                 HorizontalDivider()
 
+                SectionLabel("Processors")
+                val maxPrompt = maxOf(1.0, progress.results.maxOfOrNull { it.promptTokPerSec } ?: 1.0)
+                val maxDecode = maxOf(1.0, progress.results.maxOfOrNull { it.decodeTokPerSec } ?: 1.0)
                 // The CPU is the reference the others are measured against, so it is a row like
                 // every candidate rather than a footnote to them.
-                AutoConfigureRow(
-                    label = "CPU",
-                    status = "reference",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                BackendResultRow(
+                    measurement = progress.results.firstOrNull { it.isReference },
+                    measuring = false,
+                    maxPrompt = maxPrompt,
+                    maxDecode = maxDecode,
                 )
                 progress.candidates.forEachIndexed { index, label ->
                     val result = progress.results.getOrNull(index + 1)
@@ -1950,24 +2188,32 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
                     // now"; matching against `current` would flicker, because `current` carries the
                     // measurement callback's prose mid-run.
                     val measuring = !progress.finished && progress.measuringIndex == index
-                    val (status, color) = when {
-                        result != null && result.agrees ->
-                            "%.2fx".format(result.speedup) to MaterialTheme.colorScheme.primary
-                        result != null -> "FAIL" to MaterialTheme.colorScheme.error
-                        measuring -> "Measuring…" to MaterialTheme.colorScheme.primary
-                        else -> "Waiting" to MaterialTheme.colorScheme.onSurfaceVariant
+                    BackendResultRow(
+                        measurement = result,
+                        measuring = measuring,
+                        maxPrompt = maxPrompt,
+                        maxDecode = maxDecode,
+                    )
+                }
+
+                if (progress.dimensions.isNotEmpty() || progress.phase != AutoConfigurePhase.MEASURING) {
+                    HorizontalDivider()
+                    SectionLabel("Tuning")
+                    progress.dimensions.asReversed().forEach { note ->
+                        CandidateChart(
+                            dimension = note.dimension,
+                            chosen = note.chosen,
+                            results = note.results,
+                        )
                     }
-                    AutoConfigureRow(label = label, status = status, color = color)
                 }
 
                 if (!progress.finished) {
-                    // Indeterminate and animated: the work is discrete (one backend at a time, then
-                    // the batch tune), each step lasting seconds, so a determinate bar that stalls
-                    // then jumps reads as broken. The rows carry the per-candidate progress; the bar
-                    // just says "still working."
+                    // Indeterminate and animated: the work is discrete (one backend at a time,
+                    // then one dimension at a time), each step lasting seconds, so a determinate
+                    // bar that stalls then jumps reads as broken. The rows carry the per-candidate
+                    // progress; the bar just says "still working."
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    // The live activity — "Replaying the reference on Adreno…", then "Tuning prompt
-                    // batch…" — including the batch phase, which previously had no visible indicator.
                     Text(
                         progress.current,
                         style = MaterialTheme.typography.labelSmall,
@@ -1983,36 +2229,19 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
     }
 }
 
-/** One processor in the auto-configure overlay: name on the left, live status on the right. */
-@Composable
-private fun AutoConfigureRow(label: String, status: String, color: Color) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            status,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = color,
-        )
-    }
-}
-
 /**
- * One tuning dimension on the profile card: label, the measured choice when there is one, and a
- * Tune button that runs the same teacher-forced sweep the batch tuner does. Default restores the
- * device default, which is what an untouched profile runs.
+ * One tuning dimension on the profile card: label, the measured choice when there is one, the
+ * sweep's candidate chart, and a Tune button that re-runs the same teacher-forced sweep. Default
+ * restores the device default, which is what an untouched profile runs.
  */
 @Composable
 private fun TuningDimensionRow(
     label: String,
+    dimension: TuningDimension,
     isDefault: Boolean,
     chosen: String?,
     measuring: Boolean,
-    note: String?,
+    results: List<TuneCandidateResult>?,
     enabled: Boolean,
     onDefault: () -> Unit,
     onTune: () -> Unit,
@@ -2042,11 +2271,12 @@ private fun TuningDimensionRow(
                 )
             }
         }
-        note?.takeIf(String::isNotBlank)?.let { text ->
-            Text(
-                text,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+        results?.takeIf(List<TuneCandidateResult>::isNotEmpty)?.let { chart ->
+            CandidateChart(
+                dimension = dimension,
+                chosen = if (isDefault) null else chosen,
+                results = chart,
+                modifier = Modifier.padding(start = 8.dp),
             )
         }
     }
@@ -2055,13 +2285,8 @@ private fun TuningDimensionRow(
 /** The measured tuning configuration in one line, for the collapsed profile card. */
 @Composable
 private fun TuningSummary(profile: ModelProfile, modifier: Modifier = Modifier) {
-    val bits = buildList {
-        profile.tuning.forEach { note ->
-            if (note.chosen != "Default") add("${note.dimension.label} ${note.chosen}")
-        }
-        profile.batchTuneNote.takeIf(String::isNotBlank)?.let { note ->
-            add(note.substringAfter("Tuned batch ").substringBefore(" on ").let { "batch $it" })
-        }
+    val bits = profile.tuning.mapNotNull { note ->
+        note.chosen.takeUnless { it == "Default" }?.let { "${note.dimension.label} $it" }
     }
     if (bits.isNotEmpty()) {
         Text(

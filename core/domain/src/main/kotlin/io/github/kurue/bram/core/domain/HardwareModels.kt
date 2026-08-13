@@ -101,6 +101,12 @@ data class LocalModelRecord(
      * phone unless the question actually warrants it.
      */
     val thinkingEnabled: Boolean = false,
+    /**
+     * How many of the file's tensors use each ggml type, from the import's bounded metadata read.
+     * This is what the per-backend compatibility report is built from (the Hexagon NPU has
+     * kernels for only a few types). Empty for records imported before this field existed.
+     */
+    val tensorTypeCounts: Map<String, Int> = emptyMap(),
 ) {
     fun asModelDescriptor(): ModelDescriptor = ModelDescriptor(
         id = id,

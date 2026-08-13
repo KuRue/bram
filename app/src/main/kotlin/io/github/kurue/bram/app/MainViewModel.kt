@@ -54,6 +54,7 @@ import io.github.kurue.bram.core.domain.RoutingWorkloadClassifier
 import io.github.kurue.bram.core.domain.TokenUsage
 import io.github.kurue.bram.core.domain.TuningCandidates
 import io.github.kurue.bram.core.domain.TuningDimension
+import io.github.kurue.bram.core.domain.TuneCandidateResult
 import io.github.kurue.bram.core.agent.RuleBasedModelRouter
 import io.github.kurue.bram.platform.android.CpuTopology
 import io.github.kurue.bram.platform.android.RoutingSettingsStore
@@ -103,6 +104,8 @@ data class AutoConfigureProgress(
      * would make every row flicker between Measuring and Waiting mid-measurement.
      */
     val measuringIndex: Int? = null,
+    /** The tuning dimensions that have landed so far, newest first, for the overlay's charts. */
+    val dimensions: List<DimensionTuneNote> = emptyList(),
     val phase: AutoConfigurePhase = AutoConfigurePhase.MEASURING,
     val finished: Boolean = false,
 ) {
@@ -120,9 +123,31 @@ data class AcceleratorReport(
     val cpuText: String,
     val acceleratorText: String,
     val detail: String,
+    /** Prompt and decode millis of the reference run on each side, for absolute tok/s. */
+    val promptTokens: Int = 0,
+    val cpuPromptMillis: Long = 0L,
+    val cpuDecodeMillis: Long = 0L,
+    val acceleratorPromptMillis: Long = 0L,
+    val acceleratorDecodeMillis: Long = 0L,
 ) {
     val speedup: Double
         get() = if (acceleratorMillis > 0) cpuMillis.toDouble() / acceleratorMillis.toDouble() else 0.0
+
+    val cpuPromptTokPerSec: Double
+        get() = if (cpuPromptMillis > 0 && promptTokens > 0) promptTokens * 1000.0 / cpuPromptMillis else 0.0
+
+    val cpuDecodeTokPerSec: Double
+        get() = if (cpuDecodeMillis > 0 && cpuTokens.isNotEmpty()) cpuTokens.size * 1000.0 / cpuDecodeMillis else 0.0
+
+    val acceleratorPromptTokPerSec: Double
+        get() = if (acceleratorPromptMillis > 0 && promptTokens > 0) {
+            promptTokens * 1000.0 / acceleratorPromptMillis
+        } else 0.0
+
+    val acceleratorDecodeTokPerSec: Double
+        get() = if (acceleratorDecodeMillis > 0 && acceleratorTokens.isNotEmpty()) {
+            minOf(acceleratorTokens.size, cpuTokens.size) * 1000.0 / acceleratorDecodeMillis
+        } else 0.0
 }
 
 /**
@@ -365,6 +390,8 @@ data class AppUiState(
      * somewhere else and the card says so.
      */
     val measurementFingerprint: String = "",
+    /** A quant conversion in flight, so the card can show which model is being converted. */
+    val convertingProfileId: String? = null,
     /** Present while auto-configure runs. The dialog is shown for exactly as long as this is. */
     val autoConfigure: AutoConfigureProgress? = null,
     val acceleratorReport: AcceleratorReport? = null,
@@ -474,6 +501,8 @@ private data class BatchScore(
     val ubatch: Int,
     /** The greedy reference decode's prompt phase, in milliseconds. Lower is faster. */
     val promptMillis: Long,
+    /** The same run's decode phase, for the decode tok/s the bars show. */
+    val decodeMillis: Long,
     /** How closely it reproduced the CPU reference, so the note can say so. */
     val agreement: Double,
 )
@@ -816,7 +845,13 @@ class MainViewModel(
      * that cannot load. CPU is always present; the rest depend on build flags and hardware.
      */
     private fun detectBackends() {
-        viewModelScope.launch { mutableState.update { it.copy(availableBackends = detectBackendsNow()) } }
+        viewModelScope.launch {
+            mutableState.update { it.copy(availableBackends = detectBackendsNow()) }
+            // The measurement fingerprint is how the card knows a profile was measured on this
+            // device and build; compute it at startup too, or every measured profile would look
+            // stale until the first sweep refreshes it.
+            refreshMeasurementFingerprint()
+        }
     }
 
     /**
@@ -1125,7 +1160,15 @@ class MainViewModel(
         val model = snapshot.localModels.firstOrNull { it.id == profile.modelId } ?: return
         if (snapshot.isLoadingModel || snapshot.isGenerating || snapshot.isValidatingAccelerator ||
             snapshot.batchTuneProfileId != null || snapshot.tuningProfileId != null
-        ) return
+        ) {
+            android.util.Log.d(
+                "BramTune",
+                "autoConfigure rejected: loading=${snapshot.isLoadingModel} generating=${snapshot.isGenerating} " +
+                    "validating=${snapshot.isValidatingAccelerator} batch=${snapshot.batchTuneProfileId != null} " +
+                    "tuning=${snapshot.tuningProfileId != null}",
+            )
+            return
+        }
         val restoreLoaded = snapshot.loadedModelId
 
         viewModelScope.launch {
@@ -1204,7 +1247,31 @@ class MainViewModel(
                     agrees = report?.matchesCpu == true,
                     agreement = report?.agreement ?: 0.0,
                     speedup = report?.speedup ?: 0.0,
+                    promptTokPerSec = report?.acceleratorPromptTokPerSec ?: 0.0,
+                    decodeTokPerSec = report?.acceleratorDecodeTokPerSec ?: 0.0,
                 )
+                // The CPU row is the reference every other result is expressed against, so it is
+                // in the list from the start — its throughput arrives with the first measurement
+                // that recorded the CPU side.
+                if (report != null) {
+                    val cpuTiming = report
+                    mutableState.update {
+                        it.copy(
+                            autoConfigure = it.autoConfigure?.let { progress ->
+                                progress.copy(results = progress.results.map { entry ->
+                                    if (entry.isReference) {
+                                        entry.copy(
+                                            promptTokPerSec = cpuTiming.cpuPromptTokPerSec,
+                                            decodeTokPerSec = cpuTiming.cpuDecodeTokPerSec,
+                                        )
+                                    } else {
+                                        entry
+                                    }
+                                })
+                            },
+                        )
+                    }
+                }
                 mutableState.update {
                     it.copy(
                         autoConfigure = it.autoConfigure?.let { progress ->
@@ -1214,16 +1281,23 @@ class MainViewModel(
                 }
             }
 
+            // The winner is the agreeing backend with the highest absolute prompt throughput —
+            // the same number the card shows. Ranking by speedup-against-CPU would pick a
+            // backend whose bar is visibly smaller than another's when thermal drift shifts the
+            // CPU reference between measurements, which reads as a lie on the chart.
             val best = measured
                 .filter { (_, report) -> report.matchesCpu }
-                .maxByOrNull { (_, report) -> report.speedup }
-                ?.takeIf { (_, report) -> report.speedup > 1.0 }
+                .maxByOrNull { (_, report) -> report.acceleratorPromptTokPerSec }
+                ?.takeIf { (_, report) ->
+                    report.acceleratorPromptTokPerSec > report.cpuPromptTokPerSec
+                }
 
             val note = when {
                 best != null -> {
                     val (backend, report) = best
-                    "${backend.label}: ${(report.agreement * 100).toInt()}% agreement with CPU, " +
-                        "%.1f× faster. Measured %s.".format(report.speedup, today())
+                    "${backend.label}: ${report.acceleratorPromptTokPerSec.toInt()} prompt tok/s, " +
+                        "${report.acceleratorDecodeTokPerSec.toInt()} decode tok/s, " +
+                        "${(report.agreement * 100).toInt()}% agreement. Measured %s.".format(today())
                 }
                 measured.isEmpty() -> "No accelerator to measure, so this runs on the CPU."
                 // A backend can agree with the reference and still be slower than it — agreement
@@ -1284,6 +1358,12 @@ class MainViewModel(
             }
             for (dimension in dimensions) {
                 runCatching { runDimensionTune(profile.id, dimension, fromAutoConfigure = true) }
+                val landed = mutableState.value.profiles.firstOrNull { it.id == profile.id }?.tuning
+                    .orEmpty()
+                    .sortedByDescending { it.measuredAtEpochMillis }
+                mutableState.update {
+                    it.copy(autoConfigure = it.autoConfigure?.copy(dimensions = landed))
+                }
             }
 
             // Third phase: the batch, last so it is measured under the configuration the decode
@@ -1306,6 +1386,7 @@ class MainViewModel(
                     autoConfigure = it.autoConfigure?.copy(
                         finished = true,
                         phase = AutoConfigurePhase.DONE,
+                        dimensions = tuned?.tuning.orEmpty().sortedByDescending { note -> note.measuredAtEpochMillis },
                         current = buildString {
                             append(note)
                             tuned?.batchTuneNote?.takeIf(String::isNotBlank)?.let { batch ->
@@ -1600,6 +1681,12 @@ class MainViewModel(
             val usable = cpuTokens.isNotEmpty() && AcceleratorAgreement.isUsable(agreement)
             val agreed = (agreement * minOf(cpuTokens.size, predicted.size)).toInt()
 
+            // The same reference run on the accelerator, for its own prompt/decode timings —
+            // the card and the overlay show absolute tok/s rather than a comparison sentence.
+            val acceleratorTiming = runCatching {
+                container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+            }.getOrNull()
+
             AcceleratorReport(
                 deviceName = deviceName,
                 matchesCpu = usable,
@@ -1625,6 +1712,11 @@ class MainViewModel(
                         "below the ${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% needed " +
                         "to treat it as computing correctly."
                 },
+                promptTokens = cpuResult.optInt("promptTokens", 0),
+                cpuPromptMillis = cpuResult.optLong("promptMillis", 0L),
+                cpuDecodeMillis = cpuResult.optLong("decodeMillis", 0L),
+                acceleratorPromptMillis = acceleratorTiming?.optLong("promptMillis", 0L) ?: 0L,
+                acceleratorDecodeMillis = acceleratorTiming?.optLong("decodeMillis", 0L) ?: 0L,
             )
     }
 
@@ -1780,6 +1872,7 @@ class MainViewModel(
                             batch = batch,
                             ubatch = ubatch,
                             promptMillis = decode.optLong("promptMillis", 0L),
+                            decodeMillis = decode.optLong("decodeMillis", 0L),
                             agreement = agreement,
                         )
                     }
@@ -1798,18 +1891,47 @@ class MainViewModel(
                     0
                 }
                 val comparable = reference.size
-                val tuned = profile.copy(
-                    batchTokens = best.batch,
-                    ubatchTokens = best.ubatch,
-                    batchTuneNote = buildString {
+                // The structured results the bars draw: one entry per candidate, absolute
+                // throughput, winner marked. Written into the tuning list so the batch row gets
+                // the same visuals as the decode dimensions; the legacy note fields stay too.
+                val batchResults = candidates.map { (batch, ubatch) ->
+                    val score = scored.firstOrNull { it.batch == batch && it.ubatch == ubatch }
+                    TuneCandidateResult(
+                        label = "$batch/$ubatch",
+                        promptTokPerSec = score?.let {
+                            if (it.promptMillis > 0 && promptTokens > 0) {
+                                promptTokens * 1000.0 / it.promptMillis
+                            } else 0.0
+                        } ?: 0.0,
+                        decodeTokPerSec = score?.let {
+                            if (it.decodeMillis > 0 && reference.isNotEmpty()) {
+                                reference.size * 1000.0 / it.decodeMillis
+                            } else 0.0
+                        } ?: 0.0,
+                        agreed = score != null,
+                        winner = score != null && score.batch == best.batch && score.ubatch == best.ubatch,
+                    )
+                }
+                val batchNote = DimensionTuneNote(
+                    dimension = TuningDimension.BATCH,
+                    chosen = "${best.batch}/${best.ubatch}",
+                    note = buildString {
                         append("Tuned batch ${best.batch}/${best.ubatch} on ${backend.label}: ")
                         append("$rate prompt tok/s, ")
                         append("${(best.agreement * comparable).toInt()}/$comparable predictions ")
                         append("match the CPU reference")
                         append(". Tried ${tried.joinToString(", ")}.")
                     },
+                    measuredAtEpochMillis = System.currentTimeMillis(),
+                    results = batchResults,
+                )
+                val tuned = profile.copy(
+                    batchTokens = best.batch,
+                    ubatchTokens = best.ubatch,
+                    batchTuneNote = batchNote.note,
                     batchTunedAtEpochMillis = System.currentTimeMillis(),
                     measuredFingerprint = mutableState.value.measurementFingerprint,
+                    tuning = listOf(batchNote) + profile.tuning.filterNot { it.dimension == TuningDimension.BATCH },
                 )
                 container.modelProfileStore.save(tuned)
                 syncProfiles(mutableState.value.localModels, profile.id)
@@ -2017,6 +2139,7 @@ class MainViewModel(
             val gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0
             val tried = mutableListOf<String>()
             val scored = mutableListOf<DimensionScore>()
+            val timedOutCandidates = mutableSetOf<TuningCandidate>()
             var agreed = 0
             for (candidate in candidates) {
                 val tuned = candidate.apply(profile)
@@ -2052,6 +2175,7 @@ class MainViewModel(
                     // so the app-side timeout alone cannot make the next candidate runnable: the
                     // process itself has to go. Restart it, and the next load binds fresh.
                     runCatching { container.llamaCppClient.restartInferenceProcess() }
+                    timedOutCandidates += candidate
                     null
                 }
                 tried += if (agreedNow == null) "${candidate.label} (timed out)" else candidate.label
@@ -2076,6 +2200,25 @@ class MainViewModel(
                 0
             }
             val tunedProfile = winner.apply(profile)
+            val candidateResults = candidates.map { candidate ->
+                val score = scored.firstOrNull { it.candidate == candidate }
+                TuneCandidateResult(
+                    label = candidate.label,
+                    promptTokPerSec = score?.let { scoreEntry ->
+                        if (scoreEntry.promptMillis > 0 && promptTokens > 0) {
+                            promptTokens * 1000.0 / scoreEntry.promptMillis
+                        } else 0.0
+                    } ?: 0.0,
+                    decodeTokPerSec = score?.let { scoreEntry ->
+                        if (scoreEntry.decodeMillis > 0 && reference.isNotEmpty()) {
+                            reference.size * 1000.0 / scoreEntry.decodeMillis
+                        } else 0.0
+                    } ?: 0.0,
+                    agreed = score != null,
+                    timedOut = candidate in timedOutCandidates,
+                    winner = candidate == winner,
+                )
+            }
             val note = DimensionTuneNote(
                 dimension = dimension,
                 chosen = winner.label,
@@ -2084,6 +2227,7 @@ class MainViewModel(
                     "$agreed of ${candidates.size} candidates matched the CPU reference. " +
                     "Tried ${tried.joinToString(", ")}.",
                 measuredAtEpochMillis = System.currentTimeMillis(),
+                results = candidateResults,
             )
             container.modelProfileStore.save(
                 tunedProfile.copy(
@@ -2131,6 +2275,65 @@ class MainViewModel(
      */
     private fun finishDimensionTune() {
         mutableState.update { it.copy(tuningProfileId = null, tuningDimension = null, status = null) }
+    }
+
+    /**
+     * Converts a profile's GGUF to another quant on the device, so a file whose weights the NPU
+     * cannot offload gets an NPU-runnable copy. Runs through llama.cpp's quantize in the isolated
+     * inference process (it blocks chat there while it runs), then catalogues the result like an
+     * import — SHA-256, metadata, a default profile — and measures it.
+     */
+    fun convertQuant(profileId: String, targetType: String) {
+        val state = mutableState.value
+        if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator ||
+            state.batchTuneProfileId != null || state.tuningProfileId != null ||
+            state.convertingProfileId != null
+        ) return
+        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
+        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        if (model.localPath.isBlank()) return
+        viewModelScope.launch {
+            val outFile = java.io.File(model.localPath.removeSuffix(".gguf") + "-$targetType.gguf")
+            runCatching { outFile.delete() }
+            mutableState.update {
+                it.copy(
+                    convertingProfileId = profileId,
+                    error = null,
+                    status = "Converting to ${targetType.uppercase()}… this can take a few minutes",
+                )
+            }
+            val conversion = runCatching {
+                container.llamaCppClient.quantize(model.localPath, outFile.absolutePath, targetType)
+            }
+            if (conversion.isSuccess) {
+                android.util.Log.d("BramTune", "convertQuant: quantization succeeded, registering output")
+                val registered = runCatching {
+                    container.localModelStore.registerLocalFile(outFile, targetType.uppercase())
+                }.getOrNull()
+                mutableState.update { it.copy(convertingProfileId = null, status = null) }
+                if (registered != null) {
+                    android.util.Log.d("BramTune", "convertQuant: registered ${registered.id.value}, kicking off auto-configure")
+                    val models = runCatching { container.localModelStore.list() }
+                        .getOrDefault(mutableState.value.localModels)
+                    syncProfiles(models, "profile:${registered.id.value}:default")
+                    // Like an import: the new profile is measured right away, so the card can say
+                    // what this device makes of the converted file.
+                    autoConfigure("profile:${registered.id.value}:default")
+                } else {
+                    mutableState.update {
+                        it.copy(error = "The conversion finished but the new file could not be catalogued")
+                    }
+                }
+            } else {
+                mutableState.update {
+                    it.copy(
+                        convertingProfileId = null,
+                        status = null,
+                        error = conversion.exceptionOrNull()?.message ?: "Quant conversion failed",
+                    )
+                }
+            }
+        }
     }
 
     /**

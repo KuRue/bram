@@ -34,6 +34,28 @@ data class DimensionTuneNote(
     /** Why, in words, including what was tried. */
     val note: String,
     val measuredAtEpochMillis: Long,
+    /** Per-candidate throughput, so the UI can draw the comparison instead of quoting it. */
+    val results: List<TuneCandidateResult> = emptyList(),
+)
+
+/**
+ * One candidate from a tuning sweep, with the numbers the UI draws. Absolute throughput — the
+ * display metric — not a comparison against the CPU reference; agreement is the small print
+ * that says the number can be trusted at all.
+ */
+data class TuneCandidateResult(
+    /** What was tried, in words ("8 threads", "Mask 0x3", "Aggressive polling"). */
+    val label: String,
+    /** Prompt processing throughput of the measured run, in tokens per second. */
+    val promptTokPerSec: Double,
+    /** Decode throughput of the measured run, in tokens per second. */
+    val decodeTokPerSec: Double,
+    /** Whether the candidate reproduced the CPU reference (the gate that lets speed count). */
+    val agreed: Boolean,
+    /** Whether the candidate was abandoned because its measurement hung. */
+    val timedOut: Boolean = false,
+    /** Whether this candidate won the sweep. */
+    val winner: Boolean = false,
 )
 
 /**

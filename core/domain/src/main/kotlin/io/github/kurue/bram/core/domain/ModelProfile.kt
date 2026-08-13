@@ -110,7 +110,9 @@ enum class KvCacheType(val wire: String) {
  * What one processor scored against the CPU reference.
  *
  * [agrees] is the part that decides anything: a backend that disagrees is not a slower option, it
- * is a wrong one, however fast it ran. Speed only ranks the backends that passed.
+ * is a wrong one, however fast it ran. Speed only ranks the backends that passed, and the speed
+ * the card shows is absolute throughput (tokens per second of the measured run) rather than a
+ * comparison sentence.
  */
 data class BackendMeasurement(
     /** [RuntimeBackend] name, or empty for the CPU reference itself. */
@@ -119,6 +121,10 @@ data class BackendMeasurement(
     val agrees: Boolean,
     val agreement: Double,
     val speedup: Double,
+    /** Prompt processing throughput of the measured run, tokens per second. */
+    val promptTokPerSec: Double = 0.0,
+    /** Decode throughput of the measured run, tokens per second. */
+    val decodeTokPerSec: Double = 0.0,
 ) {
     /** The CPU is the yardstick, so it neither passes nor fails: it defines 1.0x. */
     val isReference: Boolean get() = backendId.isEmpty()

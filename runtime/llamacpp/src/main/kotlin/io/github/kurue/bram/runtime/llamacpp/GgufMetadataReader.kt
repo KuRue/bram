@@ -14,6 +14,14 @@ data class GgufMetadata(
     val trainedContextTokens: Int,
     val layerCount: Int,
     val hasChatTemplate: Boolean,
+    /**
+     * How many tensors use each ggml type, e.g. `{"q4_0": 129, "q8_0": 54, "f32": 133}`. This is
+     * the data the per-backend compatibility report is built from: the Hexagon NPU has kernels
+     * for only a few types, so a file whose weights are all Q4_0 offloads fully while a Q4_K_M
+     * file cannot. Empty when the tensor table was not read (bounded reads may give up on a
+     * hostile file).
+     */
+    val tensorTypeCounts: Map<String, Int> = emptyMap(),
 )
 
 /** Reads only the bounded GGUF header and metadata table; tensor bytes are never loaded. */
@@ -52,6 +60,26 @@ class GgufMetadataReader {
             ?: 0
         val fileType = (values["general.file_type"] as? Number)?.toInt()
 
+        // The tensor table follows the metadata: per tensor, a name, a dimension count, the
+        // dimensions, the ggml type, and the byte offset. Only the type per tensor is kept —
+        // with a hard entry cap and small per-entry bounds, because the table is attacker-shaped
+        // input (names and dimensions are length-prefixed, so every byte is budgeted).
+        val tensorTypes = HashMap<String, Int>()
+        runCatching {
+            var entries = 0
+            while (entries < MAX_TENSOR_TABLE_ENTRIES && entries < tensorCount) {
+                reader.string(MAX_TENSOR_NAME_BYTES)
+                val dims = reader.u32().toInt()
+                require(dims in 0..4) { "Invalid GGUF tensor dimension count $dims" }
+                repeat(dims) { reader.u64Bounded(MAX_TENSOR_DIMENSION, "tensor dimension") }
+                val type = reader.u32().toInt()
+                reader.u64Bounded(Long.MAX_VALUE, "tensor offset")  // byte offset within the data section
+                val typeName = ggmlTypeName(type)
+                tensorTypes[typeName] = (tensorTypes[typeName] ?: 0) + 1
+                entries++
+            }
+        }
+
         return GgufMetadata(
             version = version,
             tensorCount = tensorCount,
@@ -61,7 +89,46 @@ class GgufMetadataReader {
             trainedContextTokens = context,
             layerCount = layers,
             hasChatTemplate = !((values["tokenizer.chat_template"] as? String).isNullOrBlank()),
+            tensorTypeCounts = tensorTypes,
         )
+    }
+
+    private fun ggmlTypeName(type: Int): String = when (type) {
+        0 -> "f32"
+        1 -> "f16"
+        2 -> "q4_0"
+        3 -> "q4_1"
+        6 -> "q5_0"
+        7 -> "q5_1"
+        8 -> "q8_0"
+        9 -> "q8_1"
+        10 -> "q2_k"
+        11 -> "q3_k"
+        12 -> "q4_k"
+        13 -> "q5_k"
+        14 -> "q6_k"
+        15 -> "q8_k"
+        16 -> "iq2_xxs"
+        17 -> "iq2_xs"
+        18 -> "iq3_xxs"
+        19 -> "iq1_s"
+        20 -> "iq4_nl"
+        21 -> "iq3_s"
+        22 -> "iq2_s"
+        23 -> "iq4_xs"
+        24 -> "i8"
+        25 -> "i16"
+        26 -> "i32"
+        27 -> "i64"
+        28 -> "f64"
+        29 -> "iq1_m"
+        30 -> "bf16"
+        34 -> "tq1_0"
+        35 -> "tq2_0"
+        39 -> "mxfp4"
+        40 -> "nvfp4"
+        41 -> "q1_0"
+        else -> "type$type"
     }
 
     private fun fileTypeName(value: Int?): String = when (value) {
@@ -113,6 +180,9 @@ class GgufMetadataReader {
         const val MAX_TENSORS = 1_000_000L
         const val MAX_METADATA_ENTRIES = 1_000_000L
         const val MAX_KEY_BYTES = 16_384
+        const val MAX_TENSOR_TABLE_ENTRIES = 20_000
+        const val MAX_TENSOR_NAME_BYTES = 256
+        const val MAX_TENSOR_DIMENSION = 1_000_000_000L
         val INTERESTING_KEYS = setOf(
             "general.architecture",
             "general.name",

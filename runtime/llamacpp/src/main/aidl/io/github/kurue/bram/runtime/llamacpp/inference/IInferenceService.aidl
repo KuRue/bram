@@ -17,4 +17,7 @@ interface IInferenceService {
     String loadEmbedder(String modelPath, int threads);
     float[] embed(String text);
     String unloadEmbedder();
+    // New methods are appended: the binder transaction code of every earlier method is part of
+    // the wire contract, and inserting in the middle would shift them for older clients.
+    String quantize(String requestJson);
 }

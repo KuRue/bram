@@ -52,6 +52,15 @@ class InferenceProcessService : Service() {
 
         override fun devices(): String = runSerialized { bridge.devices() }
 
+        override fun quantize(requestJson: String?): String = runSerialized {
+            val request = JSONObject(requestJson.orEmpty())
+            bridge.quantize(
+                request.getString("modelPath"),
+                request.getString("outPath"),
+                request.getString("ftype"),
+            )
+        }
+
         override fun referenceDecode(tokenCount: Int): String = runSerialized {
             bridge.referenceDecode(tokenCount)
         }

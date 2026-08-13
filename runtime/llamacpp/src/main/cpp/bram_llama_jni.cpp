@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -512,6 +513,48 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_probe(
         ensure_backend();
         return std::string("{\"nativeRuntimeLinked\":true,\"cpuValidated\":false,\"systemInfo\":\"") +
             json_escape(llama_print_system_info()) + "\"}";
+    });
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_quantize(
+    JNIEnv * env, jobject, jstring path, jstring out_path, jstring ftype) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        ensure_backend();
+        const std::string in = from_jstring(env, path);
+        const std::string out = from_jstring(env, out_path);
+        const std::string f = from_jstring(env, ftype);
+
+        // Everything the conversion writes is offloadable on the Hexagon HTP: the output and
+        // token embedding tensors go to Q8_0 rather than F16, because F16 has no HTP kernel.
+        llama_model_quantize_params params = llama_model_quantize_default_params();
+        params.nthread = 0;  // hardware concurrency
+        params.allow_requantize = true;
+        params.quantize_output_tensor = true;
+        params.output_tensor_type = GGML_TYPE_Q8_0;
+        params.token_embedding_type = GGML_TYPE_Q8_0;
+        if (f == "q4_0") {
+            params.ftype = LLAMA_FTYPE_MOSTLY_Q4_0;
+        } else if (f == "q8_0") {
+            params.ftype = LLAMA_FTYPE_MOSTLY_Q8_0;
+        } else {
+            throw std::runtime_error("Unknown conversion target '" + f + "'");
+        }
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_quantize: converting to %s: %s -> %s", f.c_str(), in.c_str(), out.c_str());
+        const uint32_t result = llama_model_quantize(in.c_str(), out.c_str(), &params);
+        if (result != 0) {
+            throw std::runtime_error("Quantization failed (code " + std::to_string(result) + ")");
+        }
+        std::ifstream out_file(out, std::ios::binary | std::ios::ate);
+        const long out_size = out_file.is_open()
+            ? static_cast<long>(out_file.tellg())
+            : 0L;
+        if (out_size <= 0) {
+            throw std::runtime_error("Quantization produced no output file");
+        }
+        return std::string("{\"ok\":true,\"outSizeBytes\":") + std::to_string(out_size) + "}";
     });
 }
 

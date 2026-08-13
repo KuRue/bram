@@ -12,6 +12,7 @@ import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.SamplerSettings
 import io.github.kurue.bram.core.domain.ThreadPriority
+import io.github.kurue.bram.core.domain.TuneCandidateResult
 import io.github.kurue.bram.core.domain.TuningDimension
 import io.github.kurue.bram.core.domain.canonicalCpuMask
 import kotlinx.coroutines.Dispatchers
@@ -156,7 +157,9 @@ class ModelProfileStore(context: Context) {
                             .put("label", measurement.label)
                             .put("agrees", measurement.agrees)
                             .put("agreement", measurement.agreement)
-                            .put("speedup", measurement.speedup),
+                            .put("speedup", measurement.speedup)
+                            .put("promptTokPerSec", measurement.promptTokPerSec)
+                            .put("decodeTokPerSec", measurement.decodeTokPerSec),
                     )
                 }
             },
@@ -174,7 +177,23 @@ class ModelProfileStore(context: Context) {
                             .put("dimension", note.dimension.wire)
                             .put("chosen", note.chosen)
                             .put("note", note.note)
-                            .put("measuredAtEpochMillis", note.measuredAtEpochMillis),
+                            .put("measuredAtEpochMillis", note.measuredAtEpochMillis)
+                            .put(
+                                "results",
+                                JSONArray().also { results ->
+                                    note.results.forEach { result ->
+                                        results.put(
+                                            JSONObject()
+                                                .put("label", result.label)
+                                                .put("promptTokPerSec", result.promptTokPerSec)
+                                                .put("decodeTokPerSec", result.decodeTokPerSec)
+                                                .put("agreed", result.agreed)
+                                                .put("timedOut", result.timedOut)
+                                                .put("winner", result.winner),
+                                        )
+                                    }
+                                },
+                            ),
                     )
                 }
             },
@@ -228,6 +247,8 @@ class ModelProfileStore(context: Context) {
                             agrees = entry.optBoolean("agrees"),
                             agreement = entry.optDouble("agreement", 0.0),
                             speedup = entry.optDouble("speedup", 0.0),
+                            promptTokPerSec = entry.optDouble("promptTokPerSec", 0.0),
+                            decodeTokPerSec = entry.optDouble("decodeTokPerSec", 0.0),
                         )
                     }
                 }
@@ -245,6 +266,20 @@ class ModelProfileStore(context: Context) {
                             chosen = entry.optString("chosen"),
                             note = entry.optString("note"),
                             measuredAtEpochMillis = entry.optLong("measuredAtEpochMillis", 0L),
+                            results = entry.optJSONArray("results")?.let { results ->
+                                (0 until results.length()).mapNotNull { resultIndex ->
+                                    results.optJSONObject(resultIndex)?.let { result ->
+                                        TuneCandidateResult(
+                                            label = result.optString("label"),
+                                            promptTokPerSec = result.optDouble("promptTokPerSec", 0.0),
+                                            decodeTokPerSec = result.optDouble("decodeTokPerSec", 0.0),
+                                            agreed = result.optBoolean("agreed"),
+                                            timedOut = result.optBoolean("timedOut"),
+                                            winner = result.optBoolean("winner"),
+                                        )
+                                    }
+                                }
+                            }.orEmpty(),
                         )
                     }
                 }

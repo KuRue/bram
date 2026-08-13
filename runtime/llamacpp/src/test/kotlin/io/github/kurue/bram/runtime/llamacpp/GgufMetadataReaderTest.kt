@@ -38,6 +38,39 @@ class GgufMetadataReaderTest {
         GgufMetadataReader().read(ByteArrayInputStream("nope".toByteArray()))
     }
 
+    @Test
+    fun readsTensorTypeCountsFromTheTensorTable() {
+        val bytes = gguf(
+            "general.architecture" to stringValue("qwen35"),
+            "general.file_type" to u32Value(15),
+        ) + tensorTable(
+            "token_embd.weight" to 6,
+            "blk.0.attn_q.weight" to 2,
+            "blk.0.attn_k.weight" to 2,
+            "blk.0.ffn_up.weight" to 2,
+            "blk.0.ffn_down.weight" to 2,
+            "output_norm.weight" to 0,
+            "output.weight" to 6,
+        )
+
+        val metadata = GgufMetadataReader().read(ByteArrayInputStream(bytes))
+
+        assertEquals(mapOf("q4_0" to 4, "q5_0" to 2, "f32" to 1), metadata.tensorTypeCounts)
+    }
+
+    /** A tensor table of (name, ggml type id) entries with plausible 2-d shapes. */
+    private fun tensorTable(vararg tensors: Pair<String, Int>): ByteArray =
+        ByteArrayOutputStream().apply {
+            tensors.forEach { (name, type) ->
+                writeString(name)
+                writeU32(2)  // dimensions
+                writeU64(4_096)
+                writeU64(2_560)
+                writeU32(type)
+                writeU64(0)  // byte offset
+            }
+        }.toByteArray()
+
     private fun gguf(vararg metadata: Pair<String, ByteArray>): ByteArray = ByteArrayOutputStream().apply {
         write("GGUF".toByteArray())
         writeU32(3)

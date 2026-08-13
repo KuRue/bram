@@ -8,6 +8,7 @@ internal fun interface NativeTokenSink {
 internal class NativeLlamaBridge {
     external fun probe(): String
     external fun devices(): String
+    external fun quantize(modelPath: String, outPath: String, ftype: String): String
     external fun load(
         modelPath: String,
         contextTokens: Int,

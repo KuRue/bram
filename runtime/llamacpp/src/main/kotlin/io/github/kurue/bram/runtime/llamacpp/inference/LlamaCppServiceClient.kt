@@ -74,6 +74,19 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         JSONObject(requireService().devices())
     }
 
+    /**
+     * Converts a GGUF to another quant on the device. Long-running: it occupies the inference
+     * process for the duration, and the app should show progress while it runs.
+     */
+    suspend fun quantize(modelPath: String, outPath: String, ftype: String): JSONObject =
+        withContext(Dispatchers.IO) {
+            val request = JSONObject()
+                .put("modelPath", modelPath)
+                .put("outPath", outPath)
+                .put("ftype", ftype)
+            JSONObject(requireService().quantize(request.toString()))
+        }
+
     suspend fun referenceDecode(tokenCount: Int): JSONObject = withContext(Dispatchers.IO) {
         JSONObject(requireService().referenceDecode(tokenCount))
     }

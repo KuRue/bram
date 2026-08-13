@@ -412,6 +412,26 @@ many backend `.so` files ever becomes acceptable.
   (the engine's system-info flags are compile-time probes; the KleidiAI trait does its own
   getauxval detection).
 
+## Phase 3 — import compatibility and on-device quant conversion (implemented, emulator-validated 2026-08-13)
+
+- `GgufMetadataReader` now walks the bounded tensor table and returns per-tensor quant counts
+  (`{q4_0:129, q4_1:3, f32:133, ...}`); persisted on `LocalModelRecord` (additive JSON).
+- `QuantCompatibility` (pure, tested): per-backend share of offloadable weight tensors. The
+  Hexagon set is q4_0/q4_1/q8_0/mxfp4/iq4_nl at the pin; the GPU set excludes mxfp4/nvfp4/tq.
+- The profile card shows a Compatibility chip row (CPU/GPU/NPU share) and, when the NPU can't
+  take the file fully, offers **Convert to Q4_0 / Q8_0**. Conversion runs `llama_model_quantize`
+  in the isolated process (output/embedding tensors to Q8_0 so the result is fully
+  NPU-offloadable), then registers the output like an import (SHA-256, metadata, default
+  profile) and auto-configures it.
+- Validated on the emulator: import recorded counts, the card rendered "CPU 100% · GPU 100% ·
+  NPU 52%" with the convert buttons, and Q4_0 → Q8_0 conversion produced a correct 763.78 MiB
+  file (8.52 BPW) with a second catalog record and profile.
+- Known loose end: the automatic auto-configure kick-off for the converted profile did not
+  complete on the emulator (no native loads after the conversion). Manual re-run and the
+  guard/snapshot ordering in `convertQuant` are the next place to look; the phone path is
+  unvalidated. Also: conversion currently blocks the service's single executor (chat waits),
+  which is acceptable but should be stated in the UI.
+
 ## Sources
 
 - PERFORMANCE_OPTIONS.md (pin analysis, Hexagon reference config, KleidiAI, LiteRT-LM
