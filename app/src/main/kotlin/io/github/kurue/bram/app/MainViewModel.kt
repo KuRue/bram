@@ -1579,6 +1579,12 @@ class MainViewModel(
             val dimensions = autoConfigureDimensions(tuningBackend)
             for (dimension in dimensions) {
                 runCatching { runDimensionTune(profile.id, dimension, fromAutoConfigure = true) }
+                    .onFailure { error ->
+                        if (error is CancellationException) {
+                            android.util.Log.d("BramTune", "auto-configure cancelled; stopping the pass")
+                            return@launch
+                        }
+                    }
                 val landed = mutableState.value.profiles.firstOrNull { it.id == profile.id }?.tuning
                     .orEmpty()
                     .sortedByDescending { it.measuredAtEpochMillis }
@@ -1601,7 +1607,12 @@ class MainViewModel(
                     ),
                 )
             }
-            runCatching { runBatchTune(profile.id) }
+            runCatching { runBatchTune(profile.id) }.onFailure { error ->
+                if (error is CancellationException) {
+                    android.util.Log.d("BramTune", "auto-configure cancelled; stopping the pass")
+                    return@launch
+                }
+            }
             val tuned = mutableState.value.profiles.firstOrNull { it.id == profile.id }
 
             mutableState.update {
@@ -1635,6 +1646,64 @@ class MainViewModel(
     /** Closes the auto-configure dialog. The run itself has already finished by then. */
     fun dismissAutoConfigure() {
         mutableState.update { it.copy(autoConfigure = null, cooldownOverride = false) }
+    }
+
+    /**
+     * Runs the CPU reference (load + 24-token decode) on its own thread and returns it, or null
+     * when the attempt wedged for longer than [REFERENCE_TIMEOUT_MILLIS]. The reference is a
+     * native call like any other candidate, so it gets the same thread-watch: a wedged load or
+     * decode must not stall the whole sweep with no way out.
+     */
+    private suspend fun referenceAttempt(
+        model: LocalModelRecord,
+        profile: ModelProfile,
+        threads: Int,
+        onSlow: suspend (Long) -> Unit,
+        /** The batch to load with; null means the llama.cpp default, which the batch sweep's yardstick uses. */
+        batchTokens: Int? = null,
+        ubatchTokens: Int? = null,
+    ): JSONObject? {
+        val refRef = AtomicReference<JSONObject?>()
+        val refThread = thread(name = "bram-tune-reference") {
+            runCatching {
+                runBlocking {
+                    container.llamaCppClient.load(
+                        model = model.copy(preferredContextTokens = profile.contextTokens),
+                        threads = threads,
+                        gpuLayers = 0,
+                        enableThinking = profile.thinkingEnabled,
+                        flashAttention = profile.flashAttention,
+                        kvCacheType = profile.kvCacheType,
+                        batchTokens = batchTokens ?: 0,
+                        ubatchTokens = ubatchTokens ?: 0,
+                    )
+                    refRef.set(container.llamaCppClient.referenceDecode(REFERENCE_TOKENS))
+                }
+            }.onFailure { error ->
+                if (error !is android.os.DeadObjectException) {
+                    android.util.Log.d(
+                        "BramTune",
+                        "reference error: ${error::class.simpleName}: ${error.message}",
+                    )
+                }
+            }
+        }
+        val deadline = System.currentTimeMillis() + REFERENCE_TIMEOUT_MILLIS
+        while (refThread.isAlive && System.currentTimeMillis() < deadline) {
+            withContext(Dispatchers.Default) { delay(500) }
+        }
+        if (refThread.isAlive) {
+            android.util.Log.d("BramTune", "reference wedged; restarting the inference process")
+            runCatching { container.llamaCppClient.restartInferenceProcess() }
+            return null
+        }
+        val result = refRef.get() ?: return null
+        val millis = result.optLong("promptMillis", 0L) + result.optLong("decodeMillis", 0L)
+        if (millis > MAX_REFERENCE_MILLIS && !mutableState.value.cooldownOverride) {
+            onSlow(millis)
+            return null
+        }
+        return result
     }
 
     /** The decode-shaped dimensions auto-configure runs, in dependency order. */
@@ -2146,31 +2215,27 @@ class MainViewModel(
                 // even when Android's thermal status still reads "none", so a slow one is retried
                 // after a park — numbers taken through it would be lies with timestamps.
                 var cpuReference: JSONObject? = null
+                var referenceAttempts = 0
                 while (cpuReference == null) {
-                    container.llamaCppClient.load(
-                        model,
-                        threads,
-                        gpuLayers = 0,
-                        enableThinking = profile.thinkingEnabled,
-                        flashAttention = profile.flashAttention,
-                        kvCacheType = profile.kvCacheType,
-                    )
-                    val candidate = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
-                    val millis = candidate.optLong("promptMillis", 0L) + candidate.optLong("decodeMillis", 0L)
-                    if (millis <= MAX_REFERENCE_MILLIS || mutableState.value.cooldownOverride) {
-                        cpuReference = candidate
-                        break
-                    }
-                    android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
-                    mutableState.update {
-                        it.copy(
-                            status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
-                            autoConfigure = it.autoConfigure?.copy(
-                                current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
-                            ),
+                    if (referenceAttempts >= MAX_REFERENCE_ATTEMPTS) {
+                        throw IllegalStateException(
+                            "The CPU reference could not be measured (it hung or the phone " +
+                                "throttled repeatedly); the batch stays at the device default.",
                         )
                     }
-                    withContext(Dispatchers.Default) { delay(60_000) }
+                    referenceAttempts++
+                    cpuReference = referenceAttempt(model, profile, threads, onSlow = { millis ->
+                        android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
+                        mutableState.update {
+                            it.copy(
+                                status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
+                                autoConfigure = it.autoConfigure?.copy(
+                                    current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
+                                ),
+                            )
+                        }
+                        withContext(Dispatchers.Default) { delay(60_000) }
+                    })
                 }
                 val cpuRef = cpuReference!!
                 val reference = cpuRef.optJSONArray("tokens").toIntList()
@@ -2634,33 +2699,27 @@ class MainViewModel(
             // retried after a park instead of being used — numbers taken through it would be
             // lies with timestamps, and the park lets the phone actually cool down.
             var cpuReference: JSONObject? = null
+            var referenceAttempts = 0
             while (cpuReference == null) {
-                container.llamaCppClient.load(
-                    model = model.copy(preferredContextTokens = profile.contextTokens),
-                    threads = referenceThreads,
-                    gpuLayers = 0,
-                    enableThinking = profile.thinkingEnabled,
-                    flashAttention = profile.flashAttention,
-                    kvCacheType = profile.kvCacheType,
-                    batchTokens = profile.batchTokens,
-                    ubatchTokens = profile.ubatchTokens,
-                )
-                val candidate = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
-                val millis = candidate.optLong("promptMillis", 0L) + candidate.optLong("decodeMillis", 0L)
-                if (millis <= MAX_REFERENCE_MILLIS || mutableState.value.cooldownOverride) {
-                    cpuReference = candidate
-                    break
-                }
-                android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
-                mutableState.update {
-                    it.copy(
-                        status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
-                        autoConfigure = it.autoConfigure?.copy(
-                            current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
-                        ),
+                if (referenceAttempts >= MAX_REFERENCE_ATTEMPTS) {
+                    throw IllegalStateException(
+                        "The CPU reference could not be measured (it hung or the phone throttled " +
+                            "repeatedly); ${dimension.label} stays at the device default.",
                     )
                 }
-                withContext(Dispatchers.Default) { delay(60_000) }
+                referenceAttempts++
+                cpuReference = referenceAttempt(model, profile, referenceThreads, onSlow = { millis ->
+                    android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
+                    mutableState.update {
+                        it.copy(
+                            status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
+                            autoConfigure = it.autoConfigure?.copy(
+                                current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
+                            ),
+                        )
+                    }
+                    withContext(Dispatchers.Default) { delay(60_000) }
+                })
             }
             val cpuRef = cpuReference!!
             val reference = cpuRef.optJSONArray("tokens").toIntList()
@@ -2905,6 +2964,12 @@ class MainViewModel(
             )
             syncProfiles(mutableState.value.localModels, profile.id)
         }.onFailure { error ->
+            // A cancelled sweep is not a failed sweep: the user left the screen (the ViewModel
+            // was cleared), so nothing was measured and nothing should be recorded.
+            if (error is CancellationException) {
+                android.util.Log.d("BramTune", "dim=${dimension.wire} sweep cancelled; nothing recorded")
+                return@onFailure
+            }
             android.util.Log.d("BramTune", "dim=${dimension.wire} sweep failed: ${error::class.simpleName}: ${error.message}")
             mutableState.update {
                 it.copy(error = error.message ?: "Could not tune ${dimension.label.lowercase()}")
@@ -4323,6 +4388,13 @@ private const val REFERENCE_TOKENS = 24
 // measurement: on a cool phone it takes under a second, and even a warm one stays well under
 // 30s. Sweeps park and retry the reference instead of using a number taken through throttling.
 private const val MAX_REFERENCE_MILLIS = 30_000L
+// How long one reference attempt may wedge before it counts as hung (not slow) and the
+// inference process is restarted. Slower than this is a hang: even the worst throttling seen on
+// the S25 Ultra returned within 5.5 minutes, and the slow path already parks and retries.
+private const val REFERENCE_TIMEOUT_MILLIS = 4 * 60 * 1_000L
+// Hung references are retried this many times before the sweep gives up with a note; slow
+// references park and retry until the phone cools (or Continue-anyway is pressed).
+private const val MAX_REFERENCE_ATTEMPTS = 3
 // A broken backend kernel can hang a load or decode without ever reporting an error, so a
 // candidate measurement is bounded: 5 minutes is 30-60x the expected time for a phone-sized
 // model, which turns a hang into a recorded failure instead of a stall.
