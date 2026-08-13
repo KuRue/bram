@@ -55,13 +55,22 @@ build tree is a synced copy of the same working tree.
   second catalog record); the "stalled" auto-configure after conversion turned out to be a
   candidate hang that the timeout + unwedge handled as designed, with the overlay showing the
   timed-out run in red. Phone path still unvalidated (phone disconnected).
-- **LiteRT-LM unblocked in code** — `LiteRtEngineManager.generate` now uses the AAR's callback
-  `sendMessageAsync(contents, MessageCallback)` wrapped in Bram's own `callbackFlow`, the
+- **LiteRT-LM unblocked and proven on-device** — `LiteRtEngineManager.generate` now uses the AAR's
+  callback `sendMessageAsync(contents, MessageCallback)` wrapped in Bram's own `callbackFlow`, the
   acknowledged upstream workaround for the 0.15.0 `SendChannel.close$default` completion crash
   (google-ai-edge/litert-lm#2812); the channel `close()` now compiles against Bram's coroutines
-  (1.10.2). `LiteRtLmOnDeviceTest` is re-enabled and rewritten to prove it: a turn must complete
-  and stream text. The test skips on x86 (the AAR ships arm64-v8a natives only) and needs a
-  pushed SmolLM2-135M `.litertlm` on the phone — first run when the S25 Ultra reconnects.
+  (1.10.2). `LiteRtLmOnDeviceTest` runs a real SmolLM2-135M turn to completion on the S25 Ultra
+  and PASSES (it skips on x86 — the AAR ships arm64-v8a natives only; the model is pushed to the
+  test package's external files dir).
+- **Phone validation of the visual results and Phase 3** — on the S25 Ultra: the condensed
+  run-row overlay rendered live with real tok/s (CPU 404/52, OpenCL 129/44, NPU 148/27, Vulkan
+  FAIL; CPU won), the Compatibility chips (NPU 52%) and Convert buttons worked, and a Q4_0 →
+  Q8_0 conversion produced a file whose SHA matched the emulator's byte-for-byte. The converted
+  Q8_0 model intermittently hangs during teacher-forced replay under non-default configs at this
+  pin (both arm64 and x86_64) — the timeout/unwedge/failure-note machinery handled every
+  instance; documented as a known issue. Also fixed: `ModelProfileStore` persisted with
+  `apply()` (async), so a profile created by a conversion could vanish if the process died
+  right after — now `commit()`, like the catalog.
 - **`milestone-8b-profile-first` (#17)** — profile-first UI, merged.
 - **`milestone-8c-opencl` (#18)** — OpenCL for Adreno, validated: 96% (23/24) teacher-forced
   agreement, 1.11x vs CPU on Qwen3.5-Q4_0 on the S25 Ultra. The load abort was `ggml_backend_sched_new`
@@ -369,19 +378,15 @@ addresses.
 
 ## Next
 
-0. **Phone validation** — everything since the KleidiAI run (visual tuning results, Phase 3
-   import compatibility and quant conversion) has emulator proof only. When the S25 Ultra
-   reconnects: one auto-configure and one conversion on the LFM2.5 profile closes the gap.
-1. **Phase 4 — multi-vendor runtime coverage** (`docs/DEVICE_ADAPTATION.md`): the LiteRT-LM
-   callback workaround is in code and the on-device test is ready; the remaining work is the
-   runtime-neutral tuning seam, then Vulkan measured-per-vendor and the ExecuTorch lanes. Also
-   worth revisiting: the KleidiAI SVE kernels (same object-library mechanism), the deferred power
-   hints, and moving quant conversion off the service's single executor (chat waits while it
-   runs).
-2. A larger tool-capable model for agentic use. The web tools and approval gate
+0. **Phase 4 continues** — the LiteRT-LM unblock is proven; the runtime-neutral tuning seam is
+   the next slice. Known issues to revisit: the converted Q8_0 model's intermittent
+   teacher-forced hangs at this pin (arm64 + x86_64; possibly upstream — worth a pin-bump
+   retest), the KleidiAI SVE kernels, moving quant conversion off the service's single
+   executor, and the deferred power hints.
+1. A larger tool-capable model for agentic use. The web tools and approval gate
    work; LFM2.5-2.6B cannot chain tools reliably. Add one through the Models
    screen's import picker once it is on the device.
-3. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
+2. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
    the validated GPU path, so chasing Vulkan is low priority unless OpenCL's
    1.11x needs replacing.
 
