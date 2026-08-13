@@ -1385,15 +1385,46 @@ class MainViewModel(
                     )
                 }
                 waitForCooldown()
-                // A backend failing is a result, not an error: it means do not use that one. It is
-                // recorded as a failure so the card can say so rather than leaving it unexplained.
-                val report = runCatching {
-                    measureBackend(model, profile, target, threads) { message ->
-                        mutableState.update {
-                            it.copy(autoConfigure = it.autoConfigure?.copy(current = message))
+                // A backend measurement can wedge the same way a tuning candidate can — the
+                // reference decode and the replay are the same native calls — so it runs on its
+                // own thread watched against a wall-clock deadline instead of in the sweep
+                // coroutine, where a hang would stall the whole pass with no way out. A backend
+                // that times out is recorded as a failure (the overlay says so) and the process
+                // restarts for the next one.
+                val reportRef = AtomicReference<AcceleratorReport?>()
+                val backendThread = thread(name = "bram-tune-backend") {
+                    runCatching {
+                        runBlocking {
+                            reportRef.set(
+                                measureBackend(model, profile, target, threads) { message ->
+                                    mutableState.update {
+                                        it.copy(autoConfigure = it.autoConfigure?.copy(current = message))
+                                    }
+                                },
+                            )
+                        }
+                    }.onFailure { error ->
+                        if (error !is android.os.DeadObjectException) {
+                            android.util.Log.d(
+                                "BramTune",
+                                "backend ${backend.label} error: ${error::class.simpleName}: ${error.message}",
+                            )
                         }
                     }
-                }.getOrNull()
+                }
+                val backendDeadline = System.currentTimeMillis() + CANDIDATE_TIMEOUT_MILLIS
+                var backendThermalTicks = 0
+                while (backendThread.isAlive && System.currentTimeMillis() < backendDeadline) {
+                    if (++backendThermalTicks % 30 == 0) refreshThermalIndicator()
+                    withContext(Dispatchers.Default) { delay(500) }
+                }
+                val report = if (backendThread.isAlive) {
+                    android.util.Log.d("BramTune", "backend ${backend.label} TIMED OUT; restarting the inference process")
+                    runCatching { container.llamaCppClient.restartInferenceProcess() }
+                    null
+                } else {
+                    reportRef.get()
+                }
                 if (report != null) measured += backend to report
                 val result = BackendMeasurement(
                     backendId = backend.name,
