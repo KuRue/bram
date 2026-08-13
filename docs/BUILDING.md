@@ -22,7 +22,7 @@ AGP 9.3 provides built-in Kotlin for Android modules. Do not add the legacy
 libraries. The pure JVM `core` modules continue to use `org.jetbrains.kotlin.jvm`.
 
 `runtime:llamacpp` pins llama.cpp commit
-`474c92e722ce77aee2060cd08629b9afb008d81b`. CMake fetches that immutable commit during native
+`132753bf4e52b1a8bda8f6ec33f1785bd80470da`. CMake fetches that immutable commit during native
 configuration. It does not track an upstream branch.
 
 ## Accelerator backends

@@ -123,9 +123,12 @@ import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.FlashAttentionMode
+import io.github.kurue.bram.core.domain.HexFlags
 import io.github.kurue.bram.core.domain.KvCacheType
+import io.github.kurue.bram.core.domain.LoadMode
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
+import io.github.kurue.bram.core.domain.TuningDimension
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
@@ -330,6 +333,8 @@ fun BramApp(viewModel: MainViewModel) {
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onAutoConfigure = viewModel::autoConfigure,
                                 onTuneBatch = viewModel::tuneBatch,
+                                onTuneDimension = viewModel::tuneDimension,
+                                tuningDimension = state.tuningDimension,
                             )
                             AppPanel.ROUTING -> RoutingSummaryScreen(
                                 state = state,
@@ -917,6 +922,9 @@ private fun ModelsScreen(
     onRemoveEndpoint: (String) -> Unit,
     onAutoConfigure: (String) -> Unit,
     onTuneBatch: (String) -> Unit,
+    onTuneDimension: (String, TuningDimension) -> Unit,
+    /** The dimension being measured right now, so its row can say "Tuning…". */
+    tuningDimension: TuningDimension?,
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var addingProfile by rememberSaveable { mutableStateOf(false) }
@@ -982,9 +990,12 @@ private fun ModelsScreen(
                     loaded = state.activeProfileId == profile.id &&
                         state.loadedModelId == model.id.value && state.cpuValidated,
                     loading = state.isLoadingModel && state.activeProfileId == profile.id,
-                    busy = state.isGenerating || state.isValidatingAccelerator || state.batchTuneProfileId != null,
-                    tuning = state.batchTuneProfileId == profile.id,
-                    tuneStatus = state.status?.takeIf { state.batchTuneProfileId == profile.id },
+                    busy = state.isGenerating || state.isValidatingAccelerator ||
+                        state.batchTuneProfileId != null || state.tuningProfileId != null,
+                    tuning = state.batchTuneProfileId == profile.id || state.tuningProfileId == profile.id,
+                    tuneStatus = state.status?.takeIf {
+                        state.batchTuneProfileId == profile.id || state.tuningProfileId == profile.id
+                    },
                     backend = backend,
                     availableBackends = state.availableBackends,
                     canDelete = state.profiles.count { it.modelId == profile.modelId } > 1,
@@ -996,6 +1007,10 @@ private fun ModelsScreen(
                     onDuplicate = { onCreateProfile(model) },
                     onAutoConfigure = { onAutoConfigure(profile.id) },
                     onTuneBatch = { onTuneBatch(profile.id) },
+                    onTuneDimension = { dimension -> onTuneDimension(profile.id, dimension) },
+                    tuningDimension = tuningDimension,
+                    staleMeasurement = profile.measuredFingerprint.isNotBlank() &&
+                        profile.measuredFingerprint != state.measurementFingerprint,
                 )
             }
         }
@@ -1324,6 +1339,11 @@ private fun ProfileCard(
     onDuplicate: () -> Unit,
     onAutoConfigure: () -> Unit,
     onTuneBatch: () -> Unit,
+    onTuneDimension: (TuningDimension) -> Unit,
+    /** The dimension being measured right now, so its row can say "Tuning…". */
+    tuningDimension: TuningDimension?,
+    /** True when the profile's measurements were recorded under a different device/build. */
+    staleMeasurement: Boolean = false,
 ) {
     // Settings the runtime reads at load time cannot change under a loaded model.
     val locked = loaded || loading || busy
@@ -1420,6 +1440,17 @@ private fun ProfileCard(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                    }
+                    // The shape of the tuned configuration at a glance: which dimensions were
+                    // measured and what won, so the collapsed card reads like the batch pills do.
+                    TuningSummary(profile, Modifier.fillMaxWidth())
+                    if (staleMeasurement) {
+                        Text(
+                            "These measurements were taken on a different device or build. " +
+                                "Run Auto-configure to re-measure on this one.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
                     }
                 HorizontalDivider()
 
@@ -1614,6 +1645,86 @@ private fun ProfileCard(
                             note,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
+                    // The decode-shaped dimensions follow the batch pattern: a measured choice is a
+                    // note beside a Tune button, and Default is always one tap away. Each one only
+                    // matters on the hardware that exposes it, so the Hexagon row appears only when
+                    // this profile loads onto the NPU.
+                    SectionLabel("Decode tuning")
+                    TuningDimensionRow(
+                        label = "Threads",
+                        isDefault = profile.threads == 0,
+                        chosen = profile.threads.takeIf { it > 0 }?.let { "$it threads" },
+                        measuring = tuningDimension == TuningDimension.THREADS,
+                        note = profile.tuning.firstOrNull { it.dimension == TuningDimension.THREADS }?.note,
+                        enabled = !busy,
+                        onDefault = { onUpdateProfile(profile.copy(threads = 0)) },
+                        onTune = { onTuneDimension(TuningDimension.THREADS) },
+                    )
+                    TuningDimensionRow(
+                        label = "CPU mask",
+                        isDefault = profile.cpuMask.isEmpty(),
+                        chosen = profile.cpuMask.takeIf(String::isNotEmpty)?.let { "0x$it" },
+                        measuring = tuningDimension == TuningDimension.CPU_MASK,
+                        note = profile.tuning.firstOrNull { it.dimension == TuningDimension.CPU_MASK }?.note,
+                        enabled = !busy,
+                        onDefault = {
+                            onUpdateProfile(profile.copy(cpuMask = "", cpuStrict = false))
+                        },
+                        onTune = { onTuneDimension(TuningDimension.CPU_MASK) },
+                    )
+                    TuningDimensionRow(
+                        label = "Poll",
+                        isDefault = profile.poll < 0,
+                        chosen = profile.poll.takeIf { it >= 0 }?.let { "$it" },
+                        measuring = tuningDimension == TuningDimension.POLL,
+                        note = profile.tuning.firstOrNull { it.dimension == TuningDimension.POLL }?.note,
+                        enabled = !busy,
+                        onDefault = { onUpdateProfile(profile.copy(poll = -1)) },
+                        onTune = { onTuneDimension(TuningDimension.POLL) },
+                    )
+                    SectionLabel("Load mode")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        LoadMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = mode == profile.loadMode,
+                                onClick = { onUpdateProfile(profile.copy(loadMode = mode)) },
+                                enabled = !locked,
+                                label = { Text(mode.label) },
+                            )
+                        }
+                        TextButton(
+                            onClick = { onTuneDimension(TuningDimension.LOAD_MODE) },
+                            enabled = !measuring,
+                        ) {
+                            Text(
+                                if (tuningDimension == TuningDimension.LOAD_MODE) "Tuning…" else "Tune",
+                            )
+                        }
+                    }
+                    profile.tuning.firstOrNull { it.dimension == TuningDimension.LOAD_MODE }?.note
+                        ?.takeIf(String::isNotBlank)?.let { note ->
+                            Text(
+                                note,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    if (backend == RuntimeBackend.HEXAGON) {
+                        TuningDimensionRow(
+                            label = "Hexagon",
+                            isDefault = profile.hexFlags.isDefault,
+                            chosen = if (profile.hexFlags.isDefault) null else "HMX + host buffers",
+                            measuring = tuningDimension == TuningDimension.HEX_FLAGS,
+                            note = profile.tuning.firstOrNull { it.dimension == TuningDimension.HEX_FLAGS }?.note,
+                            enabled = !busy,
+                            onDefault = { onUpdateProfile(profile.copy(hexFlags = HexFlags())) },
+                            onTune = { onTuneDimension(TuningDimension.HEX_FLAGS) },
                         )
                     }
                 }
@@ -1886,6 +1997,78 @@ private fun AutoConfigureRow(label: String, status: String, color: Color) {
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.SemiBold,
             color = color,
+        )
+    }
+}
+
+/**
+ * One tuning dimension on the profile card: label, the measured choice when there is one, and a
+ * Tune button that runs the same teacher-forced sweep the batch tuner does. Default restores the
+ * device default, which is what an untouched profile runs.
+ */
+@Composable
+private fun TuningDimensionRow(
+    label: String,
+    isDefault: Boolean,
+    chosen: String?,
+    measuring: Boolean,
+    note: String?,
+    enabled: Boolean,
+    onDefault: () -> Unit,
+    onTune: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            chosen?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+            }
+            TextButton(onClick = onDefault, enabled = enabled && !isDefault) {
+                Text("Default", style = MaterialTheme.typography.labelMedium)
+            }
+            TextButton(onClick = onTune, enabled = enabled) {
+                Text(
+                    if (measuring) "Tuning…" else "Tune",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+        note?.takeIf(String::isNotBlank)?.let { text ->
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** The measured tuning configuration in one line, for the collapsed profile card. */
+@Composable
+private fun TuningSummary(profile: ModelProfile, modifier: Modifier = Modifier) {
+    val bits = buildList {
+        profile.tuning.forEach { note ->
+            if (note.chosen != "Default") add("${note.dimension.label} ${note.chosen}")
+        }
+        profile.batchTuneNote.takeIf(String::isNotBlank)?.let { note ->
+            add(note.substringAfter("Tuned batch ").substringBefore(" on ").let { "batch $it" })
+        }
+    }
+    if (bits.isNotEmpty()) {
+        Text(
+            bits.joinToString(" · "),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier,
         )
     }
 }

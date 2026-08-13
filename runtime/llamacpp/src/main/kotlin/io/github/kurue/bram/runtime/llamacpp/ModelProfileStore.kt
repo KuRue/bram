@@ -2,12 +2,18 @@ package io.github.kurue.bram.runtime.llamacpp
 
 import android.content.Context
 import io.github.kurue.bram.core.domain.BackendMeasurement
+import io.github.kurue.bram.core.domain.DimensionTuneNote
 import io.github.kurue.bram.core.domain.FlashAttentionMode
+import io.github.kurue.bram.core.domain.HexFlags
 import io.github.kurue.bram.core.domain.KvCacheType
+import io.github.kurue.bram.core.domain.LoadMode
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.SamplerSettings
+import io.github.kurue.bram.core.domain.ThreadPriority
+import io.github.kurue.bram.core.domain.TuningDimension
+import io.github.kurue.bram.core.domain.canonicalCpuMask
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -49,11 +55,13 @@ class ModelProfileStore(context: Context) {
     suspend fun save(profile: ModelProfile): ModelProfile = withContext(Dispatchers.IO) {
         val context = profile.contextTokens.coerceAtLeast(256)
         val batch = profile.batchTokens.coerceIn(0, context)
-        val sanitized = profile.copy(
-            sampler = profile.sampler.sanitized(),
-            batchTokens = batch,
-            ubatchTokens = profile.ubatchTokens.coerceIn(0, batch),
-        )
+        val sanitized = profile
+            .sanitizedRuntime()
+            .copy(
+                sampler = profile.sampler.sanitized(),
+                batchTokens = batch,
+                ubatchTokens = profile.ubatchTokens.coerceIn(0, batch),
+            )
         val existing = decode(preferences.getString(KEY_PROFILES, null))
         val merged = existing.filterNot { it.id == sanitized.id } + sanitized
         write(merged)
@@ -120,6 +128,17 @@ class ModelProfileStore(context: Context) {
         .put("kvCacheType", kvCacheType.wire)
         .put("batchTokens", batchTokens)
         .put("ubatchTokens", ubatchTokens)
+        .put("threads", threads)
+        .put("cpuMask", cpuMask)
+        .put("cpuStrict", cpuStrict)
+        .put("poll", poll)
+        .put("threadPriority", threadPriority.wire)
+        .put("loadMode", loadMode.wire)
+        .put("hexUseHmx", hexFlags.useHmx)
+        .put("hexDisableNhvx", hexFlags.disableNhvx)
+        .put("hexHostBuf", hexFlags.hostBuf)
+        .put("hexOpBatch", hexFlags.opBatch)
+        .put("hexNDev", hexFlags.nDev)
         .put("temperature", sampler.temperature.toDouble())
         .put("topP", sampler.topP.toDouble())
         .put("topK", sampler.topK)
@@ -146,6 +165,21 @@ class ModelProfileStore(context: Context) {
         .put("autoConfiguredAtEpochMillis", autoConfiguredAtEpochMillis)
         .put("batchTuneNote", batchTuneNote)
         .put("batchTunedAtEpochMillis", batchTunedAtEpochMillis)
+        .put(
+            "tuning",
+            JSONArray().also { array ->
+                tuning.forEach { note ->
+                    array.put(
+                        JSONObject()
+                            .put("dimension", note.dimension.wire)
+                            .put("chosen", note.chosen)
+                            .put("note", note.note)
+                            .put("measuredAtEpochMillis", note.measuredAtEpochMillis),
+                    )
+                }
+            },
+        )
+        .put("measuredFingerprint", measuredFingerprint)
         .put("isDefault", isDefault)
 
     private fun JSONObject.toProfile(): ModelProfile {
@@ -163,6 +197,19 @@ class ModelProfileStore(context: Context) {
             kvCacheType = KvCacheType.fromWire(optString("kvCacheType")),
             batchTokens = storedBatch,
             ubatchTokens = optInt("ubatchTokens", 0).coerceIn(0, storedBatch),
+            threads = optInt("threads", 0).coerceIn(0, 64),
+            cpuMask = canonicalCpuMask(optString("cpuMask")),
+            cpuStrict = optBoolean("cpuStrict") && canonicalCpuMask(optString("cpuMask")).isNotEmpty(),
+            poll = optInt("poll", -1).coerceIn(-1, 100),
+            threadPriority = ThreadPriority.fromWire(optString("threadPriority")),
+            loadMode = LoadMode.fromWire(optString("loadMode")),
+            hexFlags = HexFlags(
+                useHmx = optBoolean("hexUseHmx"),
+                disableNhvx = optBoolean("hexDisableNhvx"),
+                hostBuf = optBoolean("hexHostBuf"),
+                opBatch = optInt("hexOpBatch", 0).coerceIn(0, 0xF),
+                nDev = optInt("hexNDev", 0).coerceIn(0, 8),
+            ).sanitized(),
             sampler = SamplerSettings(
                 temperature = optDouble("temperature", fallback.temperature.toDouble()).toFloat(),
                 topP = optDouble("topP", fallback.topP.toDouble()).toFloat(),
@@ -187,6 +234,22 @@ class ModelProfileStore(context: Context) {
             }.orEmpty(),
             autoConfiguredNote = optString("autoConfiguredNote"),
             autoConfiguredAtEpochMillis = optLong("autoConfiguredAtEpochMillis", 0L),
+            batchTuneNote = optString("batchTuneNote"),
+            batchTunedAtEpochMillis = optLong("batchTunedAtEpochMillis", 0L),
+            tuning = optJSONArray("tuning")?.let { array ->
+                (0 until array.length()).mapNotNull { index ->
+                    array.optJSONObject(index)?.let { entry ->
+                        DimensionTuneNote(
+                            dimension = TuningDimension.fromWire(entry.optString("dimension"))
+                                ?: return@let null,
+                            chosen = entry.optString("chosen"),
+                            note = entry.optString("note"),
+                            measuredAtEpochMillis = entry.optLong("measuredAtEpochMillis", 0L),
+                        )
+                    }
+                }
+            }.orEmpty(),
+            measuredFingerprint = optString("measuredFingerprint"),
             isDefault = optBoolean("isDefault"),
         )
     }

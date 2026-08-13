@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -39,6 +40,15 @@ struct runtime_state {
     llama_flash_attn_type flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
     ggml_type kv_type = GGML_TYPE_F16;
     std::string model_path;
+    // The generation threadpool built from the load request's tuning fields (cpu mask, poll,
+    // priority, strict placement). Null means llama.cpp's own default pool, which is what Bram
+    // always used. Attached only to the chat context: the reference and self-test contexts keep
+    // the default pool so the CPU yardstick is never tuned by the thing it is measuring.
+    ggml_threadpool_t chat_pool = nullptr;
+    ggml_threadpool_t chat_pool_batch = nullptr;
+    bool custom_threadpool = false;
+    // What load mode the model was loaded with, echoed so the load identity can compare strings.
+    std::string load_mode = "auto";
 
     // The chat context outlives a single turn so its KV cache can be reused. Rebuilding it every
     // turn meant re-decoding the whole conversation each time, which grows without bound: at the
@@ -472,6 +482,14 @@ void unload_locked() {
     release_chat_context();
     g_state.chat_templates.reset();
     if (g_state.model != nullptr) llama_model_free(g_state.model);
+    if (g_state.chat_pool != nullptr) {
+        ggml_threadpool_free(g_state.chat_pool);
+        g_state.chat_pool = nullptr;
+    }
+    if (g_state.chat_pool_batch != nullptr) {
+        ggml_threadpool_free(g_state.chat_pool_batch);
+        g_state.chat_pool_batch = nullptr;
+    }
     g_state = {};
 }
 
@@ -501,9 +519,31 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     JNIEnv * env, jobject, jstring path, jint context_tokens, jint batch_tokens, jint ubatch_tokens,
     jint threads, jint gpu_layers, jstring device_filter, jboolean enable_thinking,
-    jstring flash_attention, jstring kv_cache) {
+    jstring flash_attention, jstring kv_cache, jstring cpu_mask, jboolean cpu_strict, jint poll,
+    jstring thread_priority, jstring load_mode, jboolean hex_use_hmx, jboolean hex_disable_nhvx,
+    jboolean hex_host_buf, jint hex_op_batch, jint hex_ndev) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
+        // The Hexagon backend reads its environment once, at backend registration, so it has to
+        // be in place before the first native init. The Kotlin side restarts the process whenever
+        // these change, so a warm process is never asked to apply different values. Flags that
+        // are at their default are left unset, preserving the backend's own defaults.
+        const bool use_hmx = hex_use_hmx == JNI_TRUE;
+        const bool disable_nhvx = hex_disable_nhvx == JNI_TRUE;
+        const bool host_buf = hex_host_buf == JNI_TRUE;
+        if (use_hmx) setenv("GGML_HEXAGON_USE_HMX", "1", 1);
+        if (disable_nhvx) setenv("GGML_HEXAGON_NHVX", "0", 1);
+        if (host_buf) setenv("GGML_HEXAGON_HOSTBUF", "1", 1);
+        if (hex_op_batch > 0) {
+            char buffer[16] = {};
+            snprintf(buffer, sizeof(buffer), "0x%X", static_cast<int>(hex_op_batch));
+            setenv("GGML_HEXAGON_OPBATCH", buffer, 1);
+        }
+        if (hex_ndev > 0) {
+            char buffer[16] = {};
+            snprintf(buffer, sizeof(buffer), "%d", static_cast<int>(hex_ndev));
+            setenv("GGML_HEXAGON_NDEV", buffer, 1);
+        }
         ensure_backend();
         unload_locked();
         g_cancelled.store(false, std::memory_order_relaxed);
@@ -564,9 +604,65 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
             selected.push_back(nullptr);  // llama.cpp expects a null-terminated list
             params.devices = selected.data();
         }
-        params.load_mode = LLAMA_LOAD_MODE_MMAP;
+        // How the weights enter memory. MMAP is what Bram always ran; NO_MMAP matches the
+        // Qualcomm reference setup for the Hexagon path, which repacks weights for HTP anyway.
+        // There is no "auto" mode in this llama.cpp revision, so Auto keeps today's mmap.
+        const std::string mode = load_mode == nullptr ? std::string() : from_jstring(env, load_mode);
+        if (mode == "no_mmap") {
+            params.load_mode = LLAMA_LOAD_MODE_NONE;
+        } else {
+            params.load_mode = LLAMA_LOAD_MODE_MMAP;
+        }
+        g_state.load_mode = mode.empty() ? "auto" : mode;
         params.vocab_only = false;
         params.check_tensors = false;
+
+        // The generation threadpool. Today's behavior — llama.cpp's own pool, default affinity,
+        // default polling — is kept unless the load request names a mask, a poll level, strict
+        // placement, or a higher priority. The pool is attached to the chat context only; every
+        // context the harness creates for the CPU reference keeps the default pool, so the
+        // yardstick is never affected by what it is measuring.
+        const std::string mask_str = cpu_mask == nullptr ? std::string() : from_jstring(env, cpu_mask);
+        const bool strict = cpu_strict == JNI_TRUE;
+        const std::string prio = thread_priority == nullptr ? std::string() : from_jstring(env, thread_priority);
+        const bool wants_pool = !mask_str.empty() || strict || poll >= 0 || prio == "high";
+        g_state.custom_threadpool = false;
+        if (wants_pool) {
+            bool mask_bits[GGML_MAX_N_THREADS] = {};
+            for (size_t i = 0; i < mask_str.size(); ++i) {
+                const char c = mask_str[i];
+                int nibble = -1;
+                if (c >= '0' && c <= '9') nibble = c - '0';
+                else if (c >= 'a' && c <= 'f') nibble = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') nibble = c - 'A' + 10;
+                if (nibble < 0) continue;
+                for (int b = 0; b < 4; ++b) {
+                    const size_t bit = i * 4 + static_cast<size_t>(b);
+                    if (bit >= GGML_MAX_N_THREADS) break;
+                    if (nibble & (1 << (3 - b))) mask_bits[bit] = true;
+                }
+            }
+            struct ggml_threadpool_params pool = ggml_threadpool_params_default(threads);
+            for (size_t i = 0; i < GGML_MAX_N_THREADS; ++i) pool.cpumask[i] = mask_bits[i];
+            pool.strict_cpu = strict;
+            if (poll >= 0) pool.poll = static_cast<uint32_t>(poll);
+            if (prio == "high") pool.prio = GGML_SCHED_PRIO_HIGH;
+            struct ggml_threadpool_params pool_batch = pool;
+            g_state.chat_pool = ggml_threadpool_new(&pool);
+            g_state.chat_pool_batch = ggml_threadpool_new(&pool_batch);
+            if (g_state.chat_pool == nullptr || g_state.chat_pool_batch == nullptr) {
+                // A pool that cannot be created is not a reason to refuse the load: fall back to
+                // llama.cpp's own pool rather than failing the chat.
+                if (g_state.chat_pool != nullptr) ggml_threadpool_free(g_state.chat_pool);
+                if (g_state.chat_pool_batch != nullptr) ggml_threadpool_free(g_state.chat_pool_batch);
+                g_state.chat_pool = nullptr;
+                g_state.chat_pool_batch = nullptr;
+                __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                    "bram_load: threadpool creation failed; using the default pool");
+            } else {
+                g_state.custom_threadpool = true;
+            }
+        }
         drain_recent_log();
         __android_log_print(ANDROID_LOG_INFO, "BramLlama",
             "bram_load: requesting n_gpu_layers=%d device_filter='%s' matched=%d fa=%s kv=%s",
@@ -605,6 +701,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
                << ",\"batchTokens\":" << g_state.batch_tokens
                << ",\"ubatchTokens\":" << g_state.ubatch_tokens
                << ",\"threads\":" << g_state.threads
+               << ",\"threadPool\":\"" << (g_state.custom_threadpool ? "custom" : "default") << "\""
+               << ",\"loadMode\":\"" << json_escape(g_state.load_mode) << "\""
                << ",\"requestedGpuLayers\":" << g_state.gpu_layers
                << ",\"offloadedToGpu\":" << (g_state.gpu_layers > 0 ? "true" : "false")
                << ",\"flashAttention\":\"" << json_escape(fa.empty() ? "auto" : fa) << "\""
@@ -705,6 +803,11 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
 
         if (g_state.chat_context == nullptr) {
             g_state.chat_context = create_context();
+            if (g_state.chat_pool != nullptr) {
+                // The tuned pool is attached here, not in create_context, so the contexts the
+                // harness builds for the CPU reference never carry it.
+                llama_attach_threadpool(g_state.chat_context, g_state.chat_pool, g_state.chat_pool_batch);
+            }
             g_state.cached_tokens.clear();
         }
         llama_context * context = g_state.chat_context;

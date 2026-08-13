@@ -27,15 +27,18 @@ class InferenceProcessService : Service() {
         }
         NativeLlamaBridge()
     }
-    private var loadedModelId: String? = null
-    private var loadedContextTokens: Int = 0
-    private var loadedGpuLayers: Int = 0
-    private var loadedDeviceFilter: String = ""
-    private var loadedThinking: Boolean = false
-    private var loadedFlashAttention: String = "auto"
-    private var loadedKvCacheType: String = "f16"
-    private var loadedBatchTokens: Int = 0
-    private var loadedUbatchTokens: Int = 0
+    /**
+     * The identity of the load this process is serving, or null when nothing is loaded. Every
+     * setting is part of it: a context is never reused for a different configuration, because
+     * reusing one would silently run or validate the previous one.
+     */
+    private var loaded: LoadIdentity? = null
+    /**
+     * The `GGML_HEXAGON_*` environment this process was born with. The backend reads it once at
+     * registration, so the first native load fixes it; a later request that differs must come
+     * from a fresh process (the client restarts on `restartRequired`).
+     */
+    private var processHexEnv: String? = null
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
@@ -76,7 +79,7 @@ class InferenceProcessService : Service() {
             requests.remove(requestId)?.cancel(true)
             requests[requestId] = executor.submit {
                 try {
-                    check(loadedModelId != null) { "Load a local model before generating" }
+                    check(loaded != null) { "Load a local model before generating" }
                     val request = JSONObject(requestJson)
                     val prompt = formatPrompt(
                         request.getJSONArray("messages"),
@@ -91,7 +94,7 @@ class InferenceProcessService : Service() {
                         requestId,
                         JSONObject()
                             .put("type", "started")
-                            .put("runtimeDescription", "Local CPU · ${loadedContextTokens} token context")
+                            .put("runtimeDescription", "Local CPU · ${loaded?.contextTokens ?: 0} token context")
                             .put("chatFormat", chatFormat),
                     )
                     // Kept so the finished reply can be parsed for tool calls. The deltas are what
@@ -243,8 +246,8 @@ class InferenceProcessService : Service() {
         override fun state(): String = runSerialized {
             JSONObject(bridge.state())
                 .put("protocolVersion", PROTOCOL_VERSION)
-                .put("loadedModelId", loadedModelId)
-                .put("contextTokens", loadedContextTokens)
+                .put("loadedModelId", loaded?.modelId)
+                .put("contextTokens", loaded?.contextTokens ?: 0)
                 .put("cpuValidated", cpuValidated)
                 .toString()
         }
@@ -272,36 +275,34 @@ class InferenceProcessService : Service() {
     }
 
     private fun loadModel(request: JSONObject): String {
-        val modelId = request.getString("modelId")
-        val contextTokens = request.getInt("contextTokens").coerceAtLeast(256)
-        val gpuLayers = request.optInt("gpuLayers", 0).coerceAtLeast(0)
-        val deviceFilter = request.optString("deviceFilter")
-        val enableThinking = request.optBoolean("enableThinking", false)
-        val flashAttention = request.optString("flashAttention", "auto")
-        val kvCacheType = request.optString("kvCacheType", "f16")
-        // The batch configuration is a context parameter like the attention path: it changes how
-        // llama.cpp splits the prompt into evaluations, so reusing a context built for another
-        // batch would measure and run a different configuration than the one requested.
-        val batchTokens = request.optInt("batchTokens", 0).coerceIn(0, contextTokens)
-        val ubatchTokens = request.optInt("ubatchTokens", 0).coerceIn(0, batchTokens)
+        // The identity is parsed and normalized once, here, and compared whole: every setting is
+        // part of it, because reusing a context built for another configuration would silently
+        // run or validate the wrong thing.
+        val identity = LoadIdentity.from(request)
+        val requestedHex = identity.hexKey
+        // The Hexagon environment is read once per process, at backend registration. A request
+        // that would change it cannot be honored by this process, so hand the load back to the
+        // client, which restarts the process and retries. Unload first so the restart is clean,
+        // and schedule this process's own death: the client waits on the binder death, and a
+        // self-kill is deterministic where an unbind-triggered teardown can be slow.
+        if (processHexEnv != null && requestedHex != processHexEnv) {
+            runCatching { bridge.unload() }
+            loaded = null
+            cpuValidated = false
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                { android.os.Process.killProcess(android.os.Process.myPid()) },
+                500L,
+            )
+            return JSONObject().put("restartRequired", true).toString()
+        }
         // The offload plan is part of the load identity: reusing a CPU-resident model for a GPU
-        // request would silently validate the accelerator against itself. The attention path and KV
-        // type are part of it too: they are context parameters, so changing them without reloading
-        // would quietly measure the previous configuration.
-        if (modelId == loadedModelId &&
-            contextTokens == loadedContextTokens &&
-            gpuLayers == loadedGpuLayers &&
-            deviceFilter == loadedDeviceFilter &&
-            enableThinking == loadedThinking &&
-            flashAttention == loadedFlashAttention &&
-            kvCacheType == loadedKvCacheType &&
-            batchTokens == loadedBatchTokens &&
-            ubatchTokens == loadedUbatchTokens &&
-            cpuValidated
-        ) {
+        // request would silently validate the accelerator against itself. The attention path, KV
+        // type, batch, and threadpool settings are part of it too: they are context parameters, so
+        // changing them without reloading would quietly measure the previous configuration.
+        if (identity == loaded && cpuValidated) {
             return JSONObject(bridge.state())
                 .put("alreadyLoaded", true)
-                .put("modelId", modelId)
+                .put("modelId", identity.modelId)
                 .put("cpuValidated", true)
                 .toString()
         }
@@ -322,51 +323,49 @@ class InferenceProcessService : Service() {
             require(expectedSize < 0 || expectedSize == actualSize) {
                 "The GGUF size changed after import. Remove it from Bram and import it again before loading."
             }
+            // The JNI layer applies the environment before the backend initializes, so record the
+            // process's hex environment even if this particular load then fails.
+            processHexEnv = requestedHex
             val loadResult = JSONObject(
                 bridge.load(
                     modelPath = modelFile.absolutePath,
-                    contextTokens = contextTokens,
-                    batchTokens = batchTokens,
-                    ubatchTokens = ubatchTokens,
-                    threads = request.optInt("threads", Runtime.getRuntime().availableProcessors())
-                        .coerceIn(1, Runtime.getRuntime().availableProcessors()),
-                    gpuLayers = gpuLayers,
-                    deviceFilter = deviceFilter,
-                    enableThinking = enableThinking,
-                    flashAttention = flashAttention,
-                    kvCacheType = kvCacheType,
+                    contextTokens = identity.contextTokens,
+                    batchTokens = identity.batchTokens,
+                    ubatchTokens = identity.ubatchTokens,
+                    threads = identity.threads,
+                    gpuLayers = identity.gpuLayers,
+                    deviceFilter = identity.deviceFilter,
+                    enableThinking = identity.enableThinking,
+                    flashAttention = identity.flashAttention,
+                    kvCacheType = identity.kvCacheType,
+                    cpuMask = identity.cpuMask,
+                    cpuStrict = identity.cpuStrict,
+                    poll = identity.poll,
+                    threadPriority = identity.threadPriority,
+                    loadMode = identity.loadMode,
+                    hexUseHmx = identity.hexUseHmx,
+                    hexDisableNhvx = identity.hexDisableNhvx,
+                    hexHostBuf = identity.hexHostBuf,
+                    hexOpBatch = identity.hexOpBatch,
+                    hexNDev = identity.hexNDev,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())
             check(validation.optBoolean("passed")) {
                 validation.optString("detail", "Native CPU correctness self-test failed")
             }
-            loadedModelId = modelId
-            loadedContextTokens = contextTokens
-            loadedGpuLayers = gpuLayers
-            loadedDeviceFilter = deviceFilter
-            loadedThinking = enableThinking
-            loadedFlashAttention = flashAttention
-            loadedKvCacheType = kvCacheType
-            loadedBatchTokens = batchTokens
-            loadedUbatchTokens = ubatchTokens
+            loaded = identity
             cpuValidated = true
             return loadResult
                 .put("alreadyLoaded", false)
-                .put("modelId", modelId)
+                .put("modelId", identity.modelId)
                 .put("cpuValidated", true)
                 .put("processPssBytes", Debug.getPss().toLong() * 1_024L)
                 .put("selfTest", validation)
                 .toString()
         } catch (error: Throwable) {
             runCatching { bridge.unload() }
-            loadedModelId = null
-            loadedContextTokens = 0
-            loadedGpuLayers = 0
-            loadedDeviceFilter = ""
-            loadedThinking = false
-            loadedFlashAttention = "auto"
-            loadedKvCacheType = "f16"
+            loaded = null
             cpuValidated = false
             throw error
         }
@@ -375,13 +374,7 @@ class InferenceProcessService : Service() {
     private fun unloadModel(): String {
         bridge.cancel()
         val result = bridge.unload()
-        loadedModelId = null
-        loadedContextTokens = 0
-        loadedGpuLayers = 0
-        loadedDeviceFilter = ""
-        loadedThinking = false
-        loadedFlashAttention = "auto"
-        loadedKvCacheType = "f16"
+        loaded = null
         cpuValidated = false
         return result
     }

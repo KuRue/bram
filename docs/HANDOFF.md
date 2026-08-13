@@ -1,6 +1,6 @@
 # Session handoff
 
-Last updated: 2026-08-08
+Last updated: 2026-08-12
 
 ## Current source of truth
 
@@ -11,6 +11,7 @@ Last updated: 2026-08-08
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
 | Test emulator | AVD `Pixel_9a`, x86_64, 6 GB RAM / 16 GB storage |
 | Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone, tool-capable), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
+| llama.cpp pin | `132753bf` (2026-08-12, bumped for the KleidiAI runtime feature detection #26076) |
 
 main is healthy and CI-green. The auto-configure UI work (profile card, glass tuning, the
 auto-configure overlay) is merged as #20. The local Windows checkout is on `main` at #20; the WSL
@@ -18,6 +19,26 @@ build tree is a synced copy of the same working tree.
 
 ## Landed since the previous refresh
 
+- **Milestone 19 — device-adaptive tuning, KleidiAI CPU kernels, and measurement fingerprints**
+  (working tree, uncommitted at last write). Full design in `docs/DEVICE_ADAPTATION.md`, research
+  in `docs/PERFORMANCE_OPTIONS.md`. The runtime settings the pin exposes but Bram never used
+  (threads, cpu mask, poll, load mode, `GGML_HEXAGON_*` flags) became profile fields, JNI
+  threadpool plumbing, and teacher-forced tuning dimensions: every candidate must reproduce the
+  CPU reference before its speed counts, winners are written as dated notes, and auto-configure
+  now runs backend → decode dimensions → batch in one visible pass. Measured on the S25 Ultra:
+  threads 6, aggressive poll, mmap, and hexagon defaults won their sweeps; the device also
+  rejected the reference's `-no-mmap` and `--cpu-mask` advice by measurement.
+  **KleidiAI** (dotprod/i8mm microkernels, built as an OBJECT library at
+  `-march=armv8.6-a+dotprod+i8mm` with runtime HWCAP dispatch) took the LFM2.5 CPU prompt path
+  from ~16 to **~86 tok/s** — enough that the CPU now beats the Hexagon NPU on that model (NPU
+  0.54x against the new reference), and auto-configure re-routed the profile to CPU. The
+  **measurement fingerprint** (device + app build + engine build + CPU features) stamps every
+  result, the card warns when a profile was measured elsewhere, and sweeps refuse to run while
+  the device throttles or is low on memory. On-device testing also fixed: a process-restart race
+  for hex-flag changes (service self-kill + binder death-wait), a missing per-candidate timeout
+  (a hung HTP kernel now unwedges the process and is recorded), the async `reloadProfiles` race
+  that let tuning phases overwrite each other's writes, and a stuck-state after auto-configure
+  that blocked all later tunes.
 - **`milestone-8b-profile-first` (#17)** — profile-first UI, merged.
 - **`milestone-8c-opencl` (#18)** — OpenCL for Adreno, validated: 96% (23/24) teacher-forced
   agreement, 1.11x vs CPU on Qwen3.5-Q4_0 on the S25 Ultra. The load abort was `ggml_backend_sched_new`
@@ -325,6 +346,11 @@ addresses.
 
 ## Next
 
+0. **Phase 3 — import compatibility and quantization** (`docs/DEVICE_ADAPTATION.md`): extend
+   `GgufMetadataReader` with per-tensor quant counts, a backend×quant compatibility report at
+   import ("this Q4_K_M can only fully offload to the GPU"), and on-device quant conversion
+   via `llama_model_quantize` with a foreground-service progress path. Also worth revisiting:
+   the KleidiAI SVE kernels (same object-library mechanism) and the deferred power hints.
 1. A larger tool-capable model for agentic use. The web tools and approval gate
    work; LFM2.5-2.6B cannot chain tools reliably. Add one through the Models
    screen's import picker once it is on the device.

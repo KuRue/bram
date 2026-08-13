@@ -1,6 +1,17 @@
 package io.github.kurue.bram.core.domain
 
 /**
+ * Canonicalizes a cpu-mask string: lowercase hex without the `0x` prefix, or empty when the
+ * input is not a hex mask at all. A partially-garbage mask names the wrong cores, so it is
+ * rejected whole rather than filtered — "not-a-mask" must never become "aa".
+ */
+fun canonicalCpuMask(raw: String): String {
+    val stripped = raw.trim().removePrefix("0x").lowercase()
+    if (stripped.isEmpty()) return ""
+    return stripped.takeIf { it.all { character -> character in "0123456789abcdef" } }.orEmpty()
+}
+
+/**
  * How a model should sample.
  *
  * Kept as its own type because these travel together: changing temperature without the truncation
@@ -114,6 +125,81 @@ data class BackendMeasurement(
 }
 
 /**
+ * How busy the generation threadpool is allowed to be.
+ *
+ * The threadpool is created from the profile's tuning fields (see [ModelProfile.threads],
+ * [ModelProfile.cpuMask], [ModelProfile.poll], [ModelProfile.threadPriority]); NORMAL is what
+ * Bram always ran, HIGH is a per-profile experiment for latency-critical generation.
+ */
+enum class ThreadPriority(val wire: String) {
+    NORMAL("normal"),
+    HIGH("high");
+
+    val label: String
+        get() = when (this) {
+            NORMAL -> "Normal"
+            HIGH -> "High"
+        }
+
+    companion object {
+        fun fromWire(value: String): ThreadPriority =
+            entries.firstOrNull { it.wire == value } ?: NORMAL
+    }
+}
+
+/**
+ * How the GGUF is mapped into memory.
+ *
+ * MMAP is what Bram always used. NO_MMAP reads the weights into private allocations, which the
+ * Qualcomm reference scripts use for the Hexagon path (the backend repacks for HTP anyway).
+ * AUTO lets llama.cpp decide per model and device.
+ */
+enum class LoadMode(val wire: String) {
+    AUTO("auto"),
+    MMAP("mmap"),
+    NO_MMAP("no_mmap");
+
+    val label: String
+        get() = when (this) {
+            AUTO -> "Auto"
+            MMAP -> "Mmap"
+            NO_MMAP -> "No mmap"
+        }
+
+    companion object {
+        fun fromWire(value: String): LoadMode =
+            entries.firstOrNull { it.wire == value } ?: AUTO
+    }
+}
+
+/**
+ * The Hexagon backend's host-side switches, applied as `GGML_HEXAGON_*` environment variables in
+ * the inference process. They are read once, at backend registration, so they are process-level:
+ * changing them while a model is loaded restarts the process rather than pretending to apply.
+ *
+ * Every flag is inert on a build or device without the Hexagon backend.
+ */
+data class HexFlags(
+    /** `GGML_HEXAGON_USE_HMX=1` — prefer the HMX co-processor for matmuls. */
+    val useHmx: Boolean = false,
+    /** `GGML_HEXAGON_NHVX=0` — with HMX on, do not also schedule HVX work. */
+    val disableNhvx: Boolean = false,
+    /** `GGML_HEXAGON_HOSTBUF=1` — host-side compute buffers instead of DSP-side ones. */
+    val hostBuf: Boolean = false,
+    /** `GGML_HEXAGON_OPBATCH=0xN` — op batching bitmask, 0 meaning the backend default. */
+    val opBatch: Int = 0,
+    /** `GGML_HEXAGON_NDEV=N` — HTP devices to use, 0 meaning the backend default. */
+    val nDev: Int = 0,
+) {
+    val isDefault: Boolean get() = this == HexFlags()
+
+    fun sanitized(): HexFlags = copy(
+        opBatch = opBatch.coerceIn(0, 0xF),
+        nDev = nDev.coerceIn(0, 8),
+    )
+}
+
+/**
  * A saved way of running a model.
  *
  * These settings used to live on [LocalModelRecord], one set per imported file, which meant the
@@ -152,6 +238,24 @@ data class ModelProfile(
      * the obvious answer (128) and the larger one (256) and keep what actually wins.
      */
     val ubatchTokens: Int = 0,
+    /**
+     * Threads for generation, or 0 for the device default (all usable cores, which is what Bram
+     * always used). The tuned value is written by the tuning measurement; 0 keeps "Default".
+     */
+    val threads: Int = 0,
+    /**
+     * Hex string naming the CPU cores the generation threadpool may use, "" for default affinity
+     * (which is today's behavior on any device whose topology was not measured). "0xfc" means
+     * cores 2–7, which is the Snapdragon reference config for the Hexagon path.
+     */
+    val cpuMask: String = "",
+    /** Pin the threadpool strictly to [cpuMask] rather than treating it as a preference. */
+    val cpuStrict: Boolean = false,
+    /** Threadpool polling level 0–100, or -1 for the backend default. */
+    val poll: Int = -1,
+    val threadPriority: ThreadPriority = ThreadPriority.NORMAL,
+    val loadMode: LoadMode = LoadMode.AUTO,
+    val hexFlags: HexFlags = HexFlags(),
     val sampler: SamplerSettings = SamplerSettings(),
     val systemPrompt: String = "",
     val createdAtEpochMillis: Long = System.currentTimeMillis(),
@@ -186,12 +290,42 @@ data class ModelProfile(
     /** When that batch measurement was taken. */
     val batchTunedAtEpochMillis: Long = 0L,
     /**
+     * What the other tuning dimensions chose and why, most recent first. Batch has its own legacy
+     * note fields above; threads, mask, poll, load mode, and the Hexagon flags live here.
+     */
+    val tuning: List<DimensionTuneNote> = emptyList(),
+    /**
+     * The measurement fingerprint (device + app build + engine build + CPU features) under which
+     * [measurements], [autoConfiguredNote], and [tuning] were recorded. Empty for a profile that
+     * has never been measured. When it differs from the current device's fingerprint, the results
+     * are stale — the profile moved to another phone, the app or engine was rebuilt, or the CPU
+     * kernels changed — and the card says so instead of trusting them.
+     */
+    val measuredFingerprint: String = "",
+    /**
      * Whether Bram made this profile rather than the user. A model gets one on import so it is
      * usable immediately, and an untouched default can be renamed or reshaped without the user
      * having to first understand that profiles exist.
      */
     val isDefault: Boolean = false,
 ) {
+    /**
+     * Bounds every runtime-tuning field so a stored profile cannot produce an unusable load.
+     * Pure so it is JVM-testable; [io.github.kurue.bram.runtime.llamacpp.ModelProfileStore] applies
+     * it on save.
+     */
+    fun sanitizedRuntime(): ModelProfile {
+        val hex = canonicalCpuMask(cpuMask)
+        return copy(
+            threads = threads.coerceIn(0, 64),
+            cpuMask = hex,
+            // Strict placement without a mask names nothing; treat it as unset.
+            cpuStrict = cpuStrict && hex.isNotEmpty(),
+            poll = poll.coerceIn(-1, 100),
+            hexFlags = hexFlags.sanitized(),
+        )
+    }
+
     companion object {
         /** The profile a freshly imported model is usable through, before anyone configures one. */
         fun defaultFor(model: LocalModelRecord): ModelProfile = ModelProfile(

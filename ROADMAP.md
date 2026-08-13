@@ -669,6 +669,28 @@ Exit criterion: a model loaded with the app backgrounded reports its phase in a 
 notification, a turn finishes while the app is backgrounded, and — when the setting is on — posts
 a completion notification summarizing the reply that the user can act on without opening Bram.
 
+## Milestone 19 — device adaptation (first half landed)
+
+On-device automatic tuning and compatibility across hardware. The goal is that a phone gets
+its best Bram by measurement, not by a shipped table: every safe runtime knob becomes a
+teacher-forced candidate sweep (threads, cpu mask, poll, load mode, hexagon env knobs on top
+of the existing batch/attention/KV tuning), models are inspected at import for per-backend
+quant compatibility with on-device quant conversion offered, and non-Qualcomm hardware gains
+runtime coverage (LiteRT-LM unblocked, Vulkan measured per vendor, ExecuTorch lanes watched).
+Design: `docs/DEVICE_ADAPTATION.md`.
+
+Result so far (2026-08-12): the tuning framework, KleidiAI CPU kernels, and measurement
+fingerprints are implemented and validated on the S25 Ultra and the emulator — every knob
+joins the load identity and obeys the agreement gate, auto-configure runs backend → decode
+dimensions → batch in one pass, and the card records each winner with a dated note. Measured:
+threads 6, aggressive poll, mmap, hexagon defaults; KleidiAI took the LFM2.5 CPU prompt path
+from ~16 to ~86 tok/s, which made the CPU beat the NPU on that model and re-routed the profile
+by measurement. On-device testing also fixed a process-restart race, a per-candidate timeout
+hole, an async profile-reload race, and a stuck-state after auto-configure. Open: the import
+compatibility report and on-device quant conversion (Phase 3), LiteRT-LM/Vulkan/ExecuTorch
+coverage, and the remaining device classes for the four-device exit criterion.
+
+
 ## Testing matrix
 
 - Pure JVM tests for context selection, routing, planning, and tool loops.

@@ -16,12 +16,15 @@ import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.ConversationSummary
 import io.github.kurue.bram.core.domain.DeviceProfile
+import io.github.kurue.bram.core.domain.DimensionTuneNote
 import io.github.kurue.bram.core.domain.GenerationMetrics
+import io.github.kurue.bram.core.domain.HexFlags
 import io.github.kurue.bram.core.domain.LiteRtBackend
 import io.github.kurue.bram.core.domain.LITE_RT_CONTEXT_TOKENS
 import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.McpServer
+import io.github.kurue.bram.core.domain.MeasurementFingerprint
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryPrompt
@@ -49,14 +52,18 @@ import io.github.kurue.bram.core.domain.RoutingRequest
 import io.github.kurue.bram.core.domain.RoutingWorkload
 import io.github.kurue.bram.core.domain.RoutingWorkloadClassifier
 import io.github.kurue.bram.core.domain.TokenUsage
+import io.github.kurue.bram.core.domain.TuningCandidates
+import io.github.kurue.bram.core.domain.TuningDimension
 import io.github.kurue.bram.core.agent.RuleBasedModelRouter
+import io.github.kurue.bram.platform.android.CpuTopology
 import io.github.kurue.bram.platform.android.RoutingSettingsStore
 import io.github.kurue.bram.runtime.llamacpp.ModelImportProgress
 import java.net.URI
+import org.json.JSONObject
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import org.json.JSONObject
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -64,6 +71,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 
 /**
  * Outcome of comparing an accelerator against the CPU reference. [matchesCpu] is the acceptance
@@ -77,7 +85,7 @@ import kotlinx.coroutines.sync.withLock
  * screen: [step] of [total] says how far in, and [results] fills in as each one finishes so the
  * comparison is readable before the last one lands.
  */
-enum class AutoConfigurePhase { MEASURING, BATCH, DONE }
+enum class AutoConfigurePhase { MEASURING, BATCH, TUNING, DONE }
 
 data class AutoConfigureProgress(
     val profileId: String,
@@ -348,6 +356,15 @@ data class AppUiState(
     val isValidatingAccelerator: Boolean = false,
     /** Which profile the batch tuning is measuring right now, or null when idle. */
     val batchTuneProfileId: String? = null,
+    /** A non-batch dimension tune in flight, so the card can show which row is measuring. */
+    val tuningProfileId: String? = null,
+    val tuningDimension: TuningDimension? = null,
+    /**
+     * The fingerprint measurements are recorded under — device, app build, engine build, and
+     * CPU features. A profile whose [ModelProfile.measuredFingerprint] differs was measured
+     * somewhere else and the card says so.
+     */
+    val measurementFingerprint: String = "",
     /** Present while auto-configure runs. The dialog is shown for exactly as long as this is. */
     val autoConfigure: AutoConfigureProgress? = null,
     val acceleratorReport: AcceleratorReport? = null,
@@ -888,6 +905,52 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Recomputes the fingerprint measurements are recorded under: the device identity from the
+     * profiler, the app build, the llama.cpp commit, and the CPU ISA features the engine
+     * reports. A measurement is only meaningful while every part matches.
+     */
+    private suspend fun refreshMeasurementFingerprint() {
+        refreshDeviceProfile()
+        val device = mutableState.value.deviceProfile?.profileFingerprint.orEmpty()
+        val appBuild = runCatching {
+            val info = container.appContext.packageManager.getPackageInfo(
+                container.appContext.packageName,
+                0,
+            )
+            "${info.versionName.orEmpty()}/${info.longVersionCode}"
+        }.getOrDefault("")
+        val probe = runCatching { container.llamaCppClient.probe() }.getOrNull()
+        val engine = probe?.optString("llamaCppCommit").orEmpty()
+        val systemInfo = probe?.optString("systemInfo").orEmpty()
+        val key = MeasurementFingerprint(
+            device = device,
+            appBuild = appBuild,
+            engineBuild = engine,
+            cpuFeatures = MeasurementFingerprint.cpuFeatureFlags(systemInfo),
+        ).key
+        mutableState.update { it.copy(measurementFingerprint = key) }
+    }
+
+    /**
+     * Refuses sweeps that would measure through throttling or memory pressure: a number taken
+     * while the device is throttling or swapping is a lie with a timestamp. Returns the reason,
+     * or null when measuring is allowed.
+     */
+    private suspend fun sweepGate(): String? {
+        refreshDeviceProfile()
+        val profile = mutableState.value.deviceProfile ?: return null
+        if (profile.thermalStatus !in ALLOWED_SWEEP_THERMAL && !profile.thermalStatus.startsWith("unknown")) {
+            return "The device is too warm (${profile.thermalStatus}) to measure reliably; " +
+                "try again once it cools down."
+        }
+        if (profile.availableRamBytes < MIN_SWEEP_RAM_BYTES) {
+            return "Not enough free memory to measure reliably " +
+                "(${profile.availableRamBytes / 1_048_576L} MB free); close some apps and try again."
+        }
+        return null
+    }
+
     fun selectLocalModel(modelId: String) {
         mutableState.update { it.copy(selectedRuntimeId = modelId, error = null) }
     }
@@ -1061,7 +1124,7 @@ class MainViewModel(
         val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
         val model = snapshot.localModels.firstOrNull { it.id == profile.modelId } ?: return
         if (snapshot.isLoadingModel || snapshot.isGenerating || snapshot.isValidatingAccelerator ||
-            snapshot.batchTuneProfileId != null
+            snapshot.batchTuneProfileId != null || snapshot.tuningProfileId != null
         ) return
         val restoreLoaded = snapshot.loadedModelId
 
@@ -1070,6 +1133,11 @@ class MainViewModel(
             // The inference process restarts across loads, and a backend that registered late was
             // missing from the list, so a profile configured for it silently loaded on the CPU.
             val backends = detectBackendsNow()
+            refreshMeasurementFingerprint()
+            sweepGate()?.let { reason ->
+                mutableState.update { it.copy(error = reason) }
+                return@launch
+            }
 
             val candidates = backends
                 .filter(RuntimeBackend::offloadsToAccelerator)
@@ -1158,6 +1226,10 @@ class MainViewModel(
                         "%.1f× faster. Measured %s.".format(report.speedup, today())
                 }
                 measured.isEmpty() -> "No accelerator to measure, so this runs on the CPU."
+                // A backend can agree with the reference and still be slower than it — agreement
+                // gates correctness, speed chooses the winner, and "slower" is a result too.
+                measured.any { it.second.matchesCpu } -> "Every accelerator agreed with the CPU but " +
+                    "none beat it, so this runs on the CPU."
                 else -> "No accelerator agreed with the CPU, so this runs on the CPU."
             }
 
@@ -1165,6 +1237,9 @@ class MainViewModel(
             container.modelProfileStore.save(
                 profile.copy(
                     backendId = best?.first?.takeIf { it != RuntimeBackend.CPU }?.name.orEmpty(),
+                    // The Hexagon flags only mean anything on the NPU; leaving them on a profile
+                    // that now runs elsewhere would still set the process environment on load.
+                    hexFlags = if (best?.first == RuntimeBackend.HEXAGON) profile.hexFlags else HexFlags(),
                     measurements = results.sortedWith(
                         // Winner first, failures last: the order a person reads it in.
                         compareByDescending<BackendMeasurement> { it.agrees }
@@ -1172,6 +1247,7 @@ class MainViewModel(
                     ),
                     autoConfiguredNote = note,
                     autoConfiguredAtEpochMillis = System.currentTimeMillis(),
+                    measuredFingerprint = mutableState.value.measurementFingerprint,
                 ),
             )
             runCatching { unloadModelInternal(forget = false) }
@@ -1179,11 +1255,40 @@ class MainViewModel(
                 it.copy(isValidatingAccelerator = false, status = null)
             }
             refreshDeviceProfile()
-            reloadProfiles(selectId = profile.id)
+            // The suspend sync rather than the async reload: the tuning phases read the profile
+            // list next, and a stale list would let them overwrite this phase's measurements.
+            syncProfiles(mutableState.value.localModels, profile.id)
 
-            // Second phase: the best batch depends on the processor, so it follows the choice of
-            // one. Two buttons where one says "configure this for me" was the confusion; this makes
-            // the one button mean it.
+            // Second phase: the decode-shaped dimensions, in dependency order. Each one follows
+            // the choice the earlier ones made — threads first, then the mask on top of the
+            // winner, then polling, load mode, and the Hexagon flags. A dimension with nothing
+            // to compare writes its "why" note and moves on.
+            mutableState.update {
+                it.copy(
+                    autoConfigure = it.autoConfigure?.copy(
+                        phase = AutoConfigurePhase.TUNING,
+                        measuringIndex = null,
+                        current = "Tuning decode settings…",
+                    ),
+                )
+            }
+            val tuningBackend = resolveLoadBackend(
+                mutableState.value.profiles.firstOrNull { it.id == profile.id }?.backendId.orEmpty(),
+            )
+            val dimensions = buildList {
+                add(TuningDimension.THREADS)
+                add(TuningDimension.CPU_MASK)
+                add(TuningDimension.POLL)
+                add(TuningDimension.LOAD_MODE)
+                if (tuningBackend == RuntimeBackend.HEXAGON) add(TuningDimension.HEX_FLAGS)
+            }
+            for (dimension in dimensions) {
+                runCatching { runDimensionTune(profile.id, dimension, fromAutoConfigure = true) }
+            }
+
+            // Third phase: the batch, last so it is measured under the configuration the decode
+            // dimensions chose. The best batch depends on the processor; the one button means
+            // configure everything, in order.
             mutableState.update {
                 it.copy(
                     autoConfigure = it.autoConfigure?.copy(
@@ -1201,10 +1306,17 @@ class MainViewModel(
                     autoConfigure = it.autoConfigure?.copy(
                         finished = true,
                         phase = AutoConfigurePhase.DONE,
-                        current = listOfNotNull(
-                            note,
-                            tuned?.batchTuneNote?.takeIf(String::isNotBlank),
-                        ).joinToString("\n\n"),
+                        current = buildString {
+                            append(note)
+                            tuned?.batchTuneNote?.takeIf(String::isNotBlank)?.let { batch ->
+                                append("\n\n").append(batch)
+                            }
+                            tuned?.tuning?.takeIf(List<DimensionTuneNote>::isNotEmpty)?.let { tuning ->
+                                tuning.asReversed().forEach { dimensionNote ->
+                                    append("\n\n").append(dimensionNote.note)
+                                }
+                            }
+                        },
                     ),
                 )
             }
@@ -1354,7 +1466,13 @@ class MainViewModel(
         }
         val outcome = runCatching {
             val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-            val threads = (visibleCores - 2).coerceIn(1, 4)
+            // A tuned profile carries its own thread count; an untouched one keeps the fixed
+            // validation-style threads Bram always ran, so upgrading cannot change behavior.
+            val threads = if (profile.threads > 0) {
+                profile.threads.coerceIn(1, visibleCores)
+            } else {
+                (visibleCores - 2).coerceIn(1, 4)
+            }
             container.llamaCppClient.load(
                 model = model.copy(preferredContextTokens = profile.contextTokens),
                 threads = threads,
@@ -1365,6 +1483,12 @@ class MainViewModel(
                 kvCacheType = profile.kvCacheType,
                 batchTokens = profile.batchTokens,
                 ubatchTokens = profile.ubatchTokens,
+                cpuMask = profile.cpuMask,
+                cpuStrict = profile.cpuStrict,
+                poll = profile.poll,
+                threadPriority = profile.threadPriority,
+                loadMode = profile.loadMode,
+                hexFlags = profile.hexFlags,
             )
         }
         outcome.onSuccess { result ->
@@ -1563,7 +1687,8 @@ class MainViewModel(
     fun tuneBatch(profileId: String) {
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating ||
-            state.isValidatingAccelerator || state.batchTuneProfileId != null
+            state.isValidatingAccelerator || state.batchTuneProfileId != null ||
+            state.tuningProfileId != null
         ) return
         viewModelScope.launch { runBatchTune(profileId) }
     }
@@ -1580,7 +1705,12 @@ class MainViewModel(
         val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
         val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
         val restoreLoaded = mutableState.value.loadedModelId
-            val backend = resolveLoadBackend(profile.backendId)
+        val backend = resolveLoadBackend(profile.backendId)
+        refreshMeasurementFingerprint()
+        sweepGate()?.let { reason ->
+            mutableState.update { it.copy(error = reason) }
+            return
+        }
             mutableState.update {
                 it.copy(
                     batchTuneProfileId = profile.id,
@@ -1609,9 +1739,16 @@ class MainViewModel(
                 check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
                 val forced = reference.toIntArray()
                 // The default (512/128) is in the list so there is always a baseline to fall back
-                // to, and 1024/128 is the largest batch worth trying before the profile's context
-                // memory starts paying for it.
-                val candidates = listOf(256 to 128, 512 to 128, 512 to 256, 1024 to 128)
+                // to, and the wide end covers the Hexagon reference configuration, which runs
+                // ubatch 1024 — the backend batches prompt work in chunks that size.
+                val candidates = listOf(
+                    256 to 128,
+                    512 to 128,
+                    512 to 256,
+                    1024 to 128,
+                    1024 to 256,
+                    1024 to 512,
+                )
                 val scored = mutableListOf<BatchScore>()
                 for ((batch, ubatch) in candidates) {
                     mutableState.update {
@@ -1672,9 +1809,10 @@ class MainViewModel(
                         append(". Tried ${tried.joinToString(", ")}.")
                     },
                     batchTunedAtEpochMillis = System.currentTimeMillis(),
+                    measuredFingerprint = mutableState.value.measurementFingerprint,
                 )
                 container.modelProfileStore.save(tuned)
-                reloadProfiles(selectId = profile.id)
+                syncProfiles(mutableState.value.localModels, profile.id)
             }.onFailure { error ->
                 mutableState.update {
                     it.copy(error = error.message ?: "Could not tune the batch size")
@@ -1687,6 +1825,312 @@ class MainViewModel(
             mutableState.update { it.copy(batchTuneProfileId = null, status = null) }
             refreshDeviceProfile()
             restoreLoaded?.let { loadModel(it) }
+    }
+
+    /** Measures one non-batch dimension, then saves the winner with a note, batch-tuner style. */
+    fun tuneDimension(profileId: String, dimension: TuningDimension) {
+        val state = mutableState.value
+        if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator ||
+            state.batchTuneProfileId != null || state.tuningProfileId != null
+        ) return
+        viewModelScope.launch { runDimensionTune(profileId, dimension, fromAutoConfigure = false) }
+    }
+
+    /** A candidate for one tuning dimension: what to try, in words, and how to apply it. */
+    private data class TuningCandidate(val label: String, val apply: (ModelProfile) -> ModelProfile)
+
+    /** A candidate's measured timings, so the note can quote both phases honestly. */
+    private data class DimensionScore(
+        val candidate: TuningCandidate,
+        val promptMillis: Long,
+        val decodeMillis: Long,
+    ) {
+        val totalMillis: Long get() = promptMillis + decodeMillis
+    }
+
+    /**
+     * The candidates for a dimension, derived from the device's facts: core count, CPU cluster
+     * topology, and the backend the profile loads onto. The device decides — there is no table.
+     */
+    private fun dimensionCandidates(
+        dimension: TuningDimension,
+        profile: ModelProfile,
+        cores: Int,
+        clusters: List<Int>,
+    ): List<TuningCandidate> = when (dimension) {
+        TuningDimension.THREADS -> TuningCandidates.threadCandidates(cores, profile.threads).map { count ->
+            TuningCandidate("$count threads") { it.copy(threads = count) }
+        }
+        TuningDimension.CPU_MASK -> TuningCandidates.maskCandidates(clusters).map { mask ->
+            TuningCandidate(if (mask.isEmpty()) "All cores" else "Mask 0x$mask") {
+                it.copy(cpuMask = mask, cpuStrict = mask.isNotEmpty())
+            }
+        }
+        TuningDimension.POLL -> TuningCandidates.pollCandidates().map { poll ->
+            TuningCandidate(if (poll == 0) "No polling" else "Aggressive polling") {
+                it.copy(poll = poll)
+            }
+        }
+        TuningDimension.LOAD_MODE -> TuningCandidates.loadModeCandidates().map { mode ->
+            TuningCandidate(mode.label) { it.copy(loadMode = mode) }
+        }
+        TuningDimension.HEX_FLAGS -> TuningCandidates.hexFlagCandidates().map { flags ->
+            TuningCandidate(if (flags.isDefault) "Backend defaults" else "HMX + host buffers") {
+                it.copy(hexFlags = flags)
+            }
+        }
+        TuningDimension.BATCH -> emptyList()
+    }
+
+    /**
+     * Loads one tuning candidate, replays the CPU reference through it under teacher forcing,
+     * and — when it agrees — times the greedy reference path. Returns true when the candidate
+     * agreed; a candidate that does not agree is recorded by the caller either way.
+     */
+    private suspend fun measureDimensionCandidate(
+        candidate: TuningCandidate,
+        tuned: ModelProfile,
+        profile: ModelProfile,
+        model: LocalModelRecord,
+        backend: RuntimeBackend,
+        reference: List<Int>,
+        forced: IntArray,
+        referenceThreads: Int,
+        visibleCores: Int,
+        gpuLayers: Int,
+        scored: MutableList<DimensionScore>,
+    ): Boolean {
+        mutableState.update {
+            it.copy(
+                status = "Measuring ${candidate.label} on ${backend.label}…",
+                autoConfigure = it.autoConfigure?.copy(current = "Measuring ${candidate.label}…"),
+            )
+        }
+        container.llamaCppClient.load(
+            model = model.copy(preferredContextTokens = profile.contextTokens),
+            threads = if (tuned.threads > 0) tuned.threads.coerceIn(1, visibleCores) else referenceThreads,
+            gpuLayers = gpuLayers,
+            deviceFilter = backend.devicePrefix,
+            enableThinking = profile.thinkingEnabled,
+            flashAttention = profile.flashAttention,
+            kvCacheType = profile.kvCacheType,
+            batchTokens = profile.batchTokens,
+            ubatchTokens = profile.ubatchTokens,
+            cpuMask = tuned.cpuMask,
+            cpuStrict = tuned.cpuStrict,
+            poll = tuned.poll,
+            threadPriority = tuned.threadPriority,
+            loadMode = tuned.loadMode,
+            hexFlags = tuned.hexFlags,
+        )
+        val predicted = container.llamaCppClient.teacherForced(forced)
+            .optJSONArray("predictions").toIntList()
+        val agreement = AcceleratorAgreement.score(reference, predicted)
+        if (AcceleratorAgreement.isUsable(agreement)) {
+            val decode = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+            scored += DimensionScore(
+                candidate = candidate,
+                promptMillis = decode.optLong("promptMillis", 0L),
+                decodeMillis = decode.optLong("decodeMillis", 0L),
+            )
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Sweeps one dimension under teacher forcing and keeps the fastest candidate that still
+     * reproduces the CPU reference. The reference is recorded on CPU with the fixed validation
+     * threadpool — never the profile's tuned values — so the yardstick cannot move.
+     */
+    private suspend fun runDimensionTune(
+        profileId: String,
+        dimension: TuningDimension,
+        fromAutoConfigure: Boolean,
+    ) {
+        val state = mutableState.value
+        val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
+        val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        val restoreLoaded = mutableState.value.loadedModelId
+        val backend = resolveLoadBackend(profile.backendId)
+        val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        refreshMeasurementFingerprint()
+        sweepGate()?.let { reason ->
+            mutableState.update { it.copy(error = reason) }
+            finishDimensionTune()
+            return
+        }
+        val candidates = dimensionCandidates(
+            dimension,
+            profile,
+            visibleCores,
+            CpuTopology.clusters(),
+        )
+        if (dimension == TuningDimension.HEX_FLAGS && backend != RuntimeBackend.HEXAGON) {
+            finishDimensionTune()
+            return
+        }
+        if (candidates.size < 2) {
+            // Nothing to compare is a result worth saying, not a failure: the note explains why.
+            val note = DimensionTuneNote(
+                dimension = dimension,
+                chosen = "Default",
+                note = "${dimension.label} left at the device default: this device has no " +
+                    "alternative worth measuring.",
+                measuredAtEpochMillis = System.currentTimeMillis(),
+            )
+            container.modelProfileStore.save(
+                profile.copy(
+                    tuning = listOf(note) + profile.tuning.filterNot { it.dimension == dimension },
+                    measuredFingerprint = mutableState.value.measurementFingerprint,
+                ),
+            )
+            syncProfiles(mutableState.value.localModels, profile.id)
+            finishDimensionTune()
+            return
+        }
+        mutableState.update {
+            it.copy(
+                tuningProfileId = profile.id,
+                tuningDimension = dimension,
+                error = null,
+                status = "Tuning ${dimension.label}…",
+            )
+        }
+        runCatching {
+            val referenceThreads = (visibleCores - 2).coerceIn(1, 4)
+            android.util.Log.d("BramTune", "dim=${dimension.wire} backend=${backend.name} candidates=${candidates.map { it.label }}")
+            // The yardstick: CPU, fixed threadpool, nothing tuned.
+            container.llamaCppClient.load(
+                model = model.copy(preferredContextTokens = profile.contextTokens),
+                threads = referenceThreads,
+                gpuLayers = 0,
+                flashAttention = profile.flashAttention,
+                kvCacheType = profile.kvCacheType,
+                batchTokens = profile.batchTokens,
+                ubatchTokens = profile.ubatchTokens,
+            )
+            val cpuReference = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+            val reference = cpuReference.optJSONArray("tokens").toIntList()
+            check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
+            val forced = reference.toIntArray()
+            val gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0
+            val tried = mutableListOf<String>()
+            val scored = mutableListOf<DimensionScore>()
+            var agreed = 0
+            for (candidate in candidates) {
+                val tuned = candidate.apply(profile)
+                val candidateThreads = if (tuned.threads > 0) {
+                    tuned.threads.coerceIn(1, visibleCores)
+                } else {
+                    referenceThreads
+                }
+                android.util.Log.d("BramTune", "candidate=${candidate.label} hex=${tuned.hexFlags} starting")
+                // A broken backend kernel can hang a load or decode without ever reporting an
+                // error — the HMX path on Snapdragon 8 Elite is one. A stuck candidate must be a
+                // recorded failure, not a stall the user waits out forever, so each measurement
+                // is bounded and a timeout lands in the note like any other failure.
+                val agreedNow = try {
+                    withTimeout(CANDIDATE_TIMEOUT_MILLIS) {
+                        measureDimensionCandidate(
+                            candidate = candidate,
+                            tuned = tuned,
+                            profile = profile,
+                            model = model,
+                            backend = backend,
+                            reference = reference,
+                            forced = forced,
+                            referenceThreads = referenceThreads,
+                            visibleCores = visibleCores,
+                            gpuLayers = gpuLayers,
+                            scored = scored,
+                        )
+                    }
+                } catch (_: TimeoutCancellationException) {
+                    android.util.Log.d("BramTune", "candidate=${candidate.label} TIMED OUT")
+                    // A hung native call wedges the inference process's single executor thread,
+                    // so the app-side timeout alone cannot make the next candidate runnable: the
+                    // process itself has to go. Restart it, and the next load binds fresh.
+                    runCatching { container.llamaCppClient.restartInferenceProcess() }
+                    null
+                }
+                tried += if (agreedNow == null) "${candidate.label} (timed out)" else candidate.label
+                if (agreedNow == true) agreed++
+            }
+            check(scored.isNotEmpty()) {
+                "None of the ${dimension.label.lowercase()} configurations met the " +
+                    "${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% agreement bar " +
+                    "against the CPU reference (${tried.joinToString(", ")} all failed)"
+            }
+            val best = scored.minBy { it.totalMillis }
+            val winner = best.candidate
+            val promptTokens = cpuReference.optInt("promptTokens", 0)
+            val promptRate = if (best.promptMillis > 0 && promptTokens > 0) {
+                promptTokens * 1000 / best.promptMillis
+            } else {
+                0
+            }
+            val decodeRate = if (best.decodeMillis > 0) {
+                reference.size * 1000 / best.decodeMillis
+            } else {
+                0
+            }
+            val tunedProfile = winner.apply(profile)
+            val note = DimensionTuneNote(
+                dimension = dimension,
+                chosen = winner.label,
+                note = "Tuned ${dimension.label} to ${winner.label} on ${backend.label}: " +
+                    "~$promptRate prompt tok/s, ~$decodeRate decode tok/s, " +
+                    "$agreed of ${candidates.size} candidates matched the CPU reference. " +
+                    "Tried ${tried.joinToString(", ")}.",
+                measuredAtEpochMillis = System.currentTimeMillis(),
+            )
+            container.modelProfileStore.save(
+                tunedProfile.copy(
+                    tuning = listOf(note) + tunedProfile.tuning.filterNot { it.dimension == dimension },
+                    measuredFingerprint = mutableState.value.measurementFingerprint,
+                ),
+            )
+            syncProfiles(mutableState.value.localModels, profile.id)
+        }.onFailure { error ->
+            mutableState.update {
+                it.copy(error = error.message ?: "Could not tune ${dimension.label.lowercase()}")
+            }
+            // A failed sweep is a recorded fact, not a silence: the note says what happened and
+            // that the profile stayed on the device default, so the card can explain itself.
+            val saved = mutableState.value.profiles.firstOrNull { it.id == profileId }
+            if (saved != null) {
+                val failedNote = DimensionTuneNote(
+                    dimension = dimension,
+                    chosen = "Default",
+                    note = "${dimension.label} tuning failed (${error.message ?: "unknown error"}); " +
+                        "left at the device default.",
+                    measuredAtEpochMillis = System.currentTimeMillis(),
+                )
+                runCatching {
+                    container.modelProfileStore.save(
+                        saved.copy(
+                            tuning = listOf(failedNote) + saved.tuning.filterNot { it.dimension == dimension },
+                            measuredFingerprint = mutableState.value.measurementFingerprint,
+                        ),
+                    )
+                    syncProfiles(mutableState.value.localModels, profile.id)
+                }
+            }
+        }
+        runCatching { unloadModelInternal(forget = false) }
+        finishDimensionTune()
+        refreshDeviceProfile()
+        restoreLoaded?.let { loadModel(it) }
+    }
+
+    /**
+     * Clears the per-dimension tuning state. Runs after every dimension sweep, including the
+     * ones inside auto-configure: leaving the flags set would put the card in a permanent
+     * "Tuning…" state and the guards would silently block the next tune or auto-configure.
+     */
+    private fun finishDimensionTune() {
+        mutableState.update { it.copy(tuningProfileId = null, tuningDimension = null, status = null) }
     }
 
     /**
@@ -2992,6 +3436,14 @@ internal fun remoteRuntimeId(endpointId: String): String = "$REMOTE_PREFIX$endpo
 
 /** Tokens compared between backends. Long enough to catch drift, short enough to stay quick. */
 private const val REFERENCE_TOKENS = 24
+// A broken backend kernel can hang a load or decode without ever reporting an error, so a
+// candidate measurement is bounded: 5 minutes is 30-60x the expected time for a phone-sized
+// model, which turns a hang into a recorded failure instead of a stall.
+private const val CANDIDATE_TIMEOUT_MILLIS = 5 * 60 * 1_000L
+// Sweeps measure the device itself, so they refuse to run through throttling or memory pressure:
+// a number taken while throttling or swapping is a lie with a timestamp.
+private val ALLOWED_SWEEP_THERMAL = setOf("none", "light")
+private const val MIN_SWEEP_RAM_BYTES = 1_500_000_000L
 
 /** llama.cpp clamps this to the model's layer count, so it means "offload everything". */
 private const val FULL_GPU_OFFLOAD = 999

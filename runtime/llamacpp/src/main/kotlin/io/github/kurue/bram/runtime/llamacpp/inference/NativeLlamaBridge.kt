@@ -19,6 +19,16 @@ internal class NativeLlamaBridge {
         enableThinking: Boolean,
         flashAttention: String,
         kvCacheType: String,
+        cpuMask: String,
+        cpuStrict: Boolean,
+        poll: Int,
+        threadPriority: String,
+        loadMode: String,
+        hexUseHmx: Boolean,
+        hexDisableNhvx: Boolean,
+        hexHostBuf: Boolean,
+        hexOpBatch: Int,
+        hexNDev: Int,
     ): String
     external fun referenceDecode(tokenCount: Int): String
     external fun teacherForced(forcedTokens: IntArray): String

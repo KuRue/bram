@@ -18,6 +18,14 @@ set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 set(GGML_RPC OFF CACHE BOOL "" FORCE)
 
+# Arm KleidiAI microkernels for the CPU backend (arm64 only; the x86_64 emulator build must not
+# see the option — the ggml integration adds ARM sources for any architecture). A plain Android
+# arm64 build configures no ISA extensions, so ggml compiles none of the dotprod/i8mm kernels;
+# the ones Bram wants are added below with their own -march after llama.cpp is fetched.
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+endif()
+
 # Adreno acceleration for Milestone 2. The Vulkan backend is validated against the CPU
 # reference before its capability is reported as available; CPU remains the correctness oracle.
 set(GGML_VULKAN ON CACHE BOOL "" FORCE)
@@ -151,7 +159,7 @@ endif()
 FetchContent_Declare(
     llama_cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-    GIT_TAG 474c92e722ce77aee2060cd08629b9afb008d81b
+    GIT_TAG 132753bf4e52b1a8bda8f6ec33f1785bd80470da
     GIT_SHALLOW FALSE
     GIT_PROGRESS TRUE
 )
@@ -163,6 +171,64 @@ FetchContent_MakeAvailable(llama_cpp)
 # to the target directly so the backend source compiles.
 if(TARGET ggml-vulkan)
     target_include_directories(ggml-vulkan PRIVATE "${_bram_spirv_headers_src}/include")
+endif()
+
+# KleidiAI's dotprod/i8mm microkernels. ggml compiles only the kernels whose ISA the toolchain was
+# configured for, and a plain arm64 Android build configures none, so the kernels and the trait
+# that dispatches to them are built here as an OBJECT library with their own -march. That is safe
+# on every device: the trait runtime-checks the CPU (ggml_cpu_has_dotprod / ggml_cpu_has_arm_i8mm)
+# before selecting a kernel, and the rest of ggml-cpu stays at the armv8-a baseline.
+# The trait sources are taken out of ggml-cpu's own list because per-source compile options do not
+# survive into a target defined in another directory; an object library's own options always do,
+# and its objects merge into ggml-cpu when linked.
+if(TARGET ggml-cpu AND ANDROID_ABI STREQUAL "arm64-v8a")
+    # FetchContent lowercases the declared name for the populated directory.
+    set(_bram_kleidiai_src "${CMAKE_BINARY_DIR}/_deps/kleidiai_download-src")
+    if(EXISTS "${_bram_kleidiai_src}/kai/ukernels/matmul")
+        set(_bram_kleidiai_kernels
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod.c"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p1x4_qsi4c32p4x4_1x4_neon_dotprod.c"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p4x4_qsi4c32p4x4_16x4_neon_dotprod.c"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp/kai_matmul_clamp_f32_qai8dxp4x4_qsi8cxp4x4_16x4_neon_dotprod.c"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp/kai_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod.c"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp/kai_matmul_clamp_f32_qai8dxp1x8_qsi8cxp4x8_1x4_neon_dotprod.c"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p4x8_qsi4c32p4x8_16x4_neon_i8mm.c"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp/kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm.c")
+
+        # The trait compiles here (not in ggml-cpu) so its kernel tables see the ISA extensions.
+        # ggml-cpu.cpp still calls ggml_backend_cpu_kleidiai_buffer_type() under
+        # GGML_USE_CPU_KLEIDIAI, and these objects are linked into ggml-cpu, so the symbol exists.
+        get_target_property(_bram_cpu_sources ggml-cpu SOURCES)
+        list(FILTER _bram_cpu_sources EXCLUDE REGEX "kleidiai/(kleidiai|kernels)\\.cpp$")
+        set_property(TARGET ggml-cpu PROPERTY SOURCES ${_bram_cpu_sources})
+
+        set(_bram_kleidiai_trait
+            "${CMAKE_BINARY_DIR}/_deps/llama_cpp-src/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp"
+            "${CMAKE_BINARY_DIR}/_deps/llama_cpp-src/ggml/src/ggml-cpu/kleidiai/kernels.cpp")
+        add_library(bram_kleidiai_arch OBJECT ${_bram_kleidiai_trait} ${_bram_kleidiai_kernels})
+        set_target_properties(bram_kleidiai_arch PROPERTIES C_STANDARD 11 CXX_STANDARD 17)
+        target_compile_options(bram_kleidiai_arch PRIVATE -march=armv8.6-a+dotprod+i8mm)
+        target_compile_definitions(bram_kleidiai_arch PRIVATE GGML_USE_CPU_KLEIDIAI _GNU_SOURCE _XOPEN_SOURCE=600)
+        target_include_directories(bram_kleidiai_arch PRIVATE
+            "${CMAKE_BINARY_DIR}/_deps/llama_cpp-src/ggml/src/.."
+            "${CMAKE_BINARY_DIR}/_deps/llama_cpp-src/ggml/src/."
+            "${CMAKE_BINARY_DIR}/_deps/llama_cpp-src/ggml/src/ggml-cpu"
+            "${CMAKE_BINARY_DIR}/_deps/llama_cpp-src/ggml/src/../include"
+            "${_bram_kleidiai_src}"
+            "${_bram_kleidiai_src}/kai"
+            "${_bram_kleidiai_src}/kai/ukernels"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_fp32_bf16p_bf16p"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_f16p_qsi4c32p"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/matmul_clamp_f32_f32p_f32p"
+            "${_bram_kleidiai_src}/kai/ukernels/matmul/pack")
+        target_link_libraries(ggml-cpu PRIVATE bram_kleidiai_arch)
+        message(STATUS "Bram: KleidiAI dotprod/i8mm kernels and trait built with -march=armv8.6-a+dotprod+i8mm")
+    else()
+        message(WARNING "Bram: KleidiAI sources not found at ${_bram_kleidiai_src}; skipped")
+    endif()
 endif()
 
 add_library(bram_llama SHARED bram_llama_jni.cpp)

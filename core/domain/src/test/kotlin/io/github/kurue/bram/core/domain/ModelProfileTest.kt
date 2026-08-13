@@ -96,6 +96,62 @@ class ModelProfileTest {
     }
 
     @Test
+    fun `a default profile runs the original threadpool and load configuration`() {
+        // Every tuning field defaults to "today": device threads, default affinity, backend poll,
+        // normal priority, mmap load, no hexagon flags. An untouched profile cannot change
+        // behavior on upgrade.
+        val profile = ModelProfile.defaultFor(model())
+        assertEquals(0, profile.threads)
+        assertEquals("", profile.cpuMask)
+        assertFalse(profile.cpuStrict)
+        assertEquals(-1, profile.poll)
+        assertEquals(ThreadPriority.NORMAL, profile.threadPriority)
+        assertEquals(LoadMode.AUTO, profile.loadMode)
+        assertEquals(HexFlags(), profile.hexFlags)
+        assertTrue(profile.hexFlags.isDefault)
+    }
+
+    @Test
+    fun `sanitizedRuntime clamps and canonicalizes the tuning fields`() {
+        val wild = ModelProfile.defaultFor(model()).copy(
+            threads = -4,
+            cpuMask = "0xFC",
+            cpuStrict = true,
+            poll = 500,
+            hexFlags = HexFlags(useHmx = true, opBatch = 99, nDev = -2),
+        ).sanitizedRuntime()
+        assertEquals(0, wild.threads)
+        assertEquals("fc", wild.cpuMask)
+        assertTrue(wild.cpuStrict)
+        assertEquals(100, wild.poll)
+        assertEquals(0xF, wild.hexFlags.opBatch)
+        assertEquals(0, wild.hexFlags.nDev)
+    }
+
+    @Test
+    fun `strict placement without a mask names nothing and is dropped`() {
+        val profile = ModelProfile.defaultFor(model()).copy(cpuMask = "", cpuStrict = true)
+            .sanitizedRuntime()
+        assertFalse(profile.cpuStrict)
+    }
+
+    @Test
+    fun `unknown tuning wire values fall back to the safe defaults`() {
+        assertEquals(ThreadPriority.NORMAL, ThreadPriority.fromWire("banana"))
+        assertEquals(ThreadPriority.HIGH, ThreadPriority.fromWire("high"))
+        assertEquals(LoadMode.AUTO, LoadMode.fromWire("banana"))
+        assertEquals(LoadMode.NO_MMAP, LoadMode.fromWire("no_mmap"))
+    }
+
+    @Test
+    fun `a cpu mask is canonical hex or empty, never filtered garbage`() {
+        assertEquals("fc", canonicalCpuMask("0xFC"))
+        assertEquals("3f", canonicalCpuMask(" 0x3f "))
+        assertEquals("", canonicalCpuMask("not-a-mask"))
+        assertEquals("", canonicalCpuMask(""))
+    }
+
+    @Test
     fun `sanitizing clamps values a stored profile could otherwise load with`() {
         val wild = SamplerSettings(
             temperature = 12f,

@@ -8,11 +8,14 @@ import android.os.IBinder
 import io.github.kurue.bram.core.domain.ConversationMessage
 import io.github.kurue.bram.core.domain.FlashAttentionMode
 import io.github.kurue.bram.core.domain.GenerationEvent
+import io.github.kurue.bram.core.domain.HexFlags
 import io.github.kurue.bram.core.domain.KvCacheType
+import io.github.kurue.bram.core.domain.LoadMode
 import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.GenerationRequest
 import io.github.kurue.bram.core.domain.LocalModelRecord
+import io.github.kurue.bram.core.domain.ThreadPriority
 import io.github.kurue.bram.core.domain.TokenUsage
 import io.github.kurue.bram.core.domain.ToolCall
 import java.io.Closeable
@@ -20,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -28,6 +32,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -105,6 +110,14 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         batchTokens: Int = 0,
         /** Tokens between model evaluations, or 0 for the llama.cpp default of 128. */
         ubatchTokens: Int = 0,
+        /** CPU cores for the generation threadpool as hex, "" for default affinity. */
+        cpuMask: String = "",
+        cpuStrict: Boolean = false,
+        /** Threadpool polling 0–100, or -1 for the backend default. */
+        poll: Int = -1,
+        threadPriority: ThreadPriority = ThreadPriority.NORMAL,
+        loadMode: LoadMode = LoadMode.AUTO,
+        hexFlags: HexFlags = HexFlags(),
     ): JSONObject = withContext(Dispatchers.IO) {
         // Normalized before it reaches the service so the load identity compares concrete numbers:
         // "default" must mean the same thing on every request, or every call would force a reload.
@@ -127,11 +140,71 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("enableThinking", enableThinking)
             .put("flashAttention", flashAttention.wire)
             .put("kvCacheType", kvCacheType.wire)
-        JSONObject(requireService().load(request.toString()))
+            .put("cpuMask", cpuMask)
+            .put("cpuStrict", cpuStrict)
+            .put("poll", poll)
+            .put("threadPriority", threadPriority.wire)
+            .put("loadMode", loadMode.wire)
+            .put("hexUseHmx", hexFlags.useHmx)
+            .put("hexDisableNhvx", hexFlags.disableNhvx)
+            .put("hexHostBuf", hexFlags.hostBuf)
+            .put("hexOpBatch", hexFlags.opBatch)
+            .put("hexNDev", hexFlags.nDev)
+        val result = JSONObject(requireService().load(request.toString()))
+        if (result.optBoolean("restartRequired")) {
+            android.util.Log.d("BramTune", "restartRequired: restarting the inference process")
+            // The Hexagon environment is read once per process, so a request that changes it can
+            // only be honored by a fresh inference process. Restart and retry exactly once.
+            restartService()
+            android.util.Log.d("BramTune", "restart done, rebinding")
+            val retried = JSONObject(requireService().load(request.toString()))
+            android.util.Log.d("BramTune", "retry load returned restartRequired=${retried.optBoolean("restartRequired")}")
+            check(!retried.optBoolean("restartRequired")) {
+                "The inference process could not apply the requested Hexagon configuration"
+            }
+            return@withContext retried
+        }
+        result
     }
 
     suspend fun unload(): JSONObject = withContext(Dispatchers.IO) {
         JSONObject(requireService().unload())
+    }
+
+    /**
+     * Kills the inference process so the next [requireService] starts one fresh. Public for the
+     * tuning harness, which uses it to unwedge a process whose native call hung: the app-side
+     * timeout ends the wait, but only a fresh process can serve the next candidate.
+     */
+    suspend fun restartInferenceProcess() = restartService()
+
+    /**
+     * Kills the inference process so the next [requireService] starts one fresh. The Hexagon
+     * backend reads its environment once at registration, so process-level settings (the
+     * `GGML_HEXAGON_*` flags) can only change this way.
+     *
+     * The unbind and the fresh bind must not race: binding while the old process is still
+     * unwinding reuses it, and a reused process would answer the retry with `restartRequired`
+     * again. The service schedules its own death before returning `restartRequired`, so wait for
+     * its binder death (or a short timeout) before letting [requireService] bind again.
+     */
+    private suspend fun restartService() {
+        val oldBinder = serviceBinder
+        val oldConnection = connection
+        val died = CompletableDeferred<Unit>()
+        val deathWatch = IBinder.DeathRecipient { died.complete(Unit) }
+        oldBinder?.let {
+            runCatching { it.linkToDeath(deathWatch, 0) }
+            runCatching { it.unlinkToDeath(deathRecipient, 0) }
+        }
+        service = null
+        serviceBinder = null
+        connection = null
+        oldConnection?.let { runCatching { appContext.unbindService(it) } }
+        runCatching { appContext.stopService(Intent(appContext, InferenceProcessService::class.java)) }
+        // The service schedules its own death before returning `restartRequired`, so this wait
+        // normally completes in well under a second; 8 seconds covers a slow binder teardown.
+        withTimeoutOrNull(8_000) { died.await() }
     }
 
     suspend fun countTokens(messages: List<ConversationMessage>): Int = withContext(Dispatchers.IO) {
