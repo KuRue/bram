@@ -9,6 +9,7 @@ import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
+import com.google.ai.edge.litertlm.MessageCallback
 import io.github.kurue.bram.core.domain.GenerationEvent
 import io.github.kurue.bram.core.domain.GenerationRequest
 import io.github.kurue.bram.core.domain.LiteRtBackend
@@ -17,8 +18,9 @@ import io.github.kurue.bram.core.domain.ToolCall
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.callbackFlow
 
 /**
  * Owns the one LiteRT-LM engine the app keeps resident, mirroring how the llama.cpp service holds
@@ -93,22 +95,30 @@ class LiteRtEngineManager(context: Context) {
      * One turn on the resident engine: a fresh conversation replays the planned history and sends
      * the last message, streaming text and tool calls as they arrive. The conversation is closed
      * when the flow completes, fails, or is cancelled.
+     *
+     * The AAR's own `sendMessageAsync(...): Flow` crashes on completion (its bytecode calls a
+     * `SendChannel.close$default` bridge that only exists in coroutines 1.11.0, while the AAR is
+     * published against 1.9.0), so the callback overload is used and wrapped in our own
+     * `callbackFlow` — the channel's `close()` then compiles against the app's coroutines and is
+     * binary-safe (upstream-acknowledged workaround for google-ai-edge/litert-lm#2812).
      */
-    fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+    fun generate(request: GenerationRequest): Flow<GenerationEvent> = callbackFlow {
         val engine = engineRef.get()
         if (engine == null || !engine.isInitialized()) {
-            emit(
+            trySend(
                 GenerationEvent.Failed(
                     message = "No LiteRT-LM package is loaded. Load one from Models before sending a message.",
                     recoverable = true,
                 ),
             )
-            return@flow
+            close()
+            return@callbackFlow
         }
         val turn = LiteRtTurn.from(request)
         if (turn == null) {
-            emit(GenerationEvent.Failed(message = "Nothing to send to the model", recoverable = true))
-            return@flow
+            trySend(GenerationEvent.Failed(message = "Nothing to send to the model", recoverable = true))
+            close()
+            return@callbackFlow
         }
         val conversation = try {
             engine.createConversation(
@@ -124,28 +134,27 @@ class LiteRtEngineManager(context: Context) {
                 ),
             )
         } catch (error: Throwable) {
-            emit(
+            trySend(
                 GenerationEvent.Failed(
                     message = "Could not start a conversation: ${error.message ?: "unknown error"}",
                     recoverable = true,
                     cause = error,
                 ),
             )
-            return@flow
+            close()
+            return@callbackFlow
         }
         conversationRef.set(conversation)
-        try {
-            emit(GenerationEvent.Started(runtimeDescription = runtimeDescription, reasoningFormat = null))
-            conversation.sendMessageAsync(
-                turn.lastMessage,
-                maxOutputToken = turn.maxOutputTokens,
-                repetitionPenaltyConfig = turn.repetitionPenalty,
-            ).collect { message ->
+        trySend(GenerationEvent.Started(runtimeDescription = runtimeDescription, reasoningFormat = null))
+        val callback = object : MessageCallback {
+            override fun onMessage(message: com.google.ai.edge.litertlm.Message) {
                 message.contents.contents.forEach { content ->
-                    if (content is Content.Text) emit(GenerationEvent.TextDelta(content.text))
+                    if (content is Content.Text) {
+                        trySend(GenerationEvent.TextDelta(content.text))
+                    }
                 }
                 message.toolCalls.forEachIndexed { index, call ->
-                    emit(
+                    trySend(
                         GenerationEvent.ToolCallReady(
                             ToolCall(
                                 id = "call_$index",
@@ -156,21 +165,48 @@ class LiteRtEngineManager(context: Context) {
                     )
                 }
             }
-            emit(GenerationEvent.Finished(finishReason = "stop"))
+
+            override fun onDone() {
+                trySend(GenerationEvent.Finished(finishReason = "stop"))
+                close()
+            }
+
+            override fun onError(error: Throwable) {
+                trySend(
+                    GenerationEvent.Failed(
+                        message = error.message ?: "LiteRT-LM inference failed",
+                        recoverable = true,
+                        cause = error,
+                    ),
+                )
+                close()
+            }
+        }
+        try {
+            conversation.sendMessageAsync(
+                turn.lastMessage,
+                callback,
+                maxOutputToken = turn.maxOutputTokens,
+                repetitionPenaltyConfig = turn.repetitionPenalty,
+            )
         } catch (error: CancellationException) {
-            // The collector went away: stop the native decode before the conversation is closed.
             runCatching { conversation.cancelProcess() }
             throw error
         } catch (error: Throwable) {
-            emit(
+            trySend(
                 GenerationEvent.Failed(
                     message = error.message ?: "LiteRT-LM inference failed",
                     recoverable = true,
                     cause = error,
                 ),
             )
-        } finally {
+            close()
+        }
+        // Keep the channel open until the callback closes it; if the collector goes away first,
+        // stop the native decode and close the conversation.
+        awaitClose {
             conversationRef.set(null)
+            runCatching { conversation.cancelProcess() }
             runCatching { conversation.close() }
         }
     }

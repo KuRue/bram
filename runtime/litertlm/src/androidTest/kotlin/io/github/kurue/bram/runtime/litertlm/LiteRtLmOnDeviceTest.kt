@@ -18,7 +18,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
-import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -31,15 +30,12 @@ import org.junit.runner.RunWith
  * on a network or a content picker. The litertlm AAR ships only `arm64-v8a` natives, so the test
  * skips cleanly on the x86_64 emulator rather than failing to initialize the engine.
  *
- * IGNORED: litertlm AAR 0.15.0 (the latest release) crashes the process on every turn's completion.
- * Its compiled `Conversation.sendMessageAsync` bytecode calls `SendChannel.close$default`, a static
- * that no shipped kotlinx-coroutines provides (verified absent in 1.7.3 / 1.8.1 / 1.9.0 / 1.10.2),
- * so `onDone` throws NoSuchMethodError after generation finishes. The native libs load and the CPU
- * engine initializes and reaches `onDone` — i.e. inference runs — but no turn can complete. The GPU
- * path fails earlier with `embedding_lookup != nullptr` on a generic (non-device-matched) package.
- * Re-enable once a corrected AAR is released or the onDone teardown is patched.
+ * The 0.15.0 AAR's `sendMessageAsync(...): Flow` crashes on completion (its bytecode calls a
+ * `SendChannel.close$default` bridge that only exists in coroutines 1.11.0 while the AAR is
+ * published against 1.9.0), so `LiteRtEngineManager.generate` uses the callback overload wrapped
+ * in its own `callbackFlow` — the acknowledged upstream workaround (google-ai-edge/litert-lm#2812).
+ * This test proves the workaround: a turn must complete and stream text.
  */
-@Ignore("litertlm AAR 0.15.0 crashes on turn completion; see class kdoc")
 @RunWith(AndroidJUnit4::class)
 class LiteRtLmOnDeviceTest {
     private val ctx: Context = InstrumentationRegistry.getInstrumentation().targetContext

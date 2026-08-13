@@ -55,6 +55,13 @@ build tree is a synced copy of the same working tree.
   second catalog record); the "stalled" auto-configure after conversion turned out to be a
   candidate hang that the timeout + unwedge handled as designed, with the overlay showing the
   timed-out run in red. Phone path still unvalidated (phone disconnected).
+- **LiteRT-LM unblocked in code** — `LiteRtEngineManager.generate` now uses the AAR's callback
+  `sendMessageAsync(contents, MessageCallback)` wrapped in Bram's own `callbackFlow`, the
+  acknowledged upstream workaround for the 0.15.0 `SendChannel.close$default` completion crash
+  (google-ai-edge/litert-lm#2812); the channel `close()` now compiles against Bram's coroutines
+  (1.10.2). `LiteRtLmOnDeviceTest` is re-enabled and rewritten to prove it: a turn must complete
+  and stream text. The test skips on x86 (the AAR ships arm64-v8a natives only) and needs a
+  pushed SmolLM2-135M `.litertlm` on the phone — first run when the S25 Ultra reconnects.
 - **`milestone-8b-profile-first` (#17)** — profile-first UI, merged.
 - **`milestone-8c-opencl` (#18)** — OpenCL for Adreno, validated: 96% (23/24) teacher-forced
   agreement, 1.11x vs CPU on Qwen3.5-Q4_0 on the S25 Ultra. The load abort was `ggml_backend_sched_new`
@@ -365,10 +372,10 @@ addresses.
 0. **Phone validation** — everything since the KleidiAI run (visual tuning results, Phase 3
    import compatibility and quant conversion) has emulator proof only. When the S25 Ultra
    reconnects: one auto-configure and one conversion on the LFM2.5 profile closes the gap.
-1. **Phase 4 — multi-vendor runtime coverage** (`docs/DEVICE_ADAPTATION.md`): first slice is
-   unblocking LiteRT-LM via the documented callback workaround (litertlm-android 0.14.0's
-   `SendChannel.close$default` crash), then the runtime-neutral tuning seam. Also worth
-   revisiting: the KleidiAI SVE kernels (same object-library mechanism), the deferred power
+1. **Phase 4 — multi-vendor runtime coverage** (`docs/DEVICE_ADAPTATION.md`): the LiteRT-LM
+   callback workaround is in code and the on-device test is ready; the remaining work is the
+   runtime-neutral tuning seam, then Vulkan measured-per-vendor and the ExecuTorch lanes. Also
+   worth revisiting: the KleidiAI SVE kernels (same object-library mechanism), the deferred power
    hints, and moving quant conversion off the service's single executor (chat waits while it
    runs).
 2. A larger tool-capable model for agentic use. The web tools and approval gate
