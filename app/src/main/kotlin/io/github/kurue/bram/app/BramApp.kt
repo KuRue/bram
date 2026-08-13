@@ -420,7 +420,12 @@ fun BramApp(viewModel: MainViewModel) {
             // Configuration must sit above the profile panel that started it. It used to be
             // composed before panels, leaving the running/result overlay hidden underneath one.
             state.autoConfigure?.let { progress ->
-                AutoConfigureOverlay(progress, onDismiss = viewModel::dismissAutoConfigure)
+                AutoConfigureOverlay(
+                    progress,
+                    cooldownOverride = state.cooldownOverride,
+                    onContinueAnyway = viewModel::overrideCooldown,
+                    onDismiss = viewModel::dismissAutoConfigure,
+                )
             }
         }
     }
@@ -1996,7 +2001,12 @@ private fun WinningRun(measurements: List<BackendMeasurement>, modifier: Modifie
  * anywhere else does nothing.
  */
 @Composable
-private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDismiss: () -> Unit) {
+private fun BoxScope.AutoConfigureOverlay(
+    progress: AutoConfigureProgress,
+    cooldownOverride: Boolean,
+    onContinueAnyway: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     Box(Modifier.matchParentSize().zIndex(10f)) {
         Scrim(onDismiss = {})
         GlassSurface(
@@ -2098,11 +2108,36 @@ private fun BoxScope.AutoConfigureOverlay(progress: AutoConfigureProgress, onDis
 
                 if (!progress.finished) {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Text(
-                        progress.current,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (progress.waitingForCooldown) {
+                        Text(
+                            "Phone is too warm (thermal: ${progress.thermalStatus}) — numbers taken " +
+                                "now would be misleading. Waiting for it to cool…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        TextButton(
+                            onClick = onContinueAnyway,
+                            modifier = Modifier.align(Alignment.End),
+                        ) {
+                            Text("Continue anyway")
+                        }
+                    } else {
+                        Text(
+                            progress.current,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (progress.thermalStatus.isNotEmpty() &&
+                            progress.thermalStatus != "none" &&
+                            !progress.thermalStatus.startsWith("unknown")
+                        ) {
+                            Text(
+                                if (cooldownOverride) "Thermal: ${progress.thermalStatus} (ignoring)" else "Thermal: ${progress.thermalStatus}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 } else {
                     Button(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
                         Text("Done")

@@ -113,6 +113,13 @@ data class AutoConfigureProgress(
     val dimensions: List<DimensionTuneNote> = emptyList(),
     val phase: AutoConfigurePhase = AutoConfigurePhase.MEASURING,
     val finished: Boolean = false,
+    /**
+     * The device's live thermal status ("none" … "critical") refreshed while the run is in
+     * flight, and whether the run is parked waiting for it to return to a measurable range.
+     * The wait is automatic; the overlay offers Continue-anyway for the impatient.
+     */
+    val thermalStatus: String = "",
+    val waitingForCooldown: Boolean = false,
 ) {
     val fraction: Float get() = if (total <= 0) 0f else (step.toFloat() / total).coerceIn(0f, 1f)
 }
@@ -399,6 +406,11 @@ data class AppUiState(
     val convertingProfileId: String? = null,
     /** Present while auto-configure runs. The dialog is shown for exactly as long as this is. */
     val autoConfigure: AutoConfigureProgress? = null,
+    /**
+     * Set by the overlay's Continue-anyway button: measures through the thermal pause for the
+     * rest of this pass. Reset when the pass or the tune finishes.
+     */
+    val cooldownOverride: Boolean = false,
     val acceleratorReport: AcceleratorReport? = null,
     val acceleratorBisection: AcceleratorBisection? = null,
     /** Whether a finished backgrounded turn posts the completion alert. */
@@ -973,22 +985,88 @@ class MainViewModel(
     }
 
     /**
-     * Refuses sweeps that would measure through throttling or memory pressure: a number taken
-     * while the device is throttling or swapping is a lie with a timestamp. Returns the reason,
-     * or null when measuring is allowed.
+     * Refuses sweeps that would measure through memory pressure: a number taken while the device
+     * is swapping is a lie with a timestamp. Thermal throttling is not a refusal here — the sweep
+     * parks on it via [waitForCooldown] and resumes by itself. Returns the reason, or null when
+     * measuring is allowed.
      */
     private suspend fun sweepGate(): String? {
         refreshDeviceProfile()
         val profile = mutableState.value.deviceProfile ?: return null
-        if (profile.thermalStatus !in ALLOWED_SWEEP_THERMAL && !profile.thermalStatus.startsWith("unknown")) {
-            return "The device is too warm (${profile.thermalStatus}) to measure reliably; " +
-                "try again once it cools down."
-        }
         if (profile.availableRamBytes < MIN_SWEEP_RAM_BYTES) {
             return "Not enough free memory to measure reliably " +
                 "(${profile.availableRamBytes / 1_048_576L} MB free); close some apps and try again."
         }
         return null
+    }
+
+    /**
+     * Parks the sweep while the device is thermally throttled: a decode measured through
+     * throttling can be hundreds of times slower than the cool number, and the winner would be a
+     * lie with a timestamp. Polls the thermal status on a background-thread delay (the same
+     * pattern as the candidate watches, which cannot be defeated by the coroutine cancellation
+     * machinery) and resumes by itself once the status returns to none/light. The overlay's
+     * Continue-anyway button sets [BramState.cooldownOverride], which skips the wait for the rest
+     * of the pass.
+     */
+    private suspend fun waitForCooldown(): Boolean {
+        var waiting = false
+        while (true) {
+            refreshDeviceProfile()
+            val status = mutableState.value.deviceProfile?.thermalStatus.orEmpty()
+            val blocked = status.isNotEmpty() &&
+                status !in ALLOWED_SWEEP_THERMAL &&
+                !status.startsWith("unknown")
+            val override = mutableState.value.cooldownOverride
+            if (blocked && !override && !waiting) {
+                android.util.Log.d("BramTune", "pausing for cooldown (thermal=$status)")
+                waiting = true
+            }
+            mutableState.update {
+                it.copy(
+                    status = if (blocked && !override) {
+                        "Waiting for the phone to cool (thermal: $status)…"
+                    } else {
+                        it.status
+                    },
+                    autoConfigure = it.autoConfigure?.copy(
+                        thermalStatus = status,
+                        waitingForCooldown = blocked && !override,
+                        current = if (blocked && !override) {
+                            "Waiting for the phone to cool (thermal: $status)…"
+                        } else {
+                            it.autoConfigure.current
+                        },
+                    ),
+                )
+            }
+            if (!blocked || override) {
+                if (blocked) {
+                    android.util.Log.d("BramTune", "cooldown overridden; measuring while thermal=$status")
+                } else if (waiting) {
+                    android.util.Log.d("BramTune", "cooldown over; resuming (thermal=$status)")
+                }
+                return true
+            }
+            withContext(Dispatchers.Default) { delay(15_000) }
+        }
+    }
+
+    fun overrideCooldown() {
+        mutableState.update { it.copy(cooldownOverride = true) }
+    }
+
+    /**
+     * Keeps the overlay's thermal line honest while a long candidate runs: the wait happens
+     * between candidates, but a measurement can heat the phone enough to matter mid-run, and the
+     * indicator should say so even though the running candidate is allowed to finish.
+     */
+    private fun refreshThermalIndicator() {
+        refreshDeviceProfile()
+        val status = mutableState.value.deviceProfile?.thermalStatus.orEmpty()
+        mutableState.update {
+            it.copy(autoConfigure = it.autoConfigure?.copy(thermalStatus = status))
+        }
     }
 
     fun selectLocalModel(modelId: String) {
@@ -1182,10 +1260,12 @@ class MainViewModel(
             // missing from the list, so a profile configured for it silently loaded on the CPU.
             val backends = detectBackendsNow()
             refreshMeasurementFingerprint()
+            mutableState.update { it.copy(cooldownOverride = false) }
             sweepGate()?.let { reason ->
                 mutableState.update { it.copy(error = reason) }
                 return@launch
             }
+            waitForCooldown()
 
             val candidates = backends
                 .filter(RuntimeBackend::offloadsToAccelerator)
@@ -1236,6 +1316,7 @@ class MainViewModel(
                         ),
                     )
                 }
+                waitForCooldown()
                 // A backend failing is a result, not an error: it means do not use that one. It is
                 // recorded as a failure so the card can say so rather than leaving it unexplained.
                 val report = runCatching {
@@ -1306,6 +1387,7 @@ class MainViewModel(
                         model = model.copy(preferredContextTokens = profile.contextTokens),
                         threads = threads,
                         gpuLayers = 0,
+                        enableThinking = profile.thinkingEnabled,
                         flashAttention = profile.flashAttention,
                         kvCacheType = profile.kvCacheType,
                     )
@@ -1427,9 +1509,11 @@ class MainViewModel(
 
             mutableState.update {
                 it.copy(
+                    cooldownOverride = false,
                     autoConfigure = it.autoConfigure?.copy(
                         finished = true,
                         phase = AutoConfigurePhase.DONE,
+                        waitingForCooldown = false,
                         dimensions = tuned?.tuning.orEmpty().sortedByDescending { note -> note.measuredAtEpochMillis },
                         current = buildString {
                             append(note)
@@ -1451,7 +1535,7 @@ class MainViewModel(
 
     /** Closes the auto-configure dialog. The run itself has already finished by then. */
     fun dismissAutoConfigure() {
-        mutableState.update { it.copy(autoConfigure = null) }
+        mutableState.update { it.copy(autoConfigure = null, cooldownOverride = false) }
     }
 
     private fun today(): String = java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault())
@@ -1697,6 +1781,7 @@ class MainViewModel(
                 model,
                 threads,
                 gpuLayers = 0,
+                enableThinking = profile.thinkingEnabled,
                 flashAttention = profile.flashAttention,
                 kvCacheType = profile.kvCacheType,
             )
@@ -1711,6 +1796,7 @@ class MainViewModel(
                 threads,
                 gpuLayers = FULL_GPU_OFFLOAD,
                 deviceFilter = target.devicePrefix,
+                enableThinking = profile.thinkingEnabled,
                 flashAttention = profile.flashAttention,
                 kvCacheType = profile.kvCacheType,
             )
@@ -1843,17 +1929,19 @@ class MainViewModel(
         val restoreLoaded = mutableState.value.loadedModelId
         val backend = resolveLoadBackend(profile.backendId)
         refreshMeasurementFingerprint()
+        mutableState.update { it.copy(cooldownOverride = false) }
         sweepGate()?.let { reason ->
             mutableState.update { it.copy(error = reason) }
             return
         }
-            mutableState.update {
-                it.copy(
-                    batchTuneProfileId = profile.id,
-                    error = null,
-                    status = "Recording the CPU reference…",
-                )
-            }
+        waitForCooldown()
+        mutableState.update {
+            it.copy(
+                batchTuneProfileId = profile.id,
+                error = null,
+                status = "Recording the CPU reference…",
+            )
+        }
             val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
             val threads = (visibleCores - 2).coerceIn(1, 4)
             val gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0
@@ -1894,8 +1982,12 @@ class MainViewModel(
                 )
                 val scored = mutableListOf<BatchScore>()
                 for ((batch, ubatch) in candidates) {
+                    waitForCooldown()
                     mutableState.update {
-                        it.copy(status = "Measuring batch $batch/$ubatch on ${backend.label}…")
+                        it.copy(
+                            status = "Measuring batch $batch/$ubatch on ${backend.label}…",
+                            autoConfigure = it.autoConfigure?.copy(current = "Measuring batch $batch/$ubatch…"),
+                        )
                     }
                     // The same cheap probe as the dimension sweeps: a batch that hangs is
                     // abandoned in seconds instead of holding the sweep for the full timeout.
@@ -1928,7 +2020,9 @@ class MainViewModel(
                         }
                     }
                     val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
+                    var probeThermalTicks = 0
                     while (probeThread.isAlive && System.currentTimeMillis() < probeDeadline) {
+                        if (++probeThermalTicks % 60 == 0) refreshThermalIndicator()
                         withContext(Dispatchers.Default) { delay(250) }
                     }
                     if (probeThread.isAlive) {
@@ -1984,7 +2078,9 @@ class MainViewModel(
                         }
                     }
                     val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
+                    var measureThermalTicks = 0
                     while (measureThread.isAlive && System.currentTimeMillis() < measureDeadline) {
+                        if (++measureThermalTicks % 30 == 0) refreshThermalIndicator()
                         withContext(Dispatchers.Default) { delay(500) }
                     }
                     if (measureThread.isAlive) {
@@ -2062,7 +2158,13 @@ class MainViewModel(
             // whatever was loaded before — the profile, now with its tuned batch, if it was the
             // one being tuned.
             runCatching { unloadModelInternal(forget = false) }
-            mutableState.update { it.copy(batchTuneProfileId = null, status = null) }
+            mutableState.update {
+                it.copy(
+                    batchTuneProfileId = null,
+                    status = null,
+                    autoConfigure = it.autoConfigure?.copy(waitingForCooldown = false),
+                )
+            }
             refreshDeviceProfile()
             restoreLoaded?.let { loadModel(it) }
     }
@@ -2219,11 +2321,13 @@ class MainViewModel(
         val backend = resolveLoadBackend(profile.backendId)
         val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         refreshMeasurementFingerprint()
+        mutableState.update { it.copy(cooldownOverride = false) }
         sweepGate()?.let { reason ->
             mutableState.update { it.copy(error = reason) }
             finishDimensionTune()
             return
         }
+        waitForCooldown()
         val candidates = dimensionCandidates(
             dimension,
             profile,
@@ -2264,11 +2368,15 @@ class MainViewModel(
         runCatching {
             val referenceThreads = (visibleCores - 2).coerceIn(1, 4)
             android.util.Log.d("BramTune", "dim=${dimension.wire} backend=${backend.name} candidates=${candidates.map { it.label }}")
-            // The yardstick: CPU, fixed threadpool, nothing tuned.
+            // The yardstick: CPU, fixed threadpool, nothing tuned. The profile's thinking setting
+            // is part of it: the reference must open the assistant turn the same way the
+            // candidates do, or a thinking-enabled profile measures two different prompts and
+            // every candidate fails the agreement bar on the first token.
             container.llamaCppClient.load(
                 model = model.copy(preferredContextTokens = profile.contextTokens),
                 threads = referenceThreads,
                 gpuLayers = 0,
+                enableThinking = profile.thinkingEnabled,
                 flashAttention = profile.flashAttention,
                 kvCacheType = profile.kvCacheType,
                 batchTokens = profile.batchTokens,
@@ -2295,6 +2403,7 @@ class MainViewModel(
             val timedOutCandidates = mutableSetOf<TuningCandidate>()
             var agreed = 0
             for (candidate in candidates) {
+                waitForCooldown()
                 val tuned = candidate.apply(profile)
                 val candidateThreads = if (tuned.threads > 0) {
                     tuned.threads.coerceIn(1, visibleCores)
@@ -2302,6 +2411,15 @@ class MainViewModel(
                     referenceThreads
                 }
                 android.util.Log.d("BramTune", "candidate=${candidate.label} hex=${tuned.hexFlags} starting")
+                // The probe can sit on a hanging load for its whole window, so the overlay must
+                // name the candidate being probed — otherwise it keeps the previous candidate's
+                // text and the run looks stuck.
+                mutableState.update {
+                    it.copy(
+                        status = "Measuring ${candidate.label} on ${backend.label}…",
+                        autoConfigure = it.autoConfigure?.copy(current = "Measuring ${candidate.label}…"),
+                    )
+                }
                 // A cheap probe first: the candidate's load plus a handful of tokens. A config
                 // that hangs is abandoned in seconds and recorded, instead of burning the full
                 // measurement timeout — the converted-Q8_0 hangs showed that pathological
@@ -2335,7 +2453,9 @@ class MainViewModel(
                     }
                 }
                 val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
+                var probeThermalTicks = 0
                 while (probeThread.isAlive && System.currentTimeMillis() < probeDeadline) {
+                    if (++probeThermalTicks % 60 == 0) refreshThermalIndicator()
                     withContext(Dispatchers.Default) { delay(250) }
                 }
                 if (probeThread.isAlive) {
@@ -2376,7 +2496,9 @@ class MainViewModel(
                     }
                 }
                 val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
+                var measureThermalTicks = 0
                 while (measureThread.isAlive && System.currentTimeMillis() < measureDeadline) {
+                    if (++measureThermalTicks % 30 == 0) refreshThermalIndicator()
                     withContext(Dispatchers.Default) { delay(500) }
                 }
                 val agreedNow = if (measureThread.isAlive) {
@@ -2487,7 +2609,14 @@ class MainViewModel(
      * "Tuning…" state and the guards would silently block the next tune or auto-configure.
      */
     private fun finishDimensionTune() {
-        mutableState.update { it.copy(tuningProfileId = null, tuningDimension = null, status = null) }
+        mutableState.update {
+            it.copy(
+                tuningProfileId = null,
+                tuningDimension = null,
+                status = null,
+                autoConfigure = it.autoConfigure?.copy(waitingForCooldown = false),
+            )
+        }
     }
 
     /**
@@ -3856,14 +3985,22 @@ private const val REFERENCE_TOKENS = 24
 // candidate measurement is bounded: 5 minutes is 30-60x the expected time for a phone-sized
 // model, which turns a hang into a recorded failure instead of a stall.
 private const val CANDIDATE_TIMEOUT_MILLIS = 5 * 60 * 1_000L
-// Before the full measurement, every candidate runs a cheap probe — its load plus a handful of
-// tokens under a tight timeout — so a configuration that hangs is abandoned in seconds rather
-// than minutes. Healthy measurements take 10-30s, so 30s still leaves generous headroom.
-private const val PROBE_TIMEOUT_MILLIS = 30_000L
+// Before the full measurement, every candidate runs a cheap probe — its load, a full
+// teacher-forced replay, and a handful of decode tokens — so a configuration that hangs is
+// abandoned faster than the full measurement timeout. The floor is generous on purpose: a
+// genuinely slow-but-healthy candidate (mask-restricted threadpools, a warm phone) can need
+// ~45s for the same probe, and calling that a hang poisons the sweep; the real hang guard is
+// the measurement timeout, and the probe only shortens the wait for configurations that stop
+// responding entirely.
+private const val PROBE_TIMEOUT_MILLIS = 2 * 60 * 1_000L
 private const val PROBE_TOKENS = 4
 // Sweeps measure the device itself, so they refuse to run through throttling or memory pressure:
 // a number taken while throttling or swapping is a lie with a timestamp.
-private val ALLOWED_SWEEP_THERMAL = setOf("none", "light")
+// The thermal statuses measurements are allowed to run under. Only "none" qualifies: a device
+// that reports "light" is often already throttling hard (the S25 Ultra measures 500x slower at
+// "light" after sustained load), so the sweep parks until the phone is properly cool. The
+// overlay's Continue-anyway button overrides this for the rest of the pass.
+private val ALLOWED_SWEEP_THERMAL = setOf("none")
 private const val MIN_SWEEP_RAM_BYTES = 1_500_000_000L
 
 /** llama.cpp clamps this to the model's layer count, so it means "offload everything". */
