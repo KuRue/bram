@@ -20,6 +20,21 @@ build tree is a synced copy of the same working tree.
 
 ## Landed since the previous refresh
 
+- **Multi-part GGUF import and loading** (`4c7da94`) — the model picker is now multi-select; a
+  complete `name-NNNNN-of-MMMMM.gguf` set is validated as a unit, copied with its original
+  names (llama.cpp derives the sibling list from the pattern + `split.count` metadata), and
+  catalogued as one record with a parts list. The size check sums the parts, and orphan
+  reclamation/removal are parts-aware. Single-file imports unchanged. The split-file format and
+  the loader's sibling derivation were verified against the llama.cpp source; a real split pair
+  was produced from the Qwen GGUF for testing. The final on-device load of a split set is
+  pending a device session.
+- **MTP speculative decoding, gated and diagnosed** (`eafe759`, `59f45ca`) — the chat generation
+  path now auto-detects models with nextn heads and runs the speculative loop (draft from the
+  model's own MTP head, one batched verification, common_sampler accept), with a fallback to the
+  token-by-token loop. Two blockers found: the Nemotron-H-MoE MTP graph builder aborts at this
+  pin (upstream asserts single-MTP-block support; the abort message now routes to logcat via
+  `ggml_set_abort_callback`), and the Qwen3.5-0.8B carries no nextn tensors at all. The
+  framework is dormant until a pin ships a working Nemotron MTP builder.
 - **KV cache and flash attention as tuning dimensions; padded context for the context-sensitive
   knobs** (`2afb2d9`, `0617a67`) — the auto-configure overlay now sweeps two more dimensions that
   directly affect long-context decode speed: KV-cache quantization (F16 vs Q8_0) and flash
