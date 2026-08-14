@@ -389,6 +389,10 @@ data class AppUiState(
     val liteRtLoadDetail: String? = null,
     val messages: List<ConversationMessage> = emptyList(),
     val isGenerating: Boolean = false,
+    /** Current model phase, shared by the in-app instrument and foreground notification. */
+    val modelPhase: ModelPhase = ModelPhase.IDLE,
+    /** Rolling decode rate while a reply is streaming; final runtime metrics replace it. */
+    val liveDecodeTokensPerSecond: Double? = null,
     val status: String? = null,
     val error: String? = null,
     val lastUsage: TokenUsage? = null,
@@ -1832,9 +1836,7 @@ class MainViewModel(
         viewModelScope.launch {
             val state = mutableState.value
             val profile = state.profiles.firstOrNull { it.id == profileId } ?: return@launch
-            // A model with no profile cannot be loaded, and the store would just recreate a default
-            // on the next sync, so the last one stays.
-            if (state.profiles.count { it.modelId == profile.modelId } <= 1) return@launch
+            val removesModel = state.profiles.count { it.modelId == profile.modelId } == 1
             if (state.activeProfileId == profileId && state.loadedModelId != null) {
                 unloadModelInternal(forget = false)
             }
@@ -1844,7 +1846,12 @@ class MainViewModel(
                 container.routingSettings.setRoutingPool(updatedPool)
             }
             container.modelProfileStore.delete(profileId)
-            reloadProfiles()
+            if (removesModel) {
+                container.localModelStore.remove(profile.modelId)
+                reloadLocalModels()
+            } else {
+                reloadProfiles()
+            }
         }
     }
 
@@ -3646,6 +3653,7 @@ class MainViewModel(
      * selected, which is when there is nothing to hold a foreground service for.
      */
     private fun pushModelStatus(phase: ModelPhase, detail: String? = null) {
+        mutableState.update { it.copy(modelPhase = phase) }
         val s = mutableState.value
         val name = s.loadedModelId
             ?.let { id -> s.localModels.firstOrNull { it.id.value == id }?.displayName }
@@ -3863,6 +3871,9 @@ class MainViewModel(
         var roundReasoningRecorded = 0
         var thinking = false
         var failure: String? = null
+        var streamedTokens = 0
+        var decodeStartedAt = 0L
+        var lastRateUpdateAt = 0L
         return try {
             agent.run(
                 request = AgentRunRequest(
@@ -3878,7 +3889,10 @@ class MainViewModel(
                     when (event) {
                         is AgentEvent.Status -> {
                             mutableState.update { it.copy(status = event.text) }
-                            pushModelStatus(ModelPhase.GENERATING)
+                            val preparing = event.text.contains("context", ignoreCase = true) ||
+                                event.text.contains("prompt", ignoreCase = true) ||
+                                event.text.contains("prepar", ignoreCase = true)
+                            pushModelStatus(if (preparing) ModelPhase.PREPARING else ModelPhase.GENERATING)
                         }
                         is AgentEvent.Reasoning -> reasoningFormat = event.format
                         is AgentEvent.ContextPrepared -> mutableState.update {
@@ -3894,6 +3908,18 @@ class MainViewModel(
                             )
                         }
                         is AgentEvent.TextDelta -> {
+                            val rateNow = android.os.SystemClock.elapsedRealtime()
+                            if (decodeStartedAt == 0L) decodeStartedAt = rateNow
+                            // Local runtimes emit one delta per decoded token. Remote providers
+                            // generally do the same, making this a useful live estimate until their
+                            // authoritative metrics arrive at the end of the turn.
+                            streamedTokens += 1
+                            if (rateNow - lastRateUpdateAt >= 200L) {
+                                val elapsed = (rateNow - decodeStartedAt).coerceAtLeast(1L)
+                                val liveRate = streamedTokens * 1_000.0 / elapsed
+                                mutableState.update { it.copy(liveDecodeTokensPerSecond = liveRate) }
+                                lastRateUpdateAt = rateNow
+                            }
                             assistantText += event.text
                             roundText += event.text
                             val streaming = streamingReply(roundText, reasoningFormat)
@@ -4001,6 +4027,7 @@ class MainViewModel(
                         is AgentEvent.Metrics -> mutableState.update {
                             it.copy(
                                 lastMetrics = event.metrics,
+                                liveDecodeTokensPerSecond = event.metrics.decodeTokensPerSecond,
                                 sessionOutputTokens = it.sessionOutputTokens + event.metrics.outputTokens,
                             )
                         }
@@ -4067,7 +4094,12 @@ class MainViewModel(
                     else -> requestMessages
                 }
                 mutableState.update {
-                    it.copy(messages = settled, isGenerating = false, status = null)
+                    it.copy(
+                        messages = settled,
+                        isGenerating = false,
+                        status = null,
+                        liveDecodeTokensPerSecond = null,
+                    )
                 }
                 // Persist whatever the turn produced, including a reply that was stopped part way,
                 // so the thread on disk matches what is on screen.
