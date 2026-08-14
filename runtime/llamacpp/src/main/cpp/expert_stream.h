@@ -13,6 +13,8 @@
 // know which tensors are the streamable experts for a given architecture. Later phases add the
 // cb_eval capture warm-up, the serial slice reads, the hot-expert cache, and the overlap hook.
 
+#include "ggml.h"
+
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -65,6 +67,56 @@ public:
 private:
     std::vector<int> fds_;
     std::unordered_map<std::string, TensorLoc> offsets_;
+};
+
+// Drives MoE expert streaming for one loaded model. Installed as the context's cb_eval callback.
+//
+// Lifecycle:
+//   init()      once after the model loads: resolve the arch recipe and build the offset map.
+//   Capture     one warm-up decode with mode Capture: record the live expert ggml_tensor* of every
+//               routed-expert weight the graph references, and resolve each to its file location.
+//   Stream      real generation with mode Stream: for each ffn_moe_topk-<il> node, read the
+//               selected experts from flash and rebind their tensors' ->data (added in P2).
+//   Off         behaves exactly like stock llama.cpp (the callback is a no-op).
+class ExpertStreamer {
+public:
+    enum class Mode { Off, Capture, Stream };
+
+    // Resolve the recipe for `arch` and build the offset map from the model's shard paths (split
+    // order). Returns false and sets *error if the arch is not a streamable MoE or a shard fails.
+    bool init(const std::vector<std::string> & shard_paths, const std::string & arch, std::string * error);
+
+    void set_mode(Mode m) { mode_ = m; }
+    Mode mode() const { return mode_; }
+    bool ready() const { return recipe_ != nullptr; }
+
+    // Trampoline to install as llama_context_params.cb_eval, with `this` as cb_eval_user_data.
+    static bool eval_callback(ggml_tensor * t, bool ask, void * user_data);
+
+    size_t captured_count() const { return captured_.size(); }
+    // Captured tensors whose byte location resolved in the offset map (should equal captured_count()).
+    size_t resolved_count() const;
+    // Total expert bytes referenced by the captured tensors (whole model, not per token).
+    uint64_t captured_bytes() const;
+    size_t shard_count() const { return offsets_.shard_count(); }
+
+private:
+    bool on_eval(ggml_tensor * t, bool ask);
+    // If `name` is "blk.<il>.<suffix>.weight" for one of the recipe's expert suffixes, fill *il and
+    // *suffix_idx and return true.
+    bool match_expert(const char * name, int * il, int * suffix_idx) const;
+
+    struct Captured {
+        ggml_tensor * tensor = nullptr;
+        TensorLoc loc;   // loc.shard < 0 when the name did not resolve in the offset map
+        int il = -1;
+        int suffix_idx = -1;
+    };
+
+    Mode mode_ = Mode::Off;
+    const ExpertRecipe * recipe_ = nullptr;
+    GgufOffsetMap offsets_;
+    std::unordered_map<std::string, Captured> captured_;
 };
 
 } // namespace bram
