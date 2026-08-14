@@ -34,11 +34,19 @@ Last updated: 2026-08-14 (continuation-ready)
   never load; regenerate real splits with a host-built `llama-gguf-split`. `importModel` still has no JVM
   test (needs Android ContentResolver/Uri). Minor UX: a total load failure renders as CPU `✓ 0/0`.
 - **Pending on-device validations** (each is a quick phone action):
-  1. The **Nemotron MTP assert message** — remove the `nemotron_h_moe` gate in
-     `init_speculative()` temporarily, load the Nemotron, send a message, and read the new
-     `ggml_abort` logcat line (routed via `ggml_set_abort_callback`). That tells us the exact
-     upstream assert (single-MTP-block vs the output-head) and whether a small patch or a pin
-     bump unblocks MTP.
+  1. The **Nemotron MTP assert message** — partially investigated 2026-08-14 with temporary
+     diagnostics (all reverted; tree clean). Confirmed on device: the Nemotron loads with
+     `arch=nemotron_h_moe` and **`llama_model_n_layer_nextn=1`** — the MTP head IS exposed at pin
+     `a94d563e`, so the `init_speculative()` line-341 nextn guard passes and the `nemotron_h_moe`
+     arch gate at line ~349 is the real block. **The `ggml_abort` was NOT captured**: with the gate
+     bypassed, `init_speculative()` runs only after prompt prefill (called at the decode section,
+     ~line 1075), and the Nemotron's ~3000-token prefill (system identity + tool schemas, no prompt
+     cache: `matched 0, reused 0`) never completed on device — generations were torn down at the
+     context level with no output before decode, consistent with the documented slow/hanging CPU
+     generation on the 8 Elite. To finish: either shrink the prompt (fewer tools/skills, shorter
+     context) so prefill completes, or move the MTP graph build ahead of prefill for the capture.
+     Note: the a94d563e pin enabled the Gated Delta Net / Lightning Indexer / DeepSeek V4 HC fused
+     ops seen while building the Nemotron context, so whether the old abort still fires is unproven.
   2. **KV-cache Q8_0 + flash-attention tuning** — the new dimensions run on the next
      auto-configure; the phone's long-context decode (the Nemotron at 0.5 tok/s) is the
      yardstick for whether Q8_0 KV helps.
