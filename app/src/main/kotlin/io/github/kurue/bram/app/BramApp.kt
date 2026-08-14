@@ -2036,7 +2036,7 @@ private fun BoxScope.AutoConfigureOverlay(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    "tok/s = prompt/decode. The winner is the fastest total run.",
+                    "tok/s = prompt/decode on a fresh short context — a benchmark, not chat speed. The winner is the fastest total run.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
