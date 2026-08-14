@@ -224,6 +224,17 @@ data class AcceleratorProbe(
     val usable: Boolean get() = AcceleratorAgreement.isUsable(agreement)
 }
 
+/** Builds the persisted winning-backend summary without treating its literal percent as a format token. */
+internal fun successfulAutoConfigureNote(
+    backendLabel: String,
+    promptTokensPerSecond: Double,
+    decodeTokensPerSecond: Double,
+    agreement: Double,
+    measuredOn: String,
+): String = "$backendLabel: ${promptTokensPerSecond.toInt()} prompt tok/s, " +
+    "${decodeTokensPerSecond.toInt()} decode tok/s, " +
+    "${(agreement * 100).toInt()}% agreement. Measured $measuredOn."
+
 /** Accelerator families Bram can validate against the CPU reference. */
 enum class AcceleratorTarget(val label: String, val devicePrefix: String) {
     VULKAN("Vulkan", "Vulkan"),
@@ -1363,7 +1374,11 @@ class MainViewModel(
             // Ask the runtime what it can see now rather than trusting what was detected at start.
             // The inference process restarts across loads, and a backend that registered late was
             // missing from the list, so a profile configured for it silently loaded on the CPU.
-            val backends = detectBackendsNow()
+            // A fresh probe can be temporarily incomplete while the isolated inference process is
+            // restarting. Keep capabilities already detected during this app session and merge in
+            // anything the new probe finds; otherwise skipping one freshly reported backend (such
+            // as Vulkan) can accidentally collapse the sweep to CPU only.
+            val backends = (snapshot.availableBackends + detectBackendsNow()).distinct()
             refreshMeasurementFingerprint()
             mutableState.update { it.copy(cooldownOverride = false) }
             sweepGate()?.let { reason ->
@@ -1373,7 +1388,11 @@ class MainViewModel(
             waitForCooldown()
 
             val candidates = backends
-                .filter(RuntimeBackend::offloadsToAccelerator)
+                // Vulkan is still available for manual profiles, but its validation path is not
+                // reliable enough to spend time on during the one-tap setup pass yet.
+                .filter { backend ->
+                    backend.offloadsToAccelerator && backend != RuntimeBackend.VULKAN
+                }
                 .mapNotNull { backend ->
                     AcceleratorTarget.entries
                         .firstOrNull { it.devicePrefix == backend.devicePrefix }
@@ -1554,9 +1573,13 @@ class MainViewModel(
             val note = when {
                 best != null -> {
                     val (backend, report) = best
-                    "${backend.label}: ${report.acceleratorPromptTokPerSec.toInt()} prompt tok/s, " +
-                        "${report.acceleratorDecodeTokPerSec.toInt()} decode tok/s, " +
-                        "${(report.agreement * 100).toInt()}% agreement. Measured %s.".format(today())
+                    successfulAutoConfigureNote(
+                        backendLabel = backend.label,
+                        promptTokensPerSecond = report.acceleratorPromptTokPerSec,
+                        decodeTokensPerSecond = report.acceleratorDecodeTokPerSec,
+                        agreement = report.agreement,
+                        measuredOn = today(),
+                    )
                 }
                 measured.isEmpty() -> "No accelerator to measure, so this runs on the CPU."
                 // A backend can agree with the reference and still be slower than it — agreement
