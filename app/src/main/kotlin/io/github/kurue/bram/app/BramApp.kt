@@ -4,9 +4,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -15,9 +17,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.graphics.SolidColor
@@ -28,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -50,6 +52,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
@@ -80,10 +83,13 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -98,6 +104,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clip
@@ -174,13 +181,13 @@ private enum class AppPanel {
     TASKS,
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BramApp(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
     var panel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
-    var displayedPanel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
-    LaunchedEffect(panel) { panel?.let { displayedPanel = it } }
+    var panelExpansionRequested by remember(panel) { mutableStateOf(false) }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         viewModel.importModels(uris)
     }
@@ -210,6 +217,12 @@ fun BramApp(viewModel: MainViewModel) {
         state.runtimePermissionRequest?.let { permission ->
             runtimePermission.launch(permission)
             viewModel.consumedRuntimePermissionRequest()
+        }
+    }
+    BackHandler(enabled = panel != null || drawerOpen) {
+        when {
+            panel != null -> panel = null
+            drawerOpen -> drawerOpen = false
         }
     }
 
@@ -295,35 +308,37 @@ fun BramApp(viewModel: MainViewModel) {
                 )
             }
 
-            if (panel != null) {
-                Scrim(onDismiss = { panel = null })
-            }
-            AnimatedVisibility(
-                visible = panel != null,
-                modifier = Modifier.align(Alignment.BottomCenter),
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-            ) {
-                displayedPanel?.let { open ->
-                GlassSurface(
+            panel?.let { open ->
+                val panelState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                BoxWithConstraints {
+                val expandedHeight = this.maxHeight
+                val panelMaxHeight by animateDpAsState(
+                    targetValue = if (panelExpansionRequested) expandedHeight else expandedHeight * 0.88f,
+                    animationSpec = tween(220),
+                    label = "panel height",
+                )
+                val panelReadyToScroll = panelMaxHeight >= expandedHeight - 1.dp
+                ModalBottomSheet(
+                    onDismissRequest = { panel = null },
+                    sheetState = panelState,
+                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                    containerColor = Color.Transparent,
+                    scrimColor = Color.Black.copy(alpha = 0.42f),
+                    dragHandle = null,
+                ) {
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .fillMaxHeight(0.88f),
-                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                    alpha = Glass.chromeAlpha,
-                    // Darker than the cards it holds. Both drew from the same default before, so
-                    // lightening the cards lightened their backdrop with them and nothing separated.
-                    tint = Glass.panelTint,
+                        .wrapContentHeight()
+                        .heightIn(max = panelMaxHeight),
                 ) {
-                    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                        Box(
-                            Modifier
-                                .align(Alignment.CenterHorizontally)
-                                .padding(vertical = 10.dp)
-                                .size(width = 36.dp, height = 4.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)),
-                        )
+                    GlassSurface(
+                        modifier = Modifier.matchParentSize(),
+                        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                        alpha = Glass.chromeAlpha,
+                        tint = Glass.panelTint,
+                    ) {}
+                    Column(Modifier.fillMaxWidth()) {
                         when (open) {
                             AppPanel.MODELS -> ModelsScreen(
                                 state = state,
@@ -339,6 +354,8 @@ fun BramApp(viewModel: MainViewModel) {
                                 onTuneDimension = viewModel::tuneDimension,
                                 tuningDimension = state.tuningDimension,
                                 onConvertQuant = viewModel::convertQuant,
+                                sheetReadyToScroll = panelReadyToScroll,
+                                onExpandSheet = { panelExpansionRequested = true },
                             )
                             AppPanel.ROUTING -> RoutingSummaryScreen(
                                 state = state,
@@ -415,6 +432,7 @@ fun BramApp(viewModel: MainViewModel) {
                     }
                 }
                 }
+                }
             }
 
             // Configuration must sit above the profile panel that started it. It used to be
@@ -473,7 +491,7 @@ private fun TopBubbleBar(
             alpha = Glass.chromeAlpha,
         ) {
             Column(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 7.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
@@ -482,15 +500,41 @@ private fun TopBubbleBar(
                         ?: state.selectedLocalModel?.let { model -> state.profileFor(model).name }
                         ?: state.selectedEndpoint?.displayName
                         ?: "Add a profile",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    modelStatusLine(state),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
+                Spacer(Modifier.height(4.dp))
+                ContextMeter(state)
+                Spacer(Modifier.height(3.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        modelRateLabel(state),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                    Text(
+                        modelProcessLabel(state),
+                        modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    val throttled = state.deviceProfile?.thermalStatus.orEmpty().let {
+                        it.isNotBlank() && it != "none" && !it.startsWith("unknown")
+                    }
+                    ThrottleIcon(
+                        tint = if (throttled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
             }
         }
 
@@ -501,27 +545,48 @@ private fun TopBubbleBar(
     }
 }
 
-/** Live state belongs here: throughput while generating, otherwise what is loaded and where. */
 @Composable
-private fun modelStatusLine(state: AppUiState): String = when {
-    // Throughput belongs here rather than above the composer: it is state about the model, which is
-    // what this line is for, and the chat says it is working by animating instead.
-    state.isGenerating -> buildString {
-        append(state.loadedBackend?.label ?: "Running")
-        state.selectedLocalModel?.let { append(" · ${formatTokens(it.preferredContextTokens)}") }
-        state.lastMetrics?.decodeTokensPerSecond?.let { append(" · ${formatRate(it)}") }
+private fun ContextMeter(state: AppUiState) {
+    val limit = state.selectedEndpoint?.contextWindowTokens
+        ?: state.activeProfile?.contextTokens
+        ?: state.selectedLocalModel?.preferredContextTokens
+        ?: 0
+    val used = state.lastContextTokens ?: state.lastUsage?.inputTokens ?: 0
+    val fraction = if (limit > 0) (used.toFloat() / limit).coerceIn(0f, 1f) else 0f
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.16f)),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(fraction)
+                .fillMaxHeight()
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)),
+        )
     }
-    state.routingMode == RoutingMode.AUTO && !state.routingPool.isEmpty ->
-        state.routingTargetLabel(state.routingPool.primaryTargetId)?.let { "Primary · ready" }
-            ?: "Choose a Primary profile"
-    state.selectedLocalModelIsLoaded -> buildString {
-        append(state.loadedBackend?.label ?: "loaded")
-        state.selectedLocalModel?.let { append(" · ${formatTokens(it.preferredContextTokens)}") }
-        state.lastMetrics?.decodeTokensPerSecond?.let { append(" · ${formatRate(it)}") }
-    }
-    state.selectedEndpoint != null -> "Ready"
-    state.selectedLocalModel != null -> "Not loaded"
-    else -> "Add a profile to begin"
+}
+
+private fun modelRateLabel(state: AppUiState): String {
+    val rate = if (state.isGenerating) state.liveDecodeTokensPerSecond
+    else state.lastMetrics?.decodeTokensPerSecond
+    return rate?.let { String.format(Locale.US, "%.1f tok/s", it) } ?: "— tok/s"
+}
+
+private fun modelProcessLabel(state: AppUiState): String = when {
+    state.isLoadingModel || state.isLoadingLiteRt -> "Loading model"
+    state.isImporting -> "Importing model"
+    state.autoConfigure != null -> "Configuring"
+    state.convertingProfileId != null -> "Converting"
+    state.modelPhase == ModelPhase.PREPARING -> "System prompt"
+    state.modelPhase == ModelPhase.THINKING -> "Thinking"
+    state.modelPhase == ModelPhase.CALLING_TOOL -> "Using tool"
+    state.modelPhase == ModelPhase.GENERATING -> "Generating"
+    state.selectedLocalModelIsLoaded || state.selectedLiteRtIsLoaded || state.selectedEndpoint != null -> "Ready"
+    state.profiles.isEmpty() && state.endpoints.isEmpty() -> "Add profile"
+    else -> "Idle"
 }
 
 /** Conversations, plus a way into the model and provider panels. */
@@ -936,6 +1001,8 @@ private fun ModelsScreen(
     tuningDimension: TuningDimension?,
     /** Starts a quant conversion for a profile's file. */
     onConvertQuant: (String, String) -> Unit,
+    sheetReadyToScroll: Boolean,
+    onExpandSheet: () -> Unit,
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var addingProfile by rememberSaveable { mutableStateOf(false) }
@@ -955,19 +1022,32 @@ private fun ModelsScreen(
         )
         return
     }
+    val sheetExpansionGesture = if (sheetReadyToScroll) {
+        Modifier
+    } else {
+        Modifier.pointerInput(Unit) {
+            detectVerticalDragGestures { change, dragAmount ->
+                change.consume()
+                if (dragAmount < 0f) onExpandSheet()
+            }
+        }
+    }
     LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        Modifier.fillMaxSize().then(sheetExpansionGesture),
+        userScrollEnabled = sheetReadyToScroll,
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item { PanelHandle() }
         item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.Top) {
                 SectionHeader("Profiles", modifier = Modifier.weight(1f))
-                TextButton(
+                IconButton(
                     onClick = {
                         profileCountAtOpen = state.profiles.size + state.endpoints.size
                         addingProfile = true
                     },
+                    modifier = Modifier.size(40.dp),
                     enabled = !state.isImporting && !state.isGenerating,
                 ) { Text("+", style = MaterialTheme.typography.headlineSmall) }
             }
@@ -1010,7 +1090,7 @@ private fun ModelsScreen(
                     },
                     backend = backend,
                     availableBackends = state.availableBackends,
-                    canDelete = state.profiles.count { it.modelId == profile.modelId } > 1,
+                    removesModelOnDelete = state.profiles.count { it.modelId == profile.modelId } == 1,
                     onToggleExpanded = {
                         expandedProfileId = if (expandedProfileId == profile.id) null else profile.id
                     },
@@ -1098,9 +1178,11 @@ private fun AddProfileScreen(
     var apiKind by rememberSaveable { mutableStateOf(RemoteApiKind.CHAT_COMPLETIONS) }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Add profile", "Profiles", onBack)
         if (!addingServer) {
             GlassSurface(Modifier.fillMaxWidth().clickable(enabled = !state.isImporting, onClick = onImport)) {
@@ -1349,7 +1431,7 @@ private fun ProfileCard(
     tuneStatus: String?,
     backend: RuntimeBackend,
     availableBackends: List<RuntimeBackend>,
-    canDelete: Boolean,
+    removesModelOnDelete: Boolean,
     onToggleExpanded: () -> Unit,
     onUpdateProfile: (ModelProfile) -> Unit,
     onDeleteProfile: () -> Unit,
@@ -1376,7 +1458,45 @@ private fun ProfileCard(
     var editingPrompt by rememberSaveable(profile.id) { mutableStateOf(false) }
     var draftPrompt by rememberSaveable(profile.id) { mutableStateOf(profile.systemPrompt) }
     var showAdvanced by rememberSaveable(profile.id) { mutableStateOf(false) }
+    var confirmDelete by rememberSaveable(profile.id) { mutableStateOf(false) }
+    val deleteSwipeState = rememberSwipeToDismissBoxState(
+        positionalThreshold = { distance -> distance * 0.32f },
+    )
+    val swipeScope = rememberCoroutineScope()
 
+    SwipeToDismissBox(
+        state = deleteSwipeState,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)),
+        enableDismissFromStartToEnd = false,
+        enableDismissFromEndToStart = !locked,
+        backgroundContent = {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(2.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(MaterialTheme.colorScheme.errorContainer)
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                TextButton(
+                    onClick = { confirmDelete = true },
+                    enabled = !locked,
+                ) {
+                    TrashIcon(
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Delete",
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        },
+    ) {
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
@@ -1797,9 +1917,6 @@ private fun ProfileCard(
                     // The only way left to get a second profile for one file, now that the
                     // separate creation row is gone.
                     TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
-                    if (canDelete) {
-                        TextButton(onClick = onDeleteProfile, enabled = !locked) { Text("Delete") }
-                    }
                 }
 
                 if (editingPrompt) {
@@ -1839,6 +1956,42 @@ private fun ProfileCard(
                 }
             }
         }
+    }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = {
+                confirmDelete = false
+                swipeScope.launch { deleteSwipeState.reset() }
+            },
+            title = { Text("Delete ${profile.name}?") },
+            text = {
+                Text(
+                    if (removesModelOnDelete) {
+                        "This is the model's only profile, so its imported model copy will also be removed."
+                    } else {
+                        "This removes the profile and its settings. The imported model stays on this device."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = false
+                        onDeleteProfile()
+                    },
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = false
+                        swipeScope.launch { deleteSwipeState.reset() }
+                    },
+                ) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -2233,9 +2386,11 @@ private fun RoutingSummaryScreen(
 ) {
     var showPolicy by rememberSaveable { mutableStateOf(false) }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         SectionHeader("Model selection", "Choose the profiles Bram can use")
 
         RoutingSlotSection(
@@ -2382,9 +2537,11 @@ private fun SessionScreen(
 ) {
     var showStats by rememberSaveable { mutableStateOf(false) }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         SectionHeader("Conversation details")
 
         // The mode is the one thing that changes how the conversation behaves rather than what it
@@ -2592,9 +2749,11 @@ private fun SettingsScreen(
     onSetCompletionAlerts: (Boolean) -> Unit,
 ) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         SectionHeader("Settings", "App behavior and system destinations")
         SectionHeader("Notifications")
         GlassSurface(Modifier.fillMaxWidth()) {
@@ -2640,9 +2799,11 @@ private fun SettingsScreen(
 @Composable
 private fun CapabilitiesScreen(state: AppUiState, onOpenPanel: (AppPanel) -> Unit) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         SectionHeader("Capabilities", "What Bram can use beyond the selected model")
         DestinationCard(
             "Tools",
@@ -2688,9 +2849,11 @@ private fun ProvidersScreen(
     var apiKind by rememberSaveable { mutableStateOf(RemoteApiKind.CHAT_COMPLETIONS) }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Remote providers", "Capabilities", onBack)
         Text(
             "Optional OpenAI-compatible capacity. Local GGUF chat does not require a provider.",
@@ -2787,9 +2950,11 @@ private fun ToolsScreen(
     var mcpAllowHttp by rememberSaveable { mutableStateOf(false) }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Tools", "Capabilities", onBack)
         GlassSurface(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2919,9 +3084,11 @@ private fun SkillsScreen(
     }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Skills", "Capabilities", onBack)
         Text(
             "Versioned procedures Bram follows when their description matches a task. Skills are instructions, not executable code.",
@@ -2971,9 +3138,11 @@ private fun AutomationsScreen(
     var cron by rememberSaveable { mutableStateOf("0 9 * * *") }
     var prompt by rememberSaveable { mutableStateOf("") }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Automations", "Capabilities", onBack)
         Text(
             "Scheduled prompts enter the task queue and use the same routing and approval rules as other work.",
@@ -3020,9 +3189,11 @@ private fun MemoriesScreen(
     onClearEmbeddingModel: () -> Unit,
 ) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Memories", "Capabilities", onBack)
         Text(
             "Facts and standing instructions Bram retained from past conversations. Remove anything wrong or stale.",
@@ -3067,9 +3238,11 @@ private fun MemoriesScreen(
 @Composable
 private fun SystemScreen(state: AppUiState, onBack: () -> Unit, onRefreshDiagnostics: () -> Unit) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("System", "Settings", onBack)
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionHeader("Device", "Hardware and memory summary", Modifier.weight(1f))
@@ -3671,6 +3844,21 @@ internal fun SectionHeader(title: String, subtitle: String = "", modifier: Modif
         subtitle.takeIf(String::isNotBlank)?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+@Composable
+internal fun PanelHandle() {
+    Box(
+        Modifier.fillMaxWidth().padding(top = 5.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(width = 36.dp, height = 4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)),
+        )
     }
 }
 

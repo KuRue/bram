@@ -35,48 +35,60 @@ fun MenuIcon(tint: Color, modifier: Modifier = Modifier) {
     }
 }
 
-/** A new, unsaved conversation: a speech bubble with a plus. */
+/** A new conversation: the familiar compose mark, kept spare at this small optical size. */
 @Composable
 fun NewChatIcon(tint: Color, modifier: Modifier = Modifier) {
     Canvas(modifier) {
-        val stroke = size.minDimension * 0.075f
-        val inset = size.minDimension * 0.22f
-        val bubble = androidx.compose.ui.geometry.Rect(
-            left = inset,
-            top = inset,
-            right = size.width - inset,
-            bottom = size.height - inset * 1.35f,
-        )
+        val stroke = size.minDimension * 0.078f
+        val inset = size.minDimension * 0.20f
+        val boxRight = size.width * 0.72f
+        val boxTop = size.height * 0.28f
         val path = Path().apply {
-            addRoundRect(
-                androidx.compose.ui.geometry.RoundRect(
-                    bubble,
-                    androidx.compose.ui.geometry.CornerRadius(size.minDimension * 0.18f),
-                ),
-            )
-            // The tail, so it reads as a conversation rather than a rounded box.
-            moveTo(bubble.left + bubble.width * 0.26f, bubble.bottom)
-            lineTo(bubble.left + bubble.width * 0.22f, size.height - inset * 0.35f)
-            lineTo(bubble.left + bubble.width * 0.5f, bubble.bottom)
+            moveTo(boxRight, boxTop)
+            lineTo(boxRight, size.height - inset)
+            quadraticTo(boxRight, size.height - inset * 0.75f, boxRight - inset * 0.25f, size.height - inset * 0.75f)
+            lineTo(inset * 1.25f, size.height - inset * 0.75f)
+            quadraticTo(inset * 0.75f, size.height - inset * 0.75f, inset * 0.75f, size.height - inset * 1.25f)
+            lineTo(inset * 0.75f, inset * 1.25f)
+            quadraticTo(inset * 0.75f, inset * 0.75f, inset * 1.25f, inset * 0.75f)
+            lineTo(size.width - inset * 1.45f, inset * 0.75f)
         }
         drawPath(path, tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
+        val pencilStart = androidx.compose.ui.geometry.Offset(size.width * 0.43f, size.height * 0.59f)
+        val pencilEnd = androidx.compose.ui.geometry.Offset(size.width * 0.79f, size.height * 0.23f)
+        drawLine(
+            tint,
+            pencilStart,
+            pencilEnd,
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            tint,
+            pencilStart,
+            androidx.compose.ui.geometry.Offset(pencilStart.x - stroke * 0.65f, pencilStart.y + stroke * 0.65f),
+            strokeWidth = stroke * 0.7f,
+            cap = StrokeCap.Round,
+        )
+    }
+}
 
-        val centre = bubble.center
-        val arm = bubble.width * 0.19f
-        drawLine(
-            tint,
-            androidx.compose.ui.geometry.Offset(centre.x - arm, centre.y),
-            androidx.compose.ui.geometry.Offset(centre.x + arm, centre.y),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        drawLine(
-            tint,
-            androidx.compose.ui.geometry.Offset(centre.x, centre.y - arm),
-            androidx.compose.ui.geometry.Offset(centre.x, centre.y + arm),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
+/** Three descending lanes: dim when unrestricted, accented when Android reports heat pressure. */
+@Composable
+fun ThrottleIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.13f
+        val xs = listOf(0.24f, 0.50f, 0.76f)
+        val tops = listOf(0.22f, 0.36f, 0.50f)
+        xs.zip(tops).forEach { (x, top) ->
+            drawLine(
+                color = tint,
+                start = androidx.compose.ui.geometry.Offset(size.width * x, size.height * top),
+                end = androidx.compose.ui.geometry.Offset(size.width * x, size.height * 0.78f),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+        }
     }
 }
 
@@ -166,5 +178,45 @@ fun PencilIcon(tint: Color, modifier: Modifier = Modifier) {
             strokeWidth = stroke * 0.8f,
             cap = StrokeCap.Round,
         )
+    }
+}
+
+/** Delete: a simple lidded bin, used for destructive swipe actions. */
+@Composable
+fun TrashIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.075f
+        val left = size.width * 0.30f
+        val right = size.width * 0.70f
+        val top = size.height * 0.34f
+        val bottom = size.height * 0.76f
+        drawLine(
+            tint,
+            androidx.compose.ui.geometry.Offset(left, top),
+            androidx.compose.ui.geometry.Offset(right, top),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            tint,
+            androidx.compose.ui.geometry.Offset(size.width * 0.25f, size.height * 0.27f),
+            androidx.compose.ui.geometry.Offset(size.width * 0.75f, size.height * 0.27f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            tint,
+            androidx.compose.ui.geometry.Offset(size.width * 0.43f, size.height * 0.20f),
+            androidx.compose.ui.geometry.Offset(size.width * 0.57f, size.height * 0.20f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        val body = Path().apply {
+            moveTo(left, top)
+            lineTo(left + size.width * 0.04f, bottom)
+            lineTo(right - size.width * 0.04f, bottom)
+            lineTo(right, top)
+        }
+        drawPath(body, tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
     }
 }
