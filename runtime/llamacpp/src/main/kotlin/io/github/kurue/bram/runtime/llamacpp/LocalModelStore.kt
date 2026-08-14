@@ -92,9 +92,13 @@ class LocalModelStore(
         require(uris.isNotEmpty()) { "No documents were selected" }
         if (uris.size == 1) return@withContext importSingle(uris.first(), progress)
 
-        val documents = uris.map(::queryDocument)
-        val sorted = documents.sortedBy { it.fileName }
-        val splitSpec = splitSpecOf(sorted)
+        // Keep each document paired with its own URI: the picker returns URIs in selection
+        // order, but parts must be handled in split order (00001 first). Sorting a parallel
+        // list while indexing uris by position would pair a part's name with another part's
+        // bytes whenever the two orders differ.
+        val documents = uris.map { uri -> queryDocument(uri) to uri }
+        val sorted = documents.sortedBy { (document, _) -> document.fileName }
+        val splitSpec = splitSpecOf(sorted.map { (document, _) -> document })
             ?: throw IllegalArgumentException(
                 "The selected files do not form a multi-part GGUF (expected names like " +
                     "model-00001-of-00005.gguf). Import each part set together, or import a " +
@@ -103,19 +107,20 @@ class LocalModelStore(
         require(sorted.size == splitSpec.total) {
             "Selected ${sorted.size} of ${splitSpec.total} parts of ${splitSpec.prefix}; pick every part"
         }
-        val totalBytes = sorted.sumOf { it.size }
+        val totalBytes = sorted.sumOf { (document, _) -> document.size }
         progress(ModelImportProgress("Reading GGUF metadata", totalBytes = totalBytes))
 
-        // The split header lives in the first part; the metadata reader only needs its head.
-        val metadata = readMetadata(uris.first())
+        // The split header and the model's general.* metadata live only in the first part
+        // (00001); later parts carry just split.* keys and their tensors. Read from the sorted
+        // first part, not whichever part the user happened to select first.
+        val metadata = readMetadata(sorted.first().second)
         modelsDirectory.mkdirs()
 
         val staged = mutableListOf<Pair<java.io.File, String>>()
         val digests = mutableListOf<String>()
         var readTotal = 0L
         try {
-            sorted.forEachIndexed { index, document ->
-                val partUri = uris[index]
+            sorted.forEachIndexed { index, (document, partUri) ->
                 val stagingFile = java.io.File.createTempFile("import-", ".gguf.part", modelsDirectory)
                 staged += stagingFile to document.fileName
                 val digest = MessageDigest.getInstance("SHA-256")
@@ -162,7 +167,7 @@ class LocalModelStore(
             id = ModelId("local:${firstHash.take(24)}"),
             displayName = displayNameFor(metadata.name, splitSpec.prefix + ".gguf"),
             fileName = splitSpec.prefix + ".gguf",
-            contentUri = uris.first().toString(),
+            contentUri = sorted.first().second.toString(),
             localPath = finalFiles.first().absolutePath,
             fileSizeBytes = totalBytes,
             sha256 = firstHash,
@@ -176,7 +181,7 @@ class LocalModelStore(
             preferredContextTokens = recommendInitialContext(metadata.trainedContextTokens),
             tensorTypeCounts = metadata.tensorTypeCounts,
         )
-        addOrReplace(record, uris.first().toString())
+        addOrReplace(record, sorted.first().second.toString())
         progress(ModelImportProgress("Verified", totalBytes, totalBytes))
         record
     }
