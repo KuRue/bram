@@ -181,8 +181,8 @@ fun BramApp(viewModel: MainViewModel) {
     var panel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
     var displayedPanel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
     LaunchedEffect(panel) { panel?.let { displayedPanel = it } }
-    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let(viewModel::importModel)
+    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        viewModel.importModels(uris)
     }
     val skillPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importSkillDocument)
@@ -1107,7 +1107,9 @@ private fun AddProfileScreen(
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text("Model on this phone", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Choose a GGUF file. Bram will inspect it, test this device, and create a ready-to-use profile.",
+                        "Choose a GGUF file. For a split model, select every part " +
+                            "(name-00001-of-00005.gguf …) in one go. Bram will inspect it, test this " +
+                            "device, and create a ready-to-use profile.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

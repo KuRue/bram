@@ -330,7 +330,13 @@ class InferenceProcessService : Service() {
         }
         try {
             val expectedSize = request.optLong("fileSizeBytes", -1L)
-            val actualSize = modelFile.length()
+            // Multi-part GGUFs keep every part beside the main file under its original name;
+            // llama.cpp derives the siblings from the name pattern, so only the main path is
+            // handed to the native side, but the size check must cover the whole set.
+            val parts = request.optJSONArray("parts")?.let { array ->
+                buildList(array.length()) { for (index in 0 until array.length()) add(array.getString(index)) }
+            }.orEmpty()
+            val actualSize = modelFile.length() + parts.sumOf { java.io.File(it).length() }
             require(expectedSize < 0 || expectedSize == actualSize) {
                 "The GGUF size changed after import. Remove it from Bram and import it again before loading."
             }

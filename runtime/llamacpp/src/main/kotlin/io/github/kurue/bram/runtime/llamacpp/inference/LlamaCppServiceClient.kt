@@ -143,6 +143,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("modelId", model.id.value)
             .put("contentUri", model.contentUri)
             .put("localPath", model.localPath)
+            .put("parts", JSONArray().also { array -> model.parts.forEach(array::put) })
             .put("fileSizeBytes", model.fileSizeBytes)
             .put("contextTokens", model.preferredContextTokens)
             .put("batchTokens", effectiveBatch)

@@ -82,6 +82,12 @@ data class LocalModelRecord(
     val localPath: String,
     val fileSizeBytes: Long,
     val sha256: String,
+    /**
+     * Extra split parts of a multi-part GGUF, in load order, stored with their original
+     * `<name>-NNNNN-of-MMMMM.gguf` names so llama.cpp's split auto-detection finds them next to
+     * [localPath]. Empty for single-file models. [fileSizeBytes] is the sum of every part.
+     */
+    val parts: List<String> = emptyList(),
     val ggufVersion: Int,
     val architecture: String,
     val quantization: String,

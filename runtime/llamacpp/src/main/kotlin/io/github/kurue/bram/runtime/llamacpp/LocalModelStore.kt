@@ -62,7 +62,7 @@ class LocalModelStore(
      */
     suspend fun deleteOrphanedCopies(): Long = withContext(Dispatchers.IO) {
         val referenced = decode(preferences.getString(KEY_MODELS, null))
-            .map(LocalModelRecord::localPath)
+            .flatMap(::filePathsOf)
             .filter(String::isNotBlank)
             .toSet()
         modelsDirectory.listFiles().orEmpty()
@@ -76,20 +76,158 @@ class LocalModelStore(
     suspend fun importModel(
         uri: Uri,
         progress: (ModelImportProgress) -> Unit = {},
-    ): LocalModelRecord = withContext(Dispatchers.IO) {
-        val document = queryDocument(uri)
-        require(document.size > 0) { "The selected document is empty or its size is unavailable" }
+    ): LocalModelRecord = importModel(listOf(uri), progress)
 
-        progress(ModelImportProgress("Reading GGUF metadata", totalBytes = document.size))
+    /**
+     * Imports one GGUF, or the parts of a multi-part GGUF when more than one document is picked.
+     *
+     * Multi-part files are stored under their original `<name>-NNNNN-of-MMMMM.gguf` names —
+     * llama.cpp's loader derives the sibling list from that pattern and the split metadata in
+     * the first part — so the record keeps the first part's path and the rest beside it.
+     */
+    suspend fun importModel(
+        uris: List<Uri>,
+        progress: (ModelImportProgress) -> Unit = {},
+    ): LocalModelRecord = withContext(Dispatchers.IO) {
+        require(uris.isNotEmpty()) { "No documents were selected" }
+        if (uris.size == 1) return@withContext importSingle(uris.first(), progress)
+
+        val documents = uris.map(::queryDocument)
+        val sorted = documents.sortedBy { it.fileName }
+        val splitSpec = splitSpecOf(sorted)
+            ?: throw IllegalArgumentException(
+                "The selected files do not form a multi-part GGUF (expected names like " +
+                    "model-00001-of-00005.gguf). Import each part set together, or import a " +
+                    "single-file GGUF.",
+            )
+        require(sorted.size == splitSpec.total) {
+            "Selected ${sorted.size} of ${splitSpec.total} parts of ${splitSpec.prefix}; pick every part"
+        }
+        val totalBytes = sorted.sumOf { it.size }
+        progress(ModelImportProgress("Reading GGUF metadata", totalBytes = totalBytes))
+
+        // The split header lives in the first part; the metadata reader only needs its head.
+        val metadata = readMetadata(uris.first())
+        modelsDirectory.mkdirs()
+
+        val staged = mutableListOf<Pair<java.io.File, String>>()
+        val digests = mutableListOf<String>()
+        var readTotal = 0L
+        try {
+            sorted.forEachIndexed { index, document ->
+                val partUri = uris[index]
+                val stagingFile = java.io.File.createTempFile("import-", ".gguf.part", modelsDirectory)
+                staged += stagingFile to document.fileName
+                val digest = MessageDigest.getInstance("SHA-256")
+                var partBytes = 0L
+                resolver.openInputStream(partUri)?.use { input ->
+                    java.io.FileOutputStream(stagingFile).use { output ->
+                        val buffer = ByteArray(HASH_BUFFER_BYTES)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            digest.update(buffer, 0, count)
+                            output.write(buffer, 0, count)
+                            partBytes += count
+                            readTotal += count
+                            progress(ModelImportProgress("Copying part ${index + 1} of ${sorted.size}", readTotal, totalBytes))
+                        }
+                        output.fd.sync()
+                    }
+                } ?: throw IllegalArgumentException("Part ${index + 1} could not be read")
+                require(partBytes == document.size) {
+                    "Part ${index + 1} changed while it was being copied " +
+                        "($partBytes of ${document.size} bytes read)"
+                }
+                digests += digest.digest().joinToString("") { "%02x".format(it) }
+            }
+        } catch (error: Throwable) {
+            staged.forEach { (file, _) -> runCatching { file.delete() } }
+            throw error
+        }
+
+        // Move each staging file to its ORIGINAL name, which the loader's sibling detection reads.
+        val finalFiles = staged.map { (staging, name) ->
+            val target = java.io.File(modelsDirectory, name)
+            if (target.exists()) runCatching { target.delete() }
+            if (!staging.renameTo(target)) {
+                runCatching { staging.delete() }
+                throw IllegalStateException("Could not move $name into app storage")
+            }
+            target
+        }
+        val firstHash = digests.first()
+        val record = LocalModelRecord(
+            id = ModelId("local:${firstHash.take(24)}"),
+            displayName = displayNameFor(metadata.name, splitSpec.prefix + ".gguf"),
+            fileName = splitSpec.prefix + ".gguf",
+            contentUri = uris.first().toString(),
+            localPath = finalFiles.first().absolutePath,
+            fileSizeBytes = totalBytes,
+            sha256 = firstHash,
+            parts = finalFiles.drop(1).map(java.io.File::getAbsolutePath),
+            ggufVersion = metadata.version,
+            architecture = metadata.architecture,
+            quantization = metadata.quantization,
+            trainedContextTokens = metadata.trainedContextTokens,
+            layerCount = metadata.layerCount,
+            hasChatTemplate = metadata.hasChatTemplate,
+            preferredContextTokens = recommendInitialContext(metadata.trainedContextTokens),
+            tensorTypeCounts = metadata.tensorTypeCounts,
+        )
+        addOrReplace(record, uris.first().toString())
+        progress(ModelImportProgress("Verified", totalBytes, totalBytes))
+        record
+    }
+
+    /** Reads the GGUF header metadata from a provider document, as the single-file import does. */
+    private fun readMetadata(uri: Uri): GgufMetadata {
         val descriptor = resolver.openFileDescriptor(uri, "r")
             ?: throw IllegalArgumentException("The selected document could not be opened")
-        val metadata = try {
+        return try {
             requireSeekable(descriptor.fileDescriptor, uri)
             ParcelFileDescriptor.AutoCloseInputStream(descriptor).use(metadataReader::read)
         } catch (error: Throwable) {
             runCatching { descriptor.close() }
             throw error
         }
+    }
+
+    private data class SplitSpec(val prefix: String, val total: Int)
+
+    /**
+     * Validates a set of part names against llama.cpp's split pattern
+     * `<name>-NNNNN-of-MMMMM.gguf` and returns the shared prefix and part count, or null when the
+     * set does not form a complete multi-part file.
+     */
+    private fun splitSpecOf(documents: List<DocumentInfo>): SplitSpec? {
+        val pattern = Regex(""".*-(\d{5})-of-(\d{5})\.gguf$""", RegexOption.IGNORE_CASE)
+        val matches = documents.map { document ->
+            val match = pattern.find(document.fileName) ?: return null
+            Triple(match.groupValues[1].toIntOrNull() ?: return null,
+                match.groupValues[2].toIntOrNull() ?: return null,
+                document.fileName.substring(0, match.range.first))
+        }
+        val total = matches.first().second
+        if (matches.any { it.second != total }) return null
+        val prefix = matches.first().third
+        if (matches.any { it.third != prefix }) return null
+        val indices = matches.map { it.first }.sorted()
+        if (indices != (1..total).toList()) return null
+        return SplitSpec(prefix, total)
+    }
+
+    /** The single-file import path, kept exactly as before; multi-part imports call this too. */
+    private suspend fun importSingle(
+        uri: Uri,
+        progress: (ModelImportProgress) -> Unit = {},
+    ): LocalModelRecord = withContext(Dispatchers.IO) {
+        val document = queryDocument(uri)
+        require(document.size > 0) { "The selected document is empty or its size is unavailable" }
+
+        progress(ModelImportProgress("Reading GGUF metadata", totalBytes = document.size))
+        val metadata = readMetadata(uri)
 
         // Native llama.cpp re-opens the model by path, which scoped storage denies for
         // provider-granted descriptors. Copy the bytes into app-private storage, hashing in the
@@ -206,11 +344,10 @@ class LocalModelStore(
         models.removeAll { it.id == record.id || it.contentUri == sourceKey }
         models += record
         persist(models)
+        val stillReferenced = models.flatMap(::filePathsOf).toSet()
         replaced.asSequence()
-            .map(LocalModelRecord::localPath)
-            .filter { path ->
-                path.isNotBlank() && path != record.localPath && models.none { it.localPath == path }
-            }
+            .flatMap(::filePathsOf)
+            .filter { path -> path.isNotBlank() && path !in stillReferenced }
             .distinct()
             .forEach { path -> runCatching { java.io.File(path).delete() } }
     }
@@ -223,9 +360,10 @@ class LocalModelStore(
         val removed = models.firstOrNull { it.id == modelId } ?: return@withContext
         models.remove(removed)
         persist(models)
-        if (removed.localPath.isNotBlank() && models.none { it.localPath == removed.localPath }) {
-            runCatching { java.io.File(removed.localPath).delete() }
-        }
+        val stillReferenced = models.flatMap(::filePathsOf).toSet()
+        filePathsOf(removed)
+            .filter { path -> path.isNotBlank() && path !in stillReferenced }
+            .forEach { path -> runCatching { java.io.File(path).delete() } }
         if (models.none { it.contentUri == removed.contentUri }) {
             releasePermission(removed.contentUri)
         }
@@ -295,6 +433,7 @@ class LocalModelStore(
         .put("localPath", localPath)
         .put("fileSizeBytes", fileSizeBytes)
         .put("sha256", sha256)
+        .put("parts", JSONArray().also { array -> parts.forEach(array::put) })
         .put("ggufVersion", ggufVersion)
         .put("architecture", architecture)
         .put("quantization", quantization)
@@ -320,6 +459,9 @@ class LocalModelStore(
         localPath = optString("localPath"),
         fileSizeBytes = getLong("fileSizeBytes"),
         sha256 = getString("sha256"),
+        parts = optJSONArray("parts")?.let { array ->
+            buildList(array.length()) { for (index in 0 until array.length()) add(array.getString(index)) }
+        }.orEmpty(),
         ggufVersion = getInt("ggufVersion"),
         architecture = getString("architecture"),
         quantization = getString("quantization"),
@@ -351,6 +493,12 @@ class LocalModelStore(
             candidate.isBlank() || looksLikeHash(candidate) -> fromFile.ifBlank { candidate }
             else -> candidate
         }.ifBlank { "Local model" }
+    }
+
+    /** Every file a model record owns: the main copy and any multi-part siblings. */
+    private fun filePathsOf(record: LocalModelRecord): List<String> = buildList {
+        if (record.localPath.isNotBlank()) add(record.localPath)
+        addAll(record.parts)
     }
 
     /** Long, unbroken, and entirely hexadecimal: a digest rather than a name. */

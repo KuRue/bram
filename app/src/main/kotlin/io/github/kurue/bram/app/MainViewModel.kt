@@ -1170,7 +1170,15 @@ class MainViewModel(
         mutableState.update { it.copy(selectedRuntimeId = remoteRuntimeId(endpointId), error = null) }
     }
 
-    fun importModel(uri: Uri) {
+    fun importModel(uri: Uri) = importModels(listOf(uri))
+
+    /**
+     * Imports one or more picked documents: a single GGUF, or every part of a multi-part GGUF.
+     * The picker allows multiple selection so a split model (published as
+     * `name-00001-of-00005.gguf` …) can be picked as a set in one go.
+     */
+    fun importModels(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         if (mutableState.value.isImporting) return
         viewModelScope.launch {
             mutableState.update {
@@ -1180,16 +1188,16 @@ class MainViewModel(
                     error = null,
                 )
             }
-            val isLiteRt = isLiteRtPackage(uri)
+            val isLiteRt = uris.size == 1 && isLiteRtPackage(uris.first())
             runCatching {
                 if (isLiteRt) {
-                    container.liteRtLmStore.importPackage(uri) { progress ->
+                    container.liteRtLmStore.importPackage(uris.first()) { progress ->
                         mutableState.update {
                             it.copy(importProgress = ModelImportProgress(progress.stage, progress.bytesRead, progress.totalBytes))
                         }
                     }.id.value
                 } else {
-                    container.localModelStore.importModel(uri) { progress ->
+                    container.localModelStore.importModel(uris) { progress ->
                         mutableState.update { it.copy(importProgress = progress) }
                     }.id.value
                 }
