@@ -41,13 +41,19 @@ Last updated: 2026-08-14 (continuation-ready)
   because the real call at ~line 1075 only runs after the Nemotron's ~3000-token, uncached prefill,
   which never completed on device), the exact abort is:
   `nemotron-h-moe.cpp:21: GGML_ASSERT(layer.nextn.eh_proj && layer.nextn.enorm && layer.nextn.hnorm) failed`
-  → SIGABRT in `:inference` (the **app UI process survived** — process isolation held). So the block is
-  **not** the hypothesized single-MTP-block limit: the graph builder requires the MTP layer to carry
-  `eh_proj`, `enorm`, and `hnorm`, and at least one is null for this GGUF (missing in the file, or not
-  mapped by the loader at this pin). Next: dump the GGUF's `*.nextn.*` tensor names and compare to what
-  `nemotron-h-moe.cpp` reads, and/or test a newer llama.cpp pin. The `nemotron_h_moe` gate stays until
-  a pin/GGUF supplies the three tensors. (Capturing this needed the pre-prefill hook: a normal chat send
-  never completes the 30B's prefill on device, and reference/warm-up contexts tore down before decode.)
+  → SIGABRT in `:inference` (the **app UI process survived** — process isolation held).
+  **Root cause (upstream llama.cpp gap, not the model):** the GGUF DOES carry the tensors — dumping
+  its header shows `blk.52.nextn.{eh_proj,enorm,hnorm,shared_head_norm}` (block 52 = the MTP block;
+  `n_layer_all`=53, so `layers[52]` is allocated). But the `nemotron_h_moe` loader in `llama-model.cpp`
+  at pin `a94d563e` **never creates the base nextn tensors**: the only `LLM_TENSOR_NEXTN_*` references
+  are the optional fp8 `scale`/`input_scale` variants (lines ~1459–1528), each guarded by
+  `&& layer.nextn.eh_proj` — a base tensor that is never `create_tensor`'d. So `layer.nextn.{eh_proj,
+  enorm,hnorm}` stay null and the `graph_mtp` ctor asserts. **Fix path:** a llama.cpp pin (or local
+  patch) that adds base `blk.%d.nextn.{eh_proj,enorm,hnorm,...}` loading for `nemotron_h_moe`, then
+  re-test. (The GGUF is also missing `nextn.embed_tokens` — has a `tok_embd` fallback — and
+  `nextn.shared_head_head`, which may surface next once base loading lands.) The gate stays until then.
+  (Capturing the abort needed a pre-prefill `init_speculative()` hook: a normal chat send never
+  completes the 30B's ~3000-token prefill on device, and reference/warm-up contexts tore down before decode.)
 - **Pending on-device validations** (each is a quick phone action):
   1. **KV-cache Q8_0 + flash-attention tuning** — the new dimensions run on the next
      auto-configure; the phone's long-context decode (the Nemotron at 0.5 tok/s) is the
