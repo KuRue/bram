@@ -331,6 +331,18 @@ bool init_speculative() {
         return g_state.speculative != nullptr;
     }
     if (llama_model_n_layer_nextn(g_state.model) <= 0) return false;
+    // The Nemotron-H-MoE MTP graph builder at this pin aborts on this model's configuration
+    // (ggml_abort inside graph_mtp — it is marked upstream as supporting only a single MTP
+    // block, and this model trips a deeper assertion). An abort cannot be caught, so the
+    // architecture is excluded until a pin carries a working builder; everything else keeps
+    // the speculative path.
+    char arch[64] = {0};
+    const int32_t arch_len = llama_model_meta_val_str(g_state.model, "general.architecture", arch, sizeof(arch));
+    if (arch_len > 0 && std::string(arch, arch_len) == "nemotron_h_moe") {
+        __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+            "bram_mtp: nemotron_h_moe MTP graph aborts at this pin; speculative decoding disabled");
+        return false;
+    }
     try {
         common_params params;
         params.model.path = g_state.model_path;
