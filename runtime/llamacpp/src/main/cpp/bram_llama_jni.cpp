@@ -1193,7 +1193,9 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
 
         llama_context * context = create_context();
         const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);
+        const auto prompt_start = std::chrono::steady_clock::now();
         decode_prompt(context, tokens);
+        const auto prompt_end = std::chrono::steady_clock::now();
         llama_sampler * sampler = llama_sampler_init_greedy();
         const auto sampler_guard = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(sampler, llama_sampler_free);
 
@@ -1201,6 +1203,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
         const size_t steps = forced.empty() ? 24 : forced.size();
         std::ostringstream predictions;
         predictions << "[";
+        const auto decode_start = std::chrono::steady_clock::now();
         for (size_t index = 0; index < steps; ++index) {
             const llama_token predicted = llama_sampler_sample(sampler, context, -1);
             if (index > 0) predictions << ",";
@@ -1213,12 +1216,19 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
             }
         }
         predictions << "]";
+        const auto decode_end = std::chrono::steady_clock::now();
+        const auto prompt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prompt_end - prompt_start).count();
+        const auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start).count();
         __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-            "bram_teacher_forced: gpu_layers=%d predictions=%s",
-            g_state.gpu_layers, predictions.str().c_str());
+            "bram_teacher_forced: gpu_layers=%d predictions=%s prompt_ms=%lld decode_ms=%lld",
+            g_state.gpu_layers, predictions.str().c_str(),
+            static_cast<long long>(prompt_ms), static_cast<long long>(decode_ms));
         std::ostringstream result;
         result << "{\"predictions\":" << predictions.str()
-               << ",\"gpuLayers\":" << g_state.gpu_layers << "}";
+               << ",\"gpuLayers\":" << g_state.gpu_layers
+               << ",\"promptTokens\":" << tokens.size()
+               << ",\"promptMillis\":" << prompt_ms
+               << ",\"decodeMillis\":" << decode_ms << "}";
         return result.str();
     });
 }

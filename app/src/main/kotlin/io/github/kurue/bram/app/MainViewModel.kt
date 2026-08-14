@@ -2602,15 +2602,17 @@ class MainViewModel(
             visibleCores = visibleCores,
             gpuLayers = gpuLayers,
         )
-        val predicted = container.llamaCppClient.teacherForced(forced, padTokens)
-            .optJSONArray("predictions").toIntList()
+        // The teacher-forced replay now carries timing too (prompt_ms + decode_ms of its
+        // own run), so one call serves both agreement and speed — the separate referenceDecode
+        // the sweep used to do is gone, which halves the cost of each padded candidate.
+        val forcedResult = container.llamaCppClient.teacherForced(forced, padTokens)
+        val predicted = forcedResult.optJSONArray("predictions").toIntList()
         val agreement = AcceleratorAgreement.score(reference, predicted)
         if (AcceleratorAgreement.isUsable(agreement)) {
-            val decode = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS, padTokens)
             scored += DimensionScore(
                 candidate = candidate,
-                promptMillis = decode.optLong("promptMillis", 0L),
-                decodeMillis = decode.optLong("decodeMillis", 0L),
+                promptMillis = forcedResult.optLong("promptMillis", 0L),
+                decodeMillis = forcedResult.optLong("decodeMillis", 0L),
             )
             return true
         }
