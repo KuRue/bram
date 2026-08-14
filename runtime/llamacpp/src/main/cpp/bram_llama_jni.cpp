@@ -109,8 +109,7 @@ void forward_llama_log(ggml_log_level level, const char * text, void * /*user_da
     __android_log_write(priority, "BramLlama", text);
     if (level == GGML_LOG_LEVEL_ERROR || level == GGML_LOG_LEVEL_WARN) {
         std::lock_guard<std::mutex> lock(g_log_mutex);
-        g_recent_log.emplace_back(text);
-        while (g_recent_log.size() > 8) g_recent_log.pop_front();
+        g_recent_log.emplace_back(text);        while (g_recent_log.size() > 8) g_recent_log.pop_front();
     }
 }
 
@@ -128,9 +127,18 @@ std::string drain_recent_log() {
     return joined;
 }
 
+void forward_abort(const char * message) {
+    if (message == nullptr) return;
+    __android_log_write(ANDROID_LOG_FATAL, "BramLlama", message);
+}
+
 void ensure_backend() {
     std::call_once(g_backend_once, [] {
         llama_log_set(forward_llama_log, nullptr);
+        // Route ggml's fatal assertions (which abort the process) through logcat, so a model
+        // configuration the engine cannot build leaves a readable message instead of a silent
+        // SIGABRT. The message arrives, then the process still dies — this is purely diagnostic.
+        ggml_set_abort_callback(forward_abort);
         llama_backend_init();
     });
 }
