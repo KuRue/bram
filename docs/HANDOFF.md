@@ -35,6 +35,15 @@ build tree is a synced copy of the same working tree.
   pin (upstream asserts single-MTP-block support; the abort message now routes to logcat via
   `ggml_set_abort_callback`), and the Qwen3.5-0.8B carries no nextn tensors at all. The
   framework is dormant until a pin ships a working Nemotron MTP builder.
+  **Test-model search done** (this commit): no small public GGUF ships MTP heads — verified by
+  reading headers of Qwen3-0.6B/1.7B/4B (ggml-org, unsloth, mradermacher), Qwen3.5-0.8B/4B/8B,
+  Qwen3.5-MoE-0.87B (arch qwen35/qwen35moe — correct arch, no nextn tensors), MiMo-2 (no GGUF),
+  GLM-DSA (no GGUF). The only GGUFs with nextn heads are large models (Nemotron-Lightning-30B,
+  Qwen3.5-35B-A3B-MTP, DeepSeek-V4). The MTP test therefore needs the phone + the user's
+  Nemotron: temporarily remove the arch gate, capture the exact ggml_abort message (now routed
+  to logcat), and evaluate a pin bump against it. DFlash drafts are trained artifacts (cannot be
+  generated from a target GGUF); published only for Qwen3/DeepSeek backbones at large sizes, so
+  it is blocked on the same upstream/pin work plus a small public draft pair.
 - **KV cache and flash attention as tuning dimensions; padded context for the context-sensitive
   knobs** (`2afb2d9`, `0617a67`) — the auto-configure overlay now sweeps two more dimensions that
   directly affect long-context decode speed: KV-cache quantization (F16 vs Q8_0) and flash
