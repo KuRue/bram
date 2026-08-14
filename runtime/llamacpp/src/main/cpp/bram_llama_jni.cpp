@@ -4,6 +4,8 @@
 
 #include "llama.h"
 #include "chat.h"
+#include "sampling.h"
+#include "speculative.h"
 #include <deque>
 
 #include <algorithm>
@@ -59,6 +61,14 @@ struct runtime_state {
     // it. Includes the tokens generated in previous turns, which the chat template will re-render
     // as part of the next prompt.
     std::vector<llama_token> cached_tokens;
+
+    // MTP speculative decoding, active only when the loaded model has nextn (multi-token
+    // prediction) heads. The speculator drafts several tokens from the model's own MTP head and
+    // verifies them in one batched decode, so a correct draft is several tokens for the cost of
+    // one forward pass. The draft context reuses the same model — no second copy — but holds its
+    // own KV/compute buffers. spec_init owns the draft context; speculative drives it.
+    common_speculative_ptr speculative;
+    std::unique_ptr<common_speculative_init_result> spec_init;
 };
 
 // A second, independent model + context for text embeddings, kept resident so memory recall can
@@ -307,6 +317,50 @@ void release_chat_context() {
         g_state.chat_context = nullptr;
     }
     g_state.cached_tokens.clear();
+    g_state.speculative.reset();
+    g_state.spec_init.reset();
+}
+
+/**
+ * Sets up MTP speculative decoding for the chat context, if the loaded model has nextn heads.
+ * The draft context reuses the same model (no second copy); it holds its own KV and compute
+ * buffers, which is the memory cost of the feature. Returns true when the speculator is ready.
+ */
+bool init_speculative() {
+    if (g_state.speculative != nullptr || g_state.chat_context == nullptr) {
+        return g_state.speculative != nullptr;
+    }
+    if (llama_model_n_layer_nextn(g_state.model) <= 0) return false;
+    try {
+        common_params params;
+        params.model.path = g_state.model_path;
+        params.n_ctx = g_state.context_tokens;
+        params.n_batch = std::max(1, g_state.batch_tokens);
+        params.n_ubatch = std::max(1, g_state.ubatch_tokens);
+        params.cpuparams.n_threads = std::max(1, g_state.threads);
+        params.speculative.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+        params.speculative.draft.n_max = 4;
+        g_state.spec_init = common_speculative_init_from_params(params, g_state.model, g_state.chat_context);
+        if (g_state.spec_init == nullptr || g_state.spec_init->context() == nullptr) {
+            g_state.spec_init.reset();
+            return false;
+        }
+        params.speculative.draft.ctx_tgt = g_state.chat_context;
+        params.speculative.draft.ctx_dft = g_state.spec_init->context();
+        g_state.speculative = common_speculative_ptr(common_speculative_init(params.speculative, 1));
+        if (g_state.speculative == nullptr) {
+            g_state.spec_init.reset();
+            return false;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_mtp: speculative decoding enabled with %d nextn layers",
+            llama_model_n_layer_nextn(g_state.model));
+        return true;
+    } catch (...) {
+        g_state.speculative.reset();
+        g_state.spec_init.reset();
+        return false;
+    }
 }
 
 /**
@@ -739,6 +793,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
                << ",\"trainedContextTokens\":" << llama_model_n_ctx_train(g_state.model)
                << ",\"layerCount\":" << llama_model_n_layer(g_state.model)
                << ",\"parameterCount\":" << llama_model_n_params(g_state.model)
+               << ",\"nextnLayers\":" << llama_model_n_layer_nextn(g_state.model)
                << ",\"tensorBytes\":" << llama_model_size(g_state.model)
                << ",\"contextTokens\":" << g_state.context_tokens
                << ",\"batchTokens\":" << g_state.batch_tokens
@@ -988,6 +1043,133 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         std::string raw_reply;
         std::string finish_reason = "length";
         const auto decode_start = std::chrono::steady_clock::now();
+
+        // MTP speculative decoding: models with nextn heads draft several tokens from their own
+        // MTP head and verify them in one batched decode, so a correct draft is several tokens
+        // for the cost of one forward pass. The accept loop needs a common_sampler (the raw
+        // chain cannot verify a draft), and it needs the target context to support partial
+        // sequence removal — both are checked; anything that fails falls through to the
+        // token-by-token loop below, so the two paths never change each other's behavior.
+        const bool can_spec = g_state.speculative != nullptr || init_speculative();
+        const bool use_spec = can_spec &&
+            common_context_can_seq_rm(context) == COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+        if (use_spec) {
+            common_params_sampling sparams;
+            sparams.no_perf = false;
+            sparams.top_k = top_k;
+            sparams.top_p = top_p;
+            sparams.min_p = 0.0f; // Bram's raw chain has no min-p; keep the distributions identical
+            sparams.temp = temperature;
+            sparams.penalty_repeat = repeat_penalty;
+            sparams.penalty_last_n = repeat_last_tokens;
+            sparams.samplers = {
+                COMMON_SAMPLER_TYPE_PENALTIES,
+                COMMON_SAMPLER_TYPE_TOP_K,
+                COMMON_SAMPLER_TYPE_TOP_P,
+                COMMON_SAMPLER_TYPE_TEMPERATURE,
+            };
+            if (!g_state.last_chat_params.grammar.empty()) {
+                sparams.grammar = common_grammar(COMMON_GRAMMAR_TYPE_USER, g_state.last_chat_params.grammar);
+                sparams.grammar_lazy = g_state.last_chat_params.grammar_lazy;
+                sparams.grammar_triggers = g_state.last_chat_params.grammar_triggers;
+            }
+            common_sampler_ptr smpl(common_sampler_init(g_state.model, sparams));
+
+            const llama_seq_id seq_id = 0;
+            llama_tokens prompt_tgt = g_state.cached_tokens;
+            common_speculative_begin(g_state.speculative.get(), seq_id, prompt_tgt);
+
+            llama_batch batch_tgt = llama_batch_init(llama_n_batch(context), 0, 1);
+            llama_tokens draft;
+            int n_past = (int) prompt_tgt.size();
+            llama_token id_last = prompt_tgt.back();
+
+            while (output_count < max_output_tokens) {
+                if (g_cancelled.load(std::memory_order_relaxed)) {
+                    finish_reason = "cancelled";
+                    break;
+                }
+
+                if (draft.empty()) {
+                    int n_draft_max = (int) llama_n_ctx(context) - n_past - 2;
+                    n_draft_max = std::max(n_draft_max, 0);
+                    common_speculative_get_draft_params(g_state.speculative.get(), seq_id) = {
+                        /* .drafting = */ true,
+                        /* .n_max    = */ n_draft_max,
+                        /* .n_past   = */ n_past,
+                        /* .id_last  = */ id_last,
+                        /* .prompt   = */ &prompt_tgt,
+                        /* .result   = */ &draft,
+                    };
+                    common_speculative_draft(g_state.speculative.get());
+                    llama_context * ctx_dft = g_state.spec_init->context();
+                    if (ctx_dft != nullptr) {
+                        llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, n_past, -1);
+                    }
+                }
+
+                // Evaluate [id_last, draft0, draft1, ...] in one batch.
+                common_batch_clear(batch_tgt);
+                common_batch_add(batch_tgt, id_last, n_past++, { seq_id }, true);
+                for (size_t i = 0; i < draft.size(); ++i) {
+                    common_batch_add(batch_tgt, draft[i], n_past + i, { seq_id }, true);
+                }
+                const int batch_result = llama_decode(context, batch_tgt);
+                if (batch_result != 0) {
+                    if (g_cancelled.load(std::memory_order_relaxed)) {
+                        finish_reason = "cancelled";
+                        break;
+                    }
+                    release_chat_context();
+                    throw std::runtime_error(
+                        "llama.cpp failed during speculative generation (code " +
+                        std::to_string(batch_result) + ")");
+                }
+                if (!common_speculative_process(g_state.speculative.get(), batch_tgt)) {
+                    finish_reason = "error";
+                    break;
+                }
+
+                const auto ids = common_sampler_sample_and_accept_n(
+                    smpl.get(), context, draft, /*grammar_first=*/true);
+                if (ids.empty()) {
+                    finish_reason = "error";
+                    break;
+                }
+                const size_t n_accepted = ids.size() - 1;
+                common_speculative_accept(g_state.speculative.get(), seq_id, (uint16_t) n_accepted);
+
+                n_past += (int) n_accepted;
+                if (n_accepted < draft.size()) {
+                    // Drop the unaccepted draft tokens from the target cache.
+                    llama_memory_seq_rm(llama_get_memory(context), seq_id, n_past, -1);
+                }
+
+                for (size_t i = 0; i < ids.size(); ++i) {
+                    prompt_tgt.push_back(id_last);
+                    id_last = ids[i];
+                    if (llama_vocab_is_eog(vocab, id_last)) {
+                        finish_reason = "stop";
+                        break;
+                    }
+                    pending_utf8 += token_piece(vocab, id_last, false);
+                    raw_reply += token_piece(vocab, id_last, true);
+                    if (is_complete_utf8(pending_utf8)) {
+                        jstring text = to_jstring(env, pending_utf8);
+                        env->CallVoidMethod(sink, on_token, text);
+                        env->DeleteLocalRef(text);
+                        if (env->ExceptionCheck()) throw std::runtime_error("Token callback failed");
+                        pending_utf8.clear();
+                    }
+                    g_state.cached_tokens.push_back(id_last);
+                    ++output_count;
+                    if (output_count >= max_output_tokens) break;
+                }
+                if (finish_reason == "stop" || output_count >= max_output_tokens) break;
+                draft.clear();
+            }
+            llama_batch_free(batch_tgt);
+        } else {
         for (; output_count < max_output_tokens; ++output_count) {
             if (g_cancelled.load(std::memory_order_relaxed)) {
                 finish_reason = "cancelled";
@@ -1021,6 +1203,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
             // Recorded only once the token is in the cache, so a failed decode does not leave the
             // record claiming more than the cache holds.
             g_state.cached_tokens.push_back(next);
+        }
         }
         if (!pending_utf8.empty()) {
             jstring text = to_jstring(env, pending_utf8);
