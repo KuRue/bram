@@ -1,6 +1,7 @@
 #include <jni.h>
 
 #include <android/log.h>
+#include <sys/system_properties.h>
 
 #include "llama.h"
 #include "chat.h"
@@ -390,6 +391,28 @@ void capture_experts(llama_context * context) {
         "bram_stream: captured %zu expert tensors (%zu offsets resolved, %.1f GiB total) across %zu shards",
         g_state.streamer->captured_count(), g_state.streamer->resolved_count(),
         g_state.streamer->captured_bytes() / (1024.0 * 1024.0 * 1024.0), g_state.streamer->shard_count());
+
+    // Arm the actual streaming only when explicitly enabled (P2 is validated by comparing streamed
+    // vs resident output, so the toggle has to be flippable without changing the build):
+    //   adb shell setprop debug.bram.stream 1   # stream experts from flash
+    //   adb shell setprop debug.bram.stream 0   # resident mmap baseline (default)
+    // P4 replaces this debug property with a real profile setting.
+    char prop[PROP_VALUE_MAX] = {0};
+    __system_property_get("debug.bram.stream", prop);
+    if (prop[0] == '1') {
+        char vprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream.verify", vprop);
+        g_state.streamer->set_verify(vprop[0] == '1');
+        std::string arm_error;
+        if (g_state.streamer->arm_stream(&arm_error)) {
+            g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Stream);
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "bram_stream: STREAMING ARMED — experts will be read from flash on demand");
+        } else {
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "bram_stream: arm failed, staying resident (%s)", arm_error.c_str());
+        }
+    }
 }
 
 /** Drops the reusable chat context, so the next turn starts from an empty cache. */
@@ -628,6 +651,9 @@ std::string apply_chat_template(
 
 void unload_locked() {
     g_cancelled.store(true, std::memory_order_relaxed);
+    // Release the streamer before the model: disarming restores the expert tensors' ->data and
+    // munmaps the buffers, and it must run while those tensors are still alive.
+    g_state.streamer.reset();
     release_chat_context();
     g_state.chat_templates.reset();
     if (g_state.model != nullptr) llama_model_free(g_state.model);
