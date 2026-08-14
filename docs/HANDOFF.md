@@ -23,16 +23,23 @@ Last updated: 2026-08-14 (continuation-ready)
   `adb connect <ip>:<port>`. The emulator (`emulator-5554`) is up and usable for app-level
   work, but it cannot run the phone-only models (Nemotron) and its UI automation has proven
   unreliable for the model picker/chat send.
+- **Multi-part GGUF load — DONE and validated on device** (2026-08-14). A proper `llama-gguf-split`
+  pair of the phone's Qwen3.5-0.8B Q4_0 imports, loads (both siblings, `output_norm.weight` and all),
+  and produces a real CPU reference (auto-configure `CPU ✓ 125/30`). This first real-split run exposed
+  two bugs in `LocalModelStore.importModel`, both fixed in this session's uncommitted change / commit:
+  (a) metadata was read from `uris.first()` (first *selected*) but only part 00001 carries
+  `general.architecture`; (b) the copy loop paired `sorted[index]` names with `uris[index]` bytes, so
+  out-of-order selection wrote each part under the other's name. The earlier "test split" in
+  `Temp\opencode\split\` was a naive byte split with no `split.*` metadata — it masked bug (a) and could
+  never load; regenerate real splits with a host-built `llama-gguf-split`. `importModel` still has no JVM
+  test (needs Android ContentResolver/Uri). Minor UX: a total load failure renders as CPU `✓ 0/0`.
 - **Pending on-device validations** (each is a quick phone action):
-  1. The **multi-part GGUF load** — the import code is done; the loader + size-check plumbing
-     compile and the split files were structurally verified. On the phone, import a real split
-     set (or the split Qwen pair from `C:\Users\S14\AppData\Local\Temp\opencode\split\`) and load it.
-  2. The **Nemotron MTP assert message** — remove the `nemotron_h_moe` gate in
+  1. The **Nemotron MTP assert message** — remove the `nemotron_h_moe` gate in
      `init_speculative()` temporarily, load the Nemotron, send a message, and read the new
      `ggml_abort` logcat line (routed via `ggml_set_abort_callback`). That tells us the exact
      upstream assert (single-MTP-block vs the output-head) and whether a small patch or a pin
      bump unblocks MTP.
-  3. **KV-cache Q8_0 + flash-attention tuning** — the new dimensions run on the next
+  2. **KV-cache Q8_0 + flash-attention tuning** — the new dimensions run on the next
      auto-configure; the phone's long-context decode (the Nemotron at 0.5 tok/s) is the
      yardstick for whether Q8_0 KV helps.
 - **Working tree is clean**; all work is on `main`, pushed.
@@ -48,8 +55,9 @@ of the same working tree (`bash.exe ./sync-wsl.sh`).
   catalogued as one record with a parts list. The size check sums the parts, and orphan
   reclamation/removal are parts-aware. Single-file imports unchanged. The split-file format and
   the loader's sibling derivation were verified against the llama.cpp source; a real split pair
-  was produced from the Qwen GGUF for testing. The final on-device load of a split set is
-  pending a device session.
+  was produced from the Qwen GGUF for testing. The final on-device load of a split set is now
+  validated (2026-08-14) after fixing two selection-order bugs in `importModel` — see the
+  session-continuation note above.
 - **MTP speculative decoding, gated and diagnosed** (`eafe759`, `59f45ca`) — the chat generation
   path now auto-detects models with nextn heads and runs the speculative loop (draft from the
   model's own MTP head, one batched verification, common_sampler accept), with a fallback to the
