@@ -54,10 +54,18 @@ Last updated: 2026-08-14 (continuation-ready)
   `nextn.shared_head_head`, which may surface next once base loading lands.) The gate stays until then.
   (Capturing the abort needed a pre-prefill `init_speculative()` hook: a normal chat send never
   completes the 30B's ~3000-token prefill on device, and reference/warm-up contexts tore down before decode.)
-- **Pending on-device validations** (each is a quick phone action):
-  1. **KV-cache Q8_0 + flash-attention tuning** — the new dimensions run on the next
-     auto-configure; the phone's long-context decode (the Nemotron at 0.5 tok/s) is the
-     yardstick for whether Q8_0 KV helps.
+- **KV-cache + flash-attention tuning — VALIDATED on device** (2026-08-14). A full auto-configure
+  pass on Qwen3.5-0.8B·Q8_0 swept both new dimensions at the 1K padded context, picked winners, and
+  applied them (profile summary now reads `Attention Auto · KV cache Exact`, which it lacked before).
+  Measured (prompt/decode tok/s at 1K pad): **KV cache — Exact (F16) 409/41 (winner) vs Compact
+  (Q8_0) 305/41**; **Attention — Auto 401/35 (winner) vs On 293/36 vs Off 254/35**. So **Q8_0 KV does
+  not help this model**: decode identical (41=41), prompt worse (quantize/dequantize overhead with no
+  decode win at 1K context) — its value is KV *memory*, not speed. Flash-attn Auto beats forced On/Off.
+  Caveat: this is a 0.8B model at a 1K pad, NOT the Nemotron long-context regime where Q8_0 KV's halved
+  cache footprint could matter — that yardstick is still untested (Nemotron generation unreliable on
+  device). Full pass also picked 4 threads / All cores / Aggressive polling / No mmap / Batch 256/128,
+  backend NPU (136 tok/s); Mask 0x3, Mask 0xff, and 8 threads timed out (the documented arm64 hang).
+- No pending on-device validations remain from the prior list.
 - **Working tree is clean**; all work is on `main`, pushed.
 
 main is healthy. The local Windows checkout is on `main`; the WSL build tree is a synced copy
