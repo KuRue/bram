@@ -9,6 +9,8 @@ enum class TuningDimension(val wire: String, val label: String) {
     THREADS("threads", "Threads"),
     CPU_MASK("cpuMask", "CPU mask"),
     POLL("poll", "Poll"),
+    KV_CACHE("kvCache", "KV cache"),
+    FLASH_ATTENTION("flashAttention", "Attention"),
     LOAD_MODE("loadMode", "Load mode"),
     HEX_FLAGS("hexFlags", "Hexagon"),
     BATCH("batch", "Batch"),

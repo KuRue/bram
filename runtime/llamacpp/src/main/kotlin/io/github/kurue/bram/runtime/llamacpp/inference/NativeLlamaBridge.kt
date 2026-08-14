@@ -31,8 +31,8 @@ internal class NativeLlamaBridge {
         hexOpBatch: Int,
         hexNDev: Int,
     ): String
-    external fun referenceDecode(tokenCount: Int): String
-    external fun teacherForced(forcedTokens: IntArray): String
+    external fun referenceDecode(tokenCount: Int, padTokens: Int): String
+    external fun teacherForced(forcedTokens: IntArray, padTokens: Int): String
     external fun parseReply(reply: String): String
     external fun formatChat(
         roles: Array<String>,

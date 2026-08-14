@@ -2035,11 +2035,6 @@ private fun BoxScope.AutoConfigureOverlay(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Text(
-                    "tok/s = prompt/decode on a fresh short context — a benchmark, not chat speed. The winner is the fastest total run.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
                 HorizontalDivider()
 
                 // The winner is the fastest agreeing run, CPU reference included — the CPU is a

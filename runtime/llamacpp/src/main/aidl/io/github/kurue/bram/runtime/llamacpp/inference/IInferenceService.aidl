@@ -5,8 +5,8 @@ import io.github.kurue.bram.runtime.llamacpp.inference.IInferenceCallback;
 interface IInferenceService {
     String probe();
     String devices();
-    String referenceDecode(int tokenCount);
-    String teacherForced(in int[] forcedTokens);
+    String referenceDecode(int tokenCount, int padTokens);
+    String teacherForced(in int[] forcedTokens, int padTokens);
     String parseReply(String reply);
     String load(String requestJson);
     int countTokens(String requestJson);

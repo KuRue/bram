@@ -19,6 +19,8 @@ import io.github.kurue.bram.core.domain.DeviceProfile
 import io.github.kurue.bram.core.domain.DimensionTuneNote
 import io.github.kurue.bram.core.domain.GenerationMetrics
 import io.github.kurue.bram.core.domain.HexFlags
+import io.github.kurue.bram.core.domain.KvCacheType
+import io.github.kurue.bram.core.domain.FlashAttentionMode
 import io.github.kurue.bram.core.domain.LiteRtBackend
 import io.github.kurue.bram.core.domain.LITE_RT_CONTEXT_TOKENS
 import io.github.kurue.bram.core.domain.LiteRtModelRecord
@@ -1682,6 +1684,8 @@ class MainViewModel(
         /** The batch to load with; null means the llama.cpp default, which the batch sweep's yardstick uses. */
         batchTokens: Int? = null,
         ubatchTokens: Int? = null,
+        /** Filler tokens to prepend, so context-sensitive knobs are measured at a realistic context. */
+        padTokens: Int = 0,
     ): JSONObject? {
         val refRef = AtomicReference<JSONObject?>()
         val refThread = thread(name = "bram-tune-reference") {
@@ -1697,7 +1701,7 @@ class MainViewModel(
                         batchTokens = batchTokens ?: 0,
                         ubatchTokens = ubatchTokens ?: 0,
                     )
-                    refRef.set(container.llamaCppClient.referenceDecode(REFERENCE_TOKENS))
+                    refRef.set(container.llamaCppClient.referenceDecode(REFERENCE_TOKENS, padTokens))
                 }
             }.onFailure { error ->
                 if (error !is android.os.DeadObjectException) {
@@ -1729,6 +1733,8 @@ class MainViewModel(
         add(TuningDimension.THREADS)
         add(TuningDimension.CPU_MASK)
         add(TuningDimension.POLL)
+        add(TuningDimension.KV_CACHE)
+        add(TuningDimension.FLASH_ATTENTION)
         add(TuningDimension.LOAD_MODE)
         if (backend == RuntimeBackend.HEXAGON) add(TuningDimension.HEX_FLAGS)
     }
@@ -2512,6 +2518,13 @@ class MainViewModel(
                 it.copy(poll = poll)
             }
         }
+        TuningDimension.KV_CACHE -> listOf(
+            TuningCandidate(KvCacheType.F16.label) { it.copy(kvCacheType = KvCacheType.F16) },
+            TuningCandidate(KvCacheType.Q8_0.label) { it.copy(kvCacheType = KvCacheType.Q8_0) },
+        )
+        TuningDimension.FLASH_ATTENTION -> FlashAttentionMode.entries.map { mode ->
+            TuningCandidate(mode.label) { it.copy(flashAttention = mode) }
+        }
         TuningDimension.LOAD_MODE -> TuningCandidates.loadModeCandidates().map { mode ->
             TuningCandidate(mode.label) { it.copy(loadMode = mode) }
         }
@@ -2542,8 +2555,8 @@ class MainViewModel(
             gpuLayers = gpuLayers,
             deviceFilter = backend.devicePrefix,
             enableThinking = profile.thinkingEnabled,
-            flashAttention = profile.flashAttention,
-            kvCacheType = profile.kvCacheType,
+            flashAttention = tuned.flashAttention,
+            kvCacheType = tuned.kvCacheType,
             batchTokens = profile.batchTokens,
             ubatchTokens = profile.ubatchTokens,
             cpuMask = tuned.cpuMask,
@@ -2572,6 +2585,7 @@ class MainViewModel(
         visibleCores: Int,
         gpuLayers: Int,
         scored: MutableList<DimensionScore>,
+        padTokens: Int = 0,
     ): Boolean {
         mutableState.update {
             it.copy(
@@ -2588,11 +2602,11 @@ class MainViewModel(
             visibleCores = visibleCores,
             gpuLayers = gpuLayers,
         )
-        val predicted = container.llamaCppClient.teacherForced(forced)
+        val predicted = container.llamaCppClient.teacherForced(forced, padTokens)
             .optJSONArray("predictions").toIntList()
         val agreement = AcceleratorAgreement.score(reference, predicted)
         if (AcceleratorAgreement.isUsable(agreement)) {
-            val decode = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
+            val decode = container.llamaCppClient.referenceDecode(REFERENCE_TOKENS, padTokens)
             scored += DimensionScore(
                 candidate = candidate,
                 promptMillis = decode.optLong("promptMillis", 0L),
@@ -2680,23 +2694,40 @@ class MainViewModel(
             // reads "none" (it tracks skin temperature, not CPU banding). A slow reference is
             // retried after a park instead of being used — numbers taken through it would be
             // lies with timestamps, and the park lets the phone actually cool down.
+            // Only the context-sensitive dimensions pay for the padded prompt: KV cache and
+            // flash attention matter because the cache holds thousands of tokens, so their
+            // effect is invisible at the bare 63-token prompt. Everything else is context
+            // independent and stays fast.
+            val padTokens = if (dimension == TuningDimension.KV_CACHE ||
+                dimension == TuningDimension.FLASH_ATTENTION
+            ) {
+                REFERENCE_PAD_TOKENS
+            } else {
+                0
+            }
             var cpuReference: JSONObject? = null
             var referenceWedges = 0
             while (cpuReference == null) {
                 var slow = false
-                val result = referenceAttempt(model, profile, referenceThreads, onSlow = { millis ->
-                    slow = true
-                    android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
-                    mutableState.update {
-                        it.copy(
-                            status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
-                            autoConfigure = it.autoConfigure?.copy(
-                                current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
-                            ),
-                        )
-                    }
-                    withContext(Dispatchers.Default) { Thread.sleep(60_000L) }
-                })
+                val result = referenceAttempt(
+                    model,
+                    profile,
+                    referenceThreads,
+                    padTokens = padTokens,
+                    onSlow = { millis ->
+                        slow = true
+                        android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
+                        mutableState.update {
+                            it.copy(
+                                status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
+                                autoConfigure = it.autoConfigure?.copy(
+                                    current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
+                                ),
+                            )
+                        }
+                        withContext(Dispatchers.Default) { Thread.sleep(60_000L) }
+                    },
+                )
                 when {
                     result != null -> cpuReference = result
                     slow -> Unit // parked and retried; a slow phone needs time, not a failure count
@@ -2832,6 +2863,7 @@ class MainViewModel(
                                     visibleCores = visibleCores,
                                     gpuLayers = gpuLayers,
                                     scored = scored,
+                                    padTokens = padTokens,
                                 ),
                             )
                         }
@@ -4376,6 +4408,13 @@ internal fun remoteRuntimeId(endpointId: String): String = "$REMOTE_PREFIX$endpo
 
 /** Tokens compared between backends. Long enough to catch drift, short enough to stay quick. */
 private const val REFERENCE_TOKENS = 24
+// Neutral filler tokens prepended to every measurement prompt, so the decode rate is measured
+// against a realistic context instead of the bare 63-token reference prompt. A real chat turn
+// caches thousands of tokens, and attention over all of them is what makes long replies slow —
+// a number taken at a fresh context would promise chat speed it cannot deliver. 1024 balances
+// realism against measurement cost: each padded call has to decode the filler on top of the
+// timing work, and the whole pass multiplies that.
+private const val REFERENCE_PAD_TOKENS = 1024
 // A 24-token reference decode that takes longer than this is a throttled CPU, not a healthy
 // measurement: on a cool phone it takes under a second, and even a warm one stays well under
 // 30s. Sweeps park and retry the reference instead of using a number taken through throttling.

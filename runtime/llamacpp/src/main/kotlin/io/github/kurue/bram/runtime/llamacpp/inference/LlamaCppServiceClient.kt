@@ -87,12 +87,12 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             JSONObject(requireService().quantize(request.toString()))
         }
 
-    suspend fun referenceDecode(tokenCount: Int): JSONObject = withContext(Dispatchers.IO) {
-        JSONObject(requireService().referenceDecode(tokenCount))
+    suspend fun referenceDecode(tokenCount: Int, padTokens: Int = 0): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requireService().referenceDecode(tokenCount, padTokens))
     }
 
-    suspend fun teacherForced(forcedTokens: IntArray): JSONObject = withContext(Dispatchers.IO) {
-        JSONObject(requireService().teacherForced(forcedTokens))
+    suspend fun teacherForced(forcedTokens: IntArray, padTokens: Int = 0): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requireService().teacherForced(forcedTokens, padTokens))
     }
 
     private fun JSONObject.toReasoningFormat(): ReasoningFormat {

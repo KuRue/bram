@@ -1088,17 +1088,38 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_devices(
 
 // Deterministic greedy decode over a fixed prompt. Milestone 2 records this sequence once on CPU
 // and then requires the accelerator to reproduce it exactly before its capability is validated.
+// pad_tokens prepends neutral filler tokens so the decode runs against a realistic context: the
+// short reference prompt (about 63 tokens) is nothing like a real chat turn, whose cache holds
+// thousands of tokens and where every decode step pays attention over all of them.
+static std::vector<llama_token> padded_measurement_prompt(int pad_tokens) {
+    std::vector<llama_token> tokens;
+    if (pad_tokens > 0) {
+        // A filler that tokenizes to a handful of tokens per repetition; the content is
+        // irrelevant to a timing benchmark, only the context length matters.
+        const std::vector<llama_token> filler = tokenize(" benchmark ");
+        if (filler.empty()) throw std::runtime_error("Reference padding tokenizer returned no tokens");
+        tokens.reserve(static_cast<size_t>(pad_tokens) + 64);
+        while (static_cast<int>(tokens.size()) < pad_tokens) {
+            tokens.insert(tokens.end(), filler.begin(), filler.end());
+        }
+        tokens.resize(static_cast<size_t>(pad_tokens));
+    }
+    const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "", false);
+    const auto real = tokenize(prompt);
+    if (real.empty()) throw std::runtime_error("Reference tokenizer returned no tokens");
+    tokens.insert(tokens.end(), real.begin(), real.end());
+    return tokens;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_referenceDecode(
-    JNIEnv * env, jobject, jint token_count) {
+    JNIEnv * env, jobject, jint token_count, jint pad_tokens) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_state.model == nullptr) throw std::runtime_error("Load a model before running the reference decode");
         g_cancelled.store(false, std::memory_order_relaxed);
         const int wanted = std::max(1, std::min(static_cast<int>(token_count), 64));
-        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "", false);
-        const auto tokens = tokenize(prompt);
-        if (tokens.empty()) throw std::runtime_error("Reference decode tokenizer returned no tokens");
+        const auto tokens = padded_measurement_prompt(pad_tokens);
         llama_context * context = create_context();
         const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);
         // The prompt is where the batch size shows itself: llama.cpp fills n_batch tokens per
@@ -1153,7 +1174,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_reference
 // compute the same thing" from "did one early token send generation somewhere else".
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherForced(
-    JNIEnv * env, jobject, jintArray forced_tokens) {
+    JNIEnv * env, jobject, jintArray forced_tokens, jint pad_tokens) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_state.model == nullptr) throw std::runtime_error("Load a model before the agreement check");
@@ -1168,9 +1189,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
             }
         }
 
-        const std::string prompt = apply_chat_template({"user"}, {kReferencePrompt}, true, "", false);
-        auto tokens = tokenize(prompt);
-        if (tokens.empty()) throw std::runtime_error("Agreement check tokenizer returned no tokens");
+        const auto tokens = padded_measurement_prompt(pad_tokens);
 
         llama_context * context = create_context();
         const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);

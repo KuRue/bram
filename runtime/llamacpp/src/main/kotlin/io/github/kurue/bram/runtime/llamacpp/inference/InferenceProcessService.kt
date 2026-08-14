@@ -61,12 +61,12 @@ class InferenceProcessService : Service() {
             )
         }
 
-        override fun referenceDecode(tokenCount: Int): String = runSerialized {
-            bridge.referenceDecode(tokenCount)
+        override fun referenceDecode(tokenCount: Int, padTokens: Int): String = runSerialized {
+            bridge.referenceDecode(tokenCount, padTokens)
         }
 
-        override fun teacherForced(forcedTokens: IntArray?): String = runSerialized {
-            bridge.teacherForced(forcedTokens ?: IntArray(0))
+        override fun teacherForced(forcedTokens: IntArray?, padTokens: Int): String = runSerialized {
+            bridge.teacherForced(forcedTokens ?: IntArray(0), padTokens)
         }
 
         override fun parseReply(reply: String?): String = runSerialized {
