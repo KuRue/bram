@@ -17,6 +17,40 @@ Last updated: 2026-08-14 (continuation-ready)
 
 ## Session continuation (start here)
 
+- **NEXT UP: MoE expert streaming (feature branch `feat/expert-streaming`).** Building the ability
+  to run MoE models several times larger than RAM, losslessly, by reading only each token's routed
+  experts from flash instead of resident-loading the whole file — the technique
+  [BigMoeOnEdge](https://github.com/Helldez/BigMoeOnEdge) uses to run DeepSeek V4 Flash (91 GB) at
+  ~1 tok/s on a 12 GB phone (its `docs/seam.md` + `docs/architecture.md` are the reference; we
+  reimplement from the public seam, no copied code). Why Bram needs it: Bram uses vanilla llama.cpp
+  mmap, which on a >>RAM model thrashes the page cache and **thermally deadlocks** — proven this
+  session (DeepSeek auto-configure never completed one measurement; `pausing for cooldown` loop).
+  - **Seam verified on our pin `a94d563e`:** routing node `ffn_moe_topk` (llama-graph.cpp:2034,
+    cb appends `-<il>`); expert tensors `blk.%d.ffn_{gate,up,down}_exps`; `cb_eval`/`cb_eval_user_data`
+    in `llama_context_params`; `gguf_get_data_offset`/`gguf_get_tensor_offset` + `no_alloc`;
+    `ggml_compute_forward_mul_mat_id` (ggml-cpu.c:1534) for the overlap hook.
+  - **P0 DONE (commit `10c99c1` on `feat/expert-streaming`, not pushed):** `expert_stream.{h,cpp}` —
+    `GgufOffsetMap` (parse each shard header `no_alloc`, record every tensor's `(shard, offset,
+    nbytes)`, serve `pread`) + arch recipe registry (deepseek4, qwen3moe, qwen35moe, deepseek2).
+    Compiles into `bram_llama` (added to CMake sources).
+  - **Scope chosen: full serial + `--overlap`.** Overlap needs a ~25-line `ggml_cpu_set_expert_ready_hook`
+    in `ggml_compute_forward_mul_mat_id` — apply via a `PATCH_COMMAND` on the FetchContent llama.cpp
+    (keeps our exact pin + one commit), CMake probes for `BMOE_HAVE_EXPERT_READY_HOOK`; serial path
+    must still build on stock upstream.
+  - **Remaining phases (tasks P1–P4 + overlap):** P1 capture warm-up (set `use_extra_bufts=false`,
+    build the offset map from **shard paths** — needs extending native `load` + `NativeLlamaBridge`/
+    `LlamaCppRuntime` to pass the parts list, not just the primary path; install `cb_eval`; one warm-up
+    decode scans `node->src[]` and records expert `ggml_tensor*` by `(il,suffix)`; checkpoint: log
+    "captured N experts, offsets resolved" on DeepSeek). P2 serial reads + `->data` rebind, gated by
+    byte-identical greedy output. P3 hot-expert LRU cache (RAM budget) + `--dense-weights anon` (copy
+    always-used weights to anon memory so the OS can't reclaim them mid-gen — their ~3.2× lever).
+    P-overlap hook. P4 JNI/Kotlin flag + telemetry (flash bytes/token, cache hit, tok/s) + validate
+    DeepSeek → ~1 tok/s.
+  - **Gate model:** pull **Qwen3.5-MoE-0.87B** (arch `qwen35moe`, already in the recipe) onto the phone
+    — small enough to run resident, so streamed output can be compared byte-for-byte against resident.
+  - **Already staged:** DeepSeek V4 Flash 0731 (IQ2_M, 84.7 GB, 3 shards) is **imported into Bram's
+    `files/models/`** (validated the multi-part import at 91 GB scale). Both Nemotron quants were
+    deleted this session to free ~44 GB (→ ~136 GB free); the dead Nemotron profile record may remain.
 - **Phone is disconnected** — the last wireless adb endpoint was `192.168.1.169:45953`, which
   expires. To reconnect: on the phone, Developer options → Wireless debugging → give the new
   "IP address & Port" (and the pairing port + 6-digit code the first time). Then
