@@ -82,6 +82,9 @@ class ExpertStreamer {
 public:
     enum class Mode { Off, Capture, Stream };
 
+    ExpertStreamer() = default;
+    ~ExpertStreamer();
+
     // Resolve the recipe for `arch` and build the offset map from the model's shard paths (split
     // order). Returns false and sets *error if the arch is not a streamable MoE or a shard fails.
     bool init(const std::vector<std::string> & shard_paths, const std::string & arch, std::string * error);
@@ -89,9 +92,20 @@ public:
     void set_mode(Mode m) { mode_ = m; }
     Mode mode() const { return mode_; }
     bool ready() const { return recipe_ != nullptr; }
+    bool armed() const { return armed_; }
+    // Byte-for-byte compare each streamed slice against the resident mmap (dev gate; pages weights).
+    void set_verify(bool v) { verify_ = v; }
+    uint64_t verify_mismatches() const { return verify_mismatches_; }
 
     // Trampoline to install as llama_context_params.cb_eval, with `this` as cb_eval_user_data.
     static bool eval_callback(ggml_tensor * t, bool ask, void * user_data);
+
+    // After capture: reserve a full-tensor anonymous buffer per expert tensor and repoint each
+    // tensor's ->data at it, so routed experts can be streamed into position on demand. Returns
+    // false if any resolution/allocation failed (streaming stays off, tensors keep their mmap data).
+    bool arm_stream(std::string * error);
+    // Restore every expert tensor's original ->data and release the buffers. Safe if not armed.
+    void disarm_stream();
 
     size_t captured_count() const { return captured_.size(); }
     // Captured tensors whose byte location resolved in the offset map (should equal captured_count()).
@@ -99,24 +113,47 @@ public:
     // Total expert bytes referenced by the captured tensors (whole model, not per token).
     uint64_t captured_bytes() const;
     size_t shard_count() const { return offsets_.shard_count(); }
+    // Bytes read from flash so far (this run), and the number of expert-slice reads served.
+    uint64_t bytes_read() const { return bytes_read_; }
+    uint64_t slices_read() const { return slices_read_; }
 
 private:
     bool on_eval(ggml_tensor * t, bool ask);
     // If `name` is "blk.<il>.<suffix>.weight" for one of the recipe's expert suffixes, fill *il and
     // *suffix_idx and return true.
     bool match_expert(const char * name, int * il, int * suffix_idx) const;
+    // Parse the block index out of a routing node name "ffn_moe_topk-<il>". Returns -1 on mismatch.
+    static int parse_topk_layer(const char * name);
+    // Stream every routed expert for layer `il` that is not already resident, reading each expert's
+    // slice from flash into its slot in the tensor buffer.
+    void stream_layer(int il, const ggml_tensor * topk);
 
     struct Captured {
         ggml_tensor * tensor = nullptr;
         TensorLoc loc;   // loc.shard < 0 when the name did not resolve in the offset map
         int il = -1;
         int suffix_idx = -1;
+        // Streaming buffer (full-tensor anonymous mmap) that ->data is repointed at while armed.
+        void * buffer = nullptr;
+        void * orig_data = nullptr;    // the mmap-backed ->data to restore on disarm
+        uint64_t buffer_size = 0;
+        int64_t n_expert = 0;          // tensor->ne[2]
+        uint64_t expert_stride = 0;    // tensor->nb[2]: one expert's byte span
+        std::vector<uint8_t> resident; // 1 once expert e's slice has been read into the buffer
     };
 
     Mode mode_ = Mode::Off;
+    bool armed_ = false;
+    bool verify_ = false;
     const ExpertRecipe * recipe_ = nullptr;
     GgufOffsetMap offsets_;
     std::unordered_map<std::string, Captured> captured_;
+    // Expert tensors grouped by block, in recipe-suffix order, for quick lookup from a topk node.
+    std::unordered_map<int, std::vector<Captured *>> by_layer_;
+    std::vector<int32_t> id_scratch_;   // reused host buffer for the routing node's expert ids
+    uint64_t bytes_read_ = 0;
+    uint64_t slices_read_ = 0;
+    uint64_t verify_mismatches_ = 0;    // resident-vs-streamed byte mismatches (should stay 0)
 };
 
 } // namespace bram
