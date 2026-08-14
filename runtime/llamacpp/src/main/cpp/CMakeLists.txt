@@ -231,7 +231,7 @@ if(TARGET ggml-cpu AND ANDROID_ABI STREQUAL "arm64-v8a")
     endif()
 endif()
 
-add_library(bram_llama SHARED bram_llama_jni.cpp)
+add_library(bram_llama SHARED bram_llama_jni.cpp expert_stream.cpp)
 target_compile_features(bram_llama PRIVATE cxx_std_17)
 target_compile_options(bram_llama PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(bram_llama PRIVATE llama-common llama android log)
