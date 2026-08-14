@@ -16,6 +16,7 @@
 #include "ggml.h"
 
 #include <cstdint>
+#include <list>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -96,6 +97,11 @@ public:
     // Byte-for-byte compare each streamed slice against the resident mmap (dev gate; pages weights).
     void set_verify(bool v) { verify_ = v; }
     uint64_t verify_mismatches() const { return verify_mismatches_; }
+    // Cap resident expert memory to `bytes`; 0 means unbounded (keep every streamed expert). When
+    // the cap is exceeded the least-recently-used experts are evicted (madvise DONTNEED).
+    void set_cache_budget(uint64_t bytes) { cache_budget_ = bytes; }
+    uint64_t resident_bytes() const { return resident_bytes_; }
+    uint64_t evictions() const { return evictions_; }
 
     // Trampoline to install as llama_context_params.cb_eval, with `this` as cb_eval_user_data.
     static bool eval_callback(ggml_tensor * t, bool ask, void * user_data);
@@ -133,6 +139,7 @@ private:
         TensorLoc loc;   // loc.shard < 0 when the name did not resolve in the offset map
         int il = -1;
         int suffix_idx = -1;
+        int id = -1;     // dense index into captured_by_id_, for compact LRU keys
         // Streaming buffer (full-tensor anonymous mmap) that ->data is repointed at while armed.
         void * buffer = nullptr;
         void * orig_data = nullptr;    // the mmap-backed ->data to restore on disarm
@@ -150,7 +157,19 @@ private:
     std::unordered_map<std::string, Captured> captured_;
     // Expert tensors grouped by block, in recipe-suffix order, for quick lookup from a topk node.
     std::unordered_map<int, std::vector<Captured *>> by_layer_;
+    std::vector<Captured *> captured_by_id_;   // id -> Captured, for LRU key decode
     std::vector<int32_t> id_scratch_;   // reused host buffer for the routing node's expert ids
+
+    // LRU cache of resident expert slices. Keys pack (captured id, expert index); the list is MRU
+    // at the front, and iterators in the map give O(1) touch/evict. Physical pages for an evicted
+    // expert are dropped with madvise(DONTNEED); the slice re-streams if the router asks again.
+    void evict_to_budget();
+    std::list<uint64_t> lru_;
+    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> lru_pos_;
+    uint64_t cache_budget_ = 0;
+    uint64_t resident_bytes_ = 0;
+    uint64_t evictions_ = 0;
+
     uint64_t bytes_read_ = 0;
     uint64_t slices_read_ = 0;
     uint64_t verify_mismatches_ = 0;    // resident-vs-streamed byte mismatches (should stay 0)
