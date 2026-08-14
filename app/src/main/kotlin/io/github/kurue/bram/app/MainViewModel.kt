@@ -1074,12 +1074,36 @@ class MainViewModel(
                 }
                 return true
             }
-            withContext(Dispatchers.Default) { delay(15_000) }
+            withContext(Dispatchers.Default) { Thread.sleep(15_000L) }
         }
     }
 
     fun overrideCooldown() {
         mutableState.update { it.copy(cooldownOverride = true) }
+    }
+
+    /**
+     * Watches a thread against a wall-clock deadline. The whole loop runs inside a single
+     * [withContext] on [Dispatchers.Default] and uses [Thread.sleep] rather than per-iteration
+     * [delay]: the old pattern (four [withContext] round-trips per second) intermittently lost
+     * a resumption under sustained CPU load — exactly when a hanging candidate spins full-tilt
+     * for its probe window — and the sweep wedged silently. One round-trip + [Thread.sleep]
+     * cannot be defeated by the coroutine cancellation machinery.
+     */
+    private suspend fun watchThread(
+        thread: Thread,
+        deadlineMillis: Long,
+        pollMillis: Long = 500L,
+        onTick: (() -> Unit)? = null,
+    ) {
+        withContext(Dispatchers.Default) {
+            var ticks = 0
+            val ticksPerRefresh = (15_000L / pollMillis).toInt().coerceAtLeast(1)
+            while (thread.isAlive && System.currentTimeMillis() < deadlineMillis) {
+                if (onTick != null && ++ticks % ticksPerRefresh == 0) onTick()
+                Thread.sleep(pollMillis)
+            }
+        }
     }
 
     /**
@@ -1321,7 +1345,7 @@ class MainViewModel(
         }
         val restoreLoaded = snapshot.loadedModelId
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.Default) {
             // Ask the runtime what it can see now rather than trusting what was detected at start.
             // The inference process restarts across loads, and a backend that registered late was
             // missing from the list, so a profile configured for it silently loaded on the CPU.
@@ -1413,11 +1437,7 @@ class MainViewModel(
                     }
                 }
                 val backendDeadline = System.currentTimeMillis() + CANDIDATE_TIMEOUT_MILLIS
-                var backendThermalTicks = 0
-                while (backendThread.isAlive && System.currentTimeMillis() < backendDeadline) {
-                    if (++backendThermalTicks % 30 == 0) refreshThermalIndicator()
-                    withContext(Dispatchers.Default) { delay(500) }
-                }
+                watchThread(backendThread, backendDeadline, 500L) { refreshThermalIndicator() }
                 val report = if (backendThread.isAlive) {
                     android.util.Log.d("BramTune", "backend ${backend.label} TIMED OUT; restarting the inference process")
                     runCatching { container.llamaCppClient.restartInferenceProcess() }
@@ -1689,9 +1709,7 @@ class MainViewModel(
             }
         }
         val deadline = System.currentTimeMillis() + REFERENCE_TIMEOUT_MILLIS
-        while (refThread.isAlive && System.currentTimeMillis() < deadline) {
-            withContext(Dispatchers.Default) { delay(500) }
-        }
+        watchThread(refThread, deadline, 500L)
         if (refThread.isAlive) {
             android.util.Log.d("BramTune", "reference wedged; restarting the inference process")
             runCatching { container.llamaCppClient.restartInferenceProcess() }
@@ -2146,7 +2164,7 @@ class MainViewModel(
             state.tuningProfileId != null
         ) return
         mutableState.update { it.copy(cooldownOverride = false) }
-        viewModelScope.launch { runBatchTune(profileId) }
+        viewModelScope.launch(Dispatchers.Default) { runBatchTune(profileId) }
     }
 
     /**
@@ -2202,7 +2220,7 @@ class MainViewModel(
                                 ),
                             )
                         }
-                        withContext(Dispatchers.Default) { delay(60_000) }
+                        withContext(Dispatchers.Default) { Thread.sleep(60_000L) }
                     })
                     when {
                         result != null -> cpuReference = result
@@ -2294,11 +2312,7 @@ class MainViewModel(
                         }
                     }
                     val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
-                    var probeThermalTicks = 0
-                    while (probeThread.isAlive && System.currentTimeMillis() < probeDeadline) {
-                        if (++probeThermalTicks % 60 == 0) refreshThermalIndicator()
-                        withContext(Dispatchers.Default) { delay(250) }
-                    }
+                    watchThread(probeThread, probeDeadline, 250L) { refreshThermalIndicator() }
                     if (probeThread.isAlive) {
                         android.util.Log.d("BramTune", "batch $batch/$ubatch hung in probe; abandoned")
                         runCatching { container.llamaCppClient.restartInferenceProcess() }
@@ -2358,11 +2372,7 @@ class MainViewModel(
                         }
                     }
                     val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
-                    var measureThermalTicks = 0
-                    while (measureThread.isAlive && System.currentTimeMillis() < measureDeadline) {
-                        if (++measureThermalTicks % 30 == 0) refreshThermalIndicator()
-                        withContext(Dispatchers.Default) { delay(500) }
-                    }
+                    watchThread(measureThread, measureDeadline, 500L) { refreshThermalIndicator() }
                     if (measureThread.isAlive) {
                         android.util.Log.d("BramTune", "batch $batch/$ubatch TIMED OUT")
                         runCatching { container.llamaCppClient.restartInferenceProcess() }
@@ -2464,7 +2474,7 @@ class MainViewModel(
             state.batchTuneProfileId != null || state.tuningProfileId != null
         ) return
         mutableState.update { it.copy(cooldownOverride = false) }
-        viewModelScope.launch { runDimensionTune(profileId, dimension, fromAutoConfigure = false) }
+        viewModelScope.launch(Dispatchers.Default) { runDimensionTune(profileId, dimension, fromAutoConfigure = false) }
     }
 
     /** A candidate for one tuning dimension: what to try, in words, and how to apply it. */
@@ -2685,7 +2695,7 @@ class MainViewModel(
                             ),
                         )
                     }
-                    withContext(Dispatchers.Default) { delay(60_000) }
+                    withContext(Dispatchers.Default) { Thread.sleep(60_000L) }
                 })
                 when {
                     result != null -> cpuReference = result
@@ -2790,11 +2800,7 @@ class MainViewModel(
                     }
                 }
                 val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
-                var probeThermalTicks = 0
-                while (probeThread.isAlive && System.currentTimeMillis() < probeDeadline) {
-                    if (++probeThermalTicks % 60 == 0) refreshThermalIndicator()
-                    withContext(Dispatchers.Default) { delay(250) }
-                }
+                watchThread(probeThread, probeDeadline, 250L) { refreshThermalIndicator() }
                 if (probeThread.isAlive) {
                     android.util.Log.d("BramTune", "candidate=${candidate.label} hung in probe; abandoned")
                     runCatching { container.llamaCppClient.restartInferenceProcess() }
@@ -2839,11 +2845,7 @@ class MainViewModel(
                     }
                 }
                 val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
-                var measureThermalTicks = 0
-                while (measureThread.isAlive && System.currentTimeMillis() < measureDeadline) {
-                    if (++measureThermalTicks % 30 == 0) refreshThermalIndicator()
-                    withContext(Dispatchers.Default) { delay(500) }
-                }
+                watchThread(measureThread, measureDeadline, 500L) { refreshThermalIndicator() }
                 val agreedNow = if (measureThread.isAlive) {
                     android.util.Log.d("BramTune", "candidate=${candidate.label} TIMED OUT")
                     // A hung native call wedges the inference process's single executor thread,
