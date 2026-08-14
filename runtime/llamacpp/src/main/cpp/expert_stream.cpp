@@ -215,7 +215,13 @@ void ExpertStreamer::stream_layer(int il, const ggml_tensor * topk) {
         for (int64_t k = 0; k < n_ids; ++k) {
             const int32_t e = ids[k];
             if (e < 0 || e >= c->n_expert) continue;
-            if (c->resident[e]) continue;
+            const uint64_t key = (static_cast<uint64_t>(c->id) << 24) | static_cast<uint32_t>(e);
+            if (c->resident[e]) {
+                // Already cached: promote to most-recently-used and skip the read.
+                const auto pit = lru_pos_.find(key);
+                if (pit != lru_pos_.end()) lru_.splice(lru_.begin(), lru_, pit->second);
+                continue;
+            }
             const TensorLoc slice{c->loc.shard, c->loc.file_offset + static_cast<uint64_t>(e) * c->expert_stride,
                                   c->expert_stride};
             void * dst = static_cast<uint8_t *>(c->buffer) + static_cast<uint64_t>(e) * c->expert_stride;
@@ -223,6 +229,9 @@ void ExpertStreamer::stream_layer(int il, const ggml_tensor * topk) {
                 c->resident[e] = 1;
                 bytes_read_ += c->expert_stride;
                 ++slices_read_;
+                resident_bytes_ += c->expert_stride;
+                lru_.push_front(key);
+                lru_pos_[key] = lru_.begin();
                 // Self-check (opt-in): on a resident model the original mmap bytes are still mapped,
                 // so a slice streamed from flash must equal them byte-for-byte. Zero mismatches over
                 // a run proves the streaming path reads exactly what the resident model would use.
@@ -239,6 +248,7 @@ void ExpertStreamer::stream_layer(int il, const ggml_tensor * topk) {
                         ++verify_mismatches_;
                     }
                 }
+                evict_to_budget();
             }
         }
     }
@@ -253,6 +263,34 @@ void ExpertStreamer::stream_layer(int il, const ggml_tensor * topk) {
                 (unsigned long long) slices_read_, bytes_read_ / (1024.0 * 1024.0),
                 (unsigned long long) verify_mismatches_);
         }
+    }
+}
+
+void ExpertStreamer::evict_to_budget() {
+    if (cache_budget_ == 0) return; // unbounded: keep every streamed expert
+    static const uint64_t page = static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
+    while (resident_bytes_ > cache_budget_ && !lru_.empty()) {
+        const uint64_t key = lru_.back();
+        lru_.pop_back();
+        lru_pos_.erase(key);
+        const int cid = static_cast<int>(key >> 24);
+        const int e = static_cast<int>(key & 0xFFFFFF);
+        if (cid < 0 || cid >= static_cast<int>(captured_by_id_.size())) continue;
+        Captured * c = captured_by_id_[cid];
+        if (c == nullptr || e < 0 || e >= c->n_expert || !c->resident[e]) continue;
+
+        // Drop only whole pages fully inside this expert's slice, so an edge page shared with a
+        // neighbouring expert is never released (madvise(DONTNEED) zero-fills anonymous pages).
+        const uint64_t start = static_cast<uint64_t>(e) * c->expert_stride;
+        const uint64_t end = start + c->expert_stride;
+        const uint64_t astart = (start + page - 1) & ~(page - 1);
+        const uint64_t aend = end & ~(page - 1);
+        if (aend > astart) {
+            madvise(static_cast<uint8_t *>(c->buffer) + astart, aend - astart, MADV_DONTNEED);
+        }
+        c->resident[e] = 0;
+        resident_bytes_ -= c->expert_stride;
+        ++evictions_;
     }
 }
 
@@ -292,6 +330,8 @@ bool ExpertStreamer::arm_stream(std::string * error) {
         c.orig_data = c.tensor->data;
         c.resident.assign(static_cast<size_t>(c.n_expert), 0);
         c.tensor->data = buf;
+        c.id = static_cast<int>(captured_by_id_.size());
+        captured_by_id_.push_back(&c);
         by_layer_[c.il].push_back(&c);
     }
     // Keep each layer's tensors in a stable order (gate, up, down) for readable telemetry.
@@ -306,8 +346,9 @@ bool ExpertStreamer::arm_stream(std::string * error) {
 void ExpertStreamer::disarm_stream() {
     if (armed_) {
         __android_log_print(ANDROID_LOG_WARN, "BramLlama",
-            "bram_stream: streamed %llu expert slices (%.1f MiB read), %llu byte mismatches",
+            "bram_stream: streamed %llu slices (%.1f MiB read), %llu resident MiB, %llu evictions, %llu mismatches",
             (unsigned long long) slices_read_, bytes_read_ / (1024.0 * 1024.0),
+            (unsigned long long) (resident_bytes_ / (1024 * 1024)), (unsigned long long) evictions_,
             (unsigned long long) verify_mismatches_);
     }
     for (auto & kv : captured_) {
@@ -321,6 +362,10 @@ void ExpertStreamer::disarm_stream() {
         }
     }
     by_layer_.clear();
+    captured_by_id_.clear();
+    lru_.clear();
+    lru_pos_.clear();
+    resident_bytes_ = 0;
     armed_ = false;
 }
 

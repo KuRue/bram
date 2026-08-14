@@ -403,6 +403,11 @@ void capture_experts(llama_context * context) {
         char vprop[PROP_VALUE_MAX] = {0};
         __system_property_get("debug.bram.stream.verify", vprop);
         g_state.streamer->set_verify(vprop[0] == '1');
+        // Resident expert-cache budget in MiB (0 or unset = unbounded). P4 makes this a real setting.
+        char cprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream.cache_mb", cprop);
+        const long cache_mb = cprop[0] != '\0' ? strtol(cprop, nullptr, 10) : 0;
+        if (cache_mb > 0) g_state.streamer->set_cache_budget(static_cast<uint64_t>(cache_mb) * 1024 * 1024);
         std::string arm_error;
         if (g_state.streamer->arm_stream(&arm_error)) {
             g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Stream);
