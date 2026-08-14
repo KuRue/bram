@@ -2035,6 +2035,11 @@ private fun BoxScope.AutoConfigureOverlay(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Text(
+                    "tok/s = prompt/decode. The winner is the fastest total run.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 HorizontalDivider()
 
                 // The winner is the fastest agreeing run, CPU reference included — the CPU is a
@@ -2051,7 +2056,7 @@ private fun BoxScope.AutoConfigureOverlay(
                     }
                     RunRow(
                         label = "CPU",
-                        value = "%.0f tok/s".format(it.promptTokPerSec),
+                        value = "%.0f/%.0f".format(it.promptTokPerSec, it.decodeTokPerSec),
                         state = state,
                     )
                 }
@@ -2067,12 +2072,15 @@ private fun BoxScope.AutoConfigureOverlay(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     phase.candidates.forEachIndexed { candidateIndex, label ->
+                        // The batch phase carries no dimension, so match its note by the batch
+                        // dimension; every other phase matches by its own.
+                        val phaseDimension = if (phase.isBatch) TuningDimension.BATCH else phase.dimension
                         val landedResult = if (phase.isBackends) {
                             progress.results.getOrNull(candidateIndex + 1)
                         } else {
                             progress.dimensions
                                 .firstOrNull { note ->
-                                    note.dimension == phase.dimension &&
+                                    note.dimension == phaseDimension &&
                                         note.measuredAtEpochMillis >= progress.startedAtEpochMillis
                                 }
                                 ?.results
@@ -2104,8 +2112,14 @@ private fun BoxScope.AutoConfigureOverlay(
                                 result is BackendMeasurement && !result.agrees -> "FAIL"
                                 result is TuneCandidateResult && result.timedOut -> "timed out"
                                 result is TuneCandidateResult && !result.agreed -> "no match"
-                                result is BackendMeasurement -> "%.0f tok/s".format(result.promptTokPerSec)
-                                else -> "%.0f tok/s".format((result as TuneCandidateResult).promptTokPerSec)
+                                result is BackendMeasurement -> "%.0f/%.0f".format(
+                                    result.promptTokPerSec,
+                                    result.decodeTokPerSec,
+                                )
+                                else -> {
+                                    val tune = result as TuneCandidateResult
+                                    "%.0f/%.0f".format(tune.promptTokPerSec, tune.decodeTokPerSec)
+                                }
                             },
                             state = state,
                         )
