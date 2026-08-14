@@ -1716,29 +1716,20 @@ class MainViewModel(
     }
 
     /**
-     * Drops candidates the profile's own saved note already recorded as timed out, when the note
-     * was measured under the current fingerprint. A timed-out candidate hangs in the engine — on
-     * the S25 Ultra the CPU-mask configs and 8 threads have never once completed — and the device,
-     * app build, engine build, and CPU features are all unchanged, so re-running one would just
-     * hang again and burn its probe window. A fingerprint change (new build, new engine, new
-     * device) clears the slate. Always keeps the whole list when pruning would leave fewer than
-     * two candidates to compare.
+     * Returns the labels of candidates the profile's own saved note recorded as timed out.
+     * These hang in the engine — on the S25 Ultra the CPU-mask configs and 8 threads have never
+     * completed — and re-measuring one burns its probe window for nothing. NOT fingerprint-gated:
+     * a pin bump was verified not to fix these, and the note is device+model-specific evidence.
+     * Delete the profile to force a full re-discovery.
      */
-    private fun prunePreviouslyTimedOut(
-        candidates: List<TuningCandidate>,
+    private fun previouslyTimedOutLabels(
         priorResults: List<TuneCandidateResult>,
-        fingerprintFresh: Boolean,
-    ): List<TuningCandidate> {
-        if (!fingerprintFresh) return candidates
-        val timedOutLabels = priorResults.filter { it.timedOut }.map { it.label }.toSet()
-        if (timedOutLabels.isEmpty()) return candidates
-        val kept = candidates.filterNot { it.label in timedOutLabels }
-        if (kept.size < 2) return candidates
-        android.util.Log.d(
-            "BramTune",
-            "skipping previously timed-out candidates: ${candidates.map { it.label }.filter { it in timedOutLabels }}",
-        )
-        return kept
+    ): Set<String> {
+        val labels = priorResults.filter { it.timedOut }.map { it.label }.toSet()
+        if (labels.isNotEmpty()) {
+            android.util.Log.d("BramTune", "candidates with a prior timeout: $labels")
+        }
+        return labels
     }
 
     /**
@@ -1753,8 +1744,6 @@ class MainViewModel(
     ): List<TuningPlanPhase> {
         val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         val clusters = CpuTopology.clusters()
-        val fingerprintFresh = profile.measuredFingerprint.isNotBlank() &&
-            profile.measuredFingerprint == mutableState.value.measurementFingerprint
         val backendPhase = TuningPlanPhase(
             title = "Backends",
             candidates = backendCandidates.map { it.second.label },
@@ -1763,32 +1752,16 @@ class MainViewModel(
         val dimensions = autoConfigureDimensions(
             resolveLoadBackend(profile.backendId),
         ).map { dimension ->
-            val candidates = prunePreviouslyTimedOut(
-                dimensionCandidates(dimension, profile, visibleCores, clusters),
-                profile.tuning.firstOrNull { it.dimension == dimension }?.results.orEmpty(),
-                fingerprintFresh,
-            )
             TuningPlanPhase(
                 title = dimension.label,
-                candidates = candidates.map { it.label },
+                candidates = dimensionCandidates(dimension, profile, visibleCores, clusters)
+                    .map { it.label },
                 dimension = dimension,
             )
         }
-        val batchPairs = if (fingerprintFresh) {
-            val timedOutLabels = profile.tuning
-                .firstOrNull { it.dimension == TuningDimension.BATCH }
-                ?.results.orEmpty()
-                .filter { it.timedOut }
-                .map { it.label }
-                .toSet()
-            val kept = BATCH_CANDIDATES.filterNot { (batch, ubatch) -> "$batch/$ubatch" in timedOutLabels }
-            if (kept.size >= 2) kept else BATCH_CANDIDATES
-        } else {
-            BATCH_CANDIDATES
-        }
         val batchPhase = TuningPlanPhase(
             title = TuningDimension.BATCH.label,
-            candidates = batchPairs.map { (batch, ubatch) -> "$batch/$ubatch" },
+            candidates = BATCH_CANDIDATES.map { (batch, ubatch) -> "$batch/$ubatch" },
             isBatch = true,
         )
         return buildList {
@@ -2215,16 +2188,11 @@ class MainViewModel(
                 // even when Android's thermal status still reads "none", so a slow one is retried
                 // after a park — numbers taken through it would be lies with timestamps.
                 var cpuReference: JSONObject? = null
-                var referenceAttempts = 0
+                var referenceWedges = 0
                 while (cpuReference == null) {
-                    if (referenceAttempts >= MAX_REFERENCE_ATTEMPTS) {
-                        throw IllegalStateException(
-                            "The CPU reference could not be measured (it hung or the phone " +
-                                "throttled repeatedly); the batch stays at the device default.",
-                        )
-                    }
-                    referenceAttempts++
-                    cpuReference = referenceAttempt(model, profile, threads, onSlow = { millis ->
+                    var slow = false
+                    val result = referenceAttempt(model, profile, threads, onSlow = { millis ->
+                        slow = true
                         android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
                         mutableState.update {
                             it.copy(
@@ -2236,6 +2204,19 @@ class MainViewModel(
                         }
                         withContext(Dispatchers.Default) { delay(60_000) }
                     })
+                    when {
+                        result != null -> cpuReference = result
+                        slow -> Unit // parked and retried; a slow phone needs time, not a failure count
+                        else -> {
+                            referenceWedges++
+                            if (referenceWedges >= MAX_REFERENCE_ATTEMPTS) {
+                                throw IllegalStateException(
+                                    "The CPU reference could not be measured (it hung repeatedly); " +
+                                        "the batch stays at the device default.",
+                                )
+                            }
+                        }
+                    }
                 }
                 val cpuRef = cpuReference!!
                 val reference = cpuRef.optJSONArray("tokens").toIntList()
@@ -2251,30 +2232,24 @@ class MainViewModel(
                 // The default (512/128) is in the list so there is always a baseline to fall back
                 // to, and the wide end covers the Hexagon reference configuration, which runs
                 // ubatch 1024 — the backend batches prompt work in chunks that size.
-                val fingerprintFresh = profile.measuredFingerprint.isNotBlank() &&
-                    profile.measuredFingerprint == mutableState.value.measurementFingerprint
-                val timedOutBatches = profile.tuning
-                    .firstOrNull { it.dimension == TuningDimension.BATCH }
-                    ?.results.orEmpty()
-                    .filter { it.timedOut }
-                    .map { it.label }
-                    .toSet()
-                val candidates = if (fingerprintFresh && timedOutBatches.isNotEmpty()) {
-                    val kept = BATCH_CANDIDATES.filterNot { (batch, ubatch) -> "$batch/$ubatch" in timedOutBatches }
-                    if (kept.size >= 2) {
-                        android.util.Log.d("BramTune", "skipping previously timed-out batches: $timedOutBatches")
-                        kept
-                    } else {
-                        BATCH_CANDIDATES
-                    }
-                } else {
-                    BATCH_CANDIDATES
-                }
+                val candidates = BATCH_CANDIDATES
+                val previouslyHungBatches = previouslyTimedOutLabels(
+                    profile.tuning
+                        .firstOrNull { it.dimension == TuningDimension.BATCH }
+                        ?.results.orEmpty()
+                        .map { it.copy(label = it.label) },
+                )
                 val scored = mutableListOf<BatchScore>()
                 val batchPlanPhaseIndex = mutableState.value.autoConfigure?.plan
                     ?.indexOfFirst { phase -> phase.isBatch } ?: -1
                 for ((batchIndex, pair) in candidates.withIndex()) {
                     val (batch, ubatch) = pair
+                    if ("$batch/$ubatch" in previouslyHungBatches) {
+                        android.util.Log.d("BramTune", "batch $batch/$ubatch previously timed out; skipping")
+                        tried += "$batch/$ubatch (previously timed out)"
+                        markPlanCandidateTimedOut(batchPlanPhaseIndex, batchIndex)
+                        continue
+                    }
                     waitForCooldown()
                     mutableState.update {
                         it.copy(
@@ -2643,17 +2618,14 @@ class MainViewModel(
             return
         }
         waitForCooldown()
-        val fingerprintFresh = profile.measuredFingerprint.isNotBlank() &&
-            profile.measuredFingerprint == mutableState.value.measurementFingerprint
-        val candidates = prunePreviouslyTimedOut(
-            dimensionCandidates(
-                dimension,
-                profile,
-                visibleCores,
-                CpuTopology.clusters(),
-            ),
+        val candidates = dimensionCandidates(
+            dimension,
+            profile,
+            visibleCores,
+            CpuTopology.clusters(),
+        )
+        val previouslyHung = previouslyTimedOutLabels(
             profile.tuning.firstOrNull { it.dimension == dimension }?.results.orEmpty(),
-            fingerprintFresh,
         )
         if (dimension == TuningDimension.HEX_FLAGS && backend != RuntimeBackend.HEXAGON) {
             finishDimensionTune()
@@ -2699,16 +2671,11 @@ class MainViewModel(
             // retried after a park instead of being used — numbers taken through it would be
             // lies with timestamps, and the park lets the phone actually cool down.
             var cpuReference: JSONObject? = null
-            var referenceAttempts = 0
+            var referenceWedges = 0
             while (cpuReference == null) {
-                if (referenceAttempts >= MAX_REFERENCE_ATTEMPTS) {
-                    throw IllegalStateException(
-                        "The CPU reference could not be measured (it hung or the phone throttled " +
-                            "repeatedly); ${dimension.label} stays at the device default.",
-                    )
-                }
-                referenceAttempts++
-                cpuReference = referenceAttempt(model, profile, referenceThreads, onSlow = { millis ->
+                var slow = false
+                val result = referenceAttempt(model, profile, referenceThreads, onSlow = { millis ->
+                    slow = true
                     android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
                     mutableState.update {
                         it.copy(
@@ -2720,6 +2687,19 @@ class MainViewModel(
                     }
                     withContext(Dispatchers.Default) { delay(60_000) }
                 })
+                when {
+                    result != null -> cpuReference = result
+                    slow -> Unit // parked and retried; a slow phone needs time, not a failure count
+                    else -> {
+                        referenceWedges++
+                        if (referenceWedges >= MAX_REFERENCE_ATTEMPTS) {
+                            throw IllegalStateException(
+                                "The CPU reference could not be measured (it hung repeatedly); " +
+                                    "${dimension.label} stays at the device default.",
+                            )
+                        }
+                    }
+                }
             }
             val cpuRef = cpuReference!!
             val reference = cpuRef.optJSONArray("tokens").toIntList()
@@ -2744,6 +2724,16 @@ class MainViewModel(
             val timedOutCandidates = mutableSetOf<TuningCandidate>()
             var agreed = 0
             for ((candidateIndex, candidate) in candidates.withIndex()) {
+                // Skip candidates that hung in a previous sweep: they hang again on this device
+                // (verified across pins), and their timed-out result is carried into the note so
+                // the next run skips them too — the note always carries every candidate's outcome.
+                if (candidate.label in previouslyHung) {
+                    android.util.Log.d("BramTune", "candidate=${candidate.label} previously timed out; skipping")
+                    timedOutCandidates += candidate
+                    tried += "${candidate.label} (previously timed out)"
+                    markPlanCandidateTimedOut(planPhaseIndex, candidateIndex)
+                    continue
+                }
                 waitForCooldown()
                 val tuned = candidate.apply(profile)
                 val candidateThreads = if (tuned.threads > 0) {
@@ -4389,10 +4379,10 @@ private const val REFERENCE_TOKENS = 24
 // 30s. Sweeps park and retry the reference instead of using a number taken through throttling.
 private const val MAX_REFERENCE_MILLIS = 30_000L
 // How long one reference attempt may wedge before it counts as hung (not slow) and the
-// inference process is restarted. Slower than this is a hang: even the worst throttling seen on
-// the S25 Ultra returned within 5.5 minutes, and the slow path already parks and retries.
-private const val REFERENCE_TIMEOUT_MILLIS = 4 * 60 * 1_000L
-// Hung references are retried this many times before the sweep gives up with a note; slow
+// inference process is restarted. A throttled-but-returning reference on the S25 Ultra took up
+// to 5.3 minutes, so the deadline must clear that; a true hang is caught soon after.
+private const val REFERENCE_TIMEOUT_MILLIS = 7 * 60 * 1_000L
+// Wedged references are retried this many times before the sweep gives up with a note; slow
 // references park and retry until the phone cools (or Continue-anyway is pressed).
 private const val MAX_REFERENCE_ATTEMPTS = 3
 // A broken backend kernel can hang a load or decode without ever reporting an error, so a
