@@ -1,17 +1,18 @@
 # Session handoff
 
-Last updated: 2026-08-13
+Last updated: 2026-08-13 (late session)
 
 ## Current source of truth
 
 | Item | Value |
 |---|---|
 | Repository | Private `KuRue/bram` |
-| main | [`908f040`](https://github.com/KuRue/bram/commit/908f040) - record of the phone validation of Phase 3 |
+| main | [`2afb2d9`](https://github.com/Kurue/bram/commit/2afb2d9) - KV/FA dimensions + padded context + teacher-forced timing |
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
 | Test emulator | AVD `Pixel_9a`, x86_64, 6 GB RAM / 16 GB storage |
 | Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone, tool-capable), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
-| llama.cpp pin | `132753bf` (2026-08-12, bumped for the KleidiAI runtime feature detection #26076) |
+| llama.cpp pin | `a94d563e` (2026-08-13, bumped from 132753bf for 31 upstream commits including Lightning Indexer fused ops, FA vectorize, LFM2 tool-call fix; did NOT fix the mask/8-threads arm64 hang) |
+| Build note | The Hexagon skel ExternalProject now needs Ninja on PATH: `export PATH=/home/s14/Android/Sdk/cmake/3.30.5/bin:$PATH` before building in WSL |
 
 main is healthy and CI-green. The auto-configure UI work (profile card, glass tuning, the
 auto-configure overlay) is merged as #20. The local Windows checkout is on `main` at #20; the WSL
@@ -19,28 +20,48 @@ build tree is a synced copy of the same working tree.
 
 ## Landed since the previous refresh
 
-- **Probe-first hang detection, thread-watched timeouts** (this commit) — every tuning candidate
-  now runs a cheap probe first (its load, the full teacher-forced replay, and a 4-token decode on
-  a raw `bram-tune-probe` thread watched by a wall-clock deadline), so a config that hangs is
-  abandoned in ~30s and recorded instead of holding the sweep for the full 5-minute measurement
-  timeout. The probes and measurements both moved off `withTimeout`: on-device investigation
-  showed that once a binder call into a wedged native call is in flight, **the coroutine never
-  resumes and `withTimeout` never fires** (a plain `delay` on the same dispatchers works, and
-  the JVM semantics with `Thread.sleep` differ — a fresh-process diagnostic proved the timers
-  are fine until a candidate wedges). The sweeps now run each candidate on its own raw thread
-  (`runBlocking` inside `kotlin.concurrent.thread`) and the sweep coroutine polls `isAlive`
-  against `System.currentTimeMillis()` deadlines, which the cancellation machinery cannot
-  defeat. Also fixed while tracing this: `InferenceProcessService.onDestroy` blocked forever on
-  a hung executor (an unbounded `.get()`), which could keep the wedged process alive exactly
-  when the restart path needs it dead. The intermittent Q8_0 hang itself (no_mmap reloads +
-  teacher-forced replay; instrumentation showed the load's self-test completing and the next
-  native call never arriving) matches that lost-resumption failure mode. After the change, two
-  consecutive load-mode sweeps and a six-candidate batch sweep completed cleanly on the phone —
-  the Q8_0 profile now carries no_mmap, threads 4, batch 256/128 at 437 prompt tok/s.
-- **Winner mark includes the CPU reference** (this commit) — the auto-configure overlay picks
-  the fastest agreeing run across every row, CPU reference included, and marks it ✓. Previously
-  the reference row could never win even when it was the fastest agreeing backend, so the card
-  showed a winning config that was not marked.
+- **KV cache and flash attention as tuning dimensions; padded context for the context-sensitive
+  knobs** (`2afb2d9`, `0617a67`) — the auto-configure overlay now sweeps two more dimensions that
+  directly affect long-context decode speed: KV-cache quantization (F16 vs Q8_0) and flash
+  attention (Auto/On/Off). These are measured at a 1K-token padded context (1024 neutral filler
+  tokens prepended to the benchmark prompt) so their effect is visible — at the bare 63-token
+  prompt neither matters. Every other dimension (threads, masks, poll, load mode, batch) stays on
+  the fast short-context measurement. The teacher-forced replay now carries its own prompt_ms +
+  decode_ms, so one call serves both agreement and timing — the separate referenceDecode per
+  candidate is gone, halving the padded cost.
+- **Sweeps on Dispatchers.Default** (`4a8a2b7`) — the root cause of the recurring "stuck after a
+  candidate times out" was that sweeps ran on Dispatchers.Main.immediate, and every
+  withContext(Default) round-trip back to Main could lose its resumption under sustained CPU load.
+  Moving to Default makes the round-trips no-ops and Thread.sleep-based polling cannot be defeated.
+  This was THE fix that made auto-configure reliable end-to-end on the phone.
+- **Skip previously timed-out candidates in-loop** (`5d1f64d`) — candidates the profile already
+  recorded as timed out are skipped instantly inside the loop (not pruned from the list — the note
+  carries their result forward so the skip persists). The masks and 8-threads hang in the engine on
+  the S25 Ultra across both pins and have never once completed; after one discovery run they cost
+  zero seconds on every subsequent pass.
+- **Backend sweep watchdog** (`adfc845`) — the LFM2.5 auto-configure "doesn't work at all" was a
+  wedged backend measurement with no timeout; backends now run on watched threads with a 5-min
+  deadline, restart on hang, and record a failure so the pass moves on.
+- **Pin bump to a94d563e** (`0483437`) — 31 upstream commits; the mask/8-threads arm64 hang
+  persists at the new pin (it's a ggml threadpool bug on the 8 Elite's mixed-core topology with
+  the Q8_0 model, not a llama.cpp version issue). The emulator's clean pass was misleading — it
+  has 2 visible cores so never generated mask or 8-thread candidates. The new pin does add the
+  Lightning Indexer fused ops (needed for Nemotron-style models), FA V-cache vectorize, and the
+  LFM2 tool-call fix.
+- **Thermal pause + indicator** (`b2433eb`, `ffcd4dd`) — auto-configure parks when the device
+  reports thermal status above "none" (Samsung's "light" already throttles hard), shows the live
+  status with a Continue-anyway button, and resumes automatically. The reference decode is also
+  the throttle detector: Android's thermal API tracks skin temp not CPU banding, so a reference
+  that takes minutes means the CPU is throttled regardless of what PowerManager says.
+- **Thinking-mode reference bug** (`b2433eb`) — all reference loads (backend, dimension, batch)
+  now pass `enableThinking = profile.thinkingEnabled`. Previously the reference ran without the
+  thinking preamble while candidates ran with it → every candidate failed agreement on the first
+  token on thinking-enabled profiles.
+- **Probe-first hang detection, thread-watched timeouts** (`9758d73`) — every tuning candidate
+  now runs a cheap probe first on a raw thread watched by a wall-clock deadline. Also fixed:
+  `InferenceProcessService.onDestroy` no longer blocks on a hung executor.
+- **Winner mark includes the CPU reference** (`9758d73`) — the ✓ covers the CPU reference row
+  when it's the fastest agreeing run.
 
 - **Milestone 19 — device-adaptive tuning, KleidiAI CPU kernels, and measurement fingerprints**
   (committed `8811fd1`, pushed). Full design in `docs/DEVICE_ADAPTATION.md`, research
