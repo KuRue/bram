@@ -1,22 +1,44 @@
 # Session handoff
 
-Last updated: 2026-08-13 (late session)
+Last updated: 2026-08-14 (continuation-ready)
 
 ## Current source of truth
 
 | Item | Value |
 |---|---|
 | Repository | Private `KuRue/bram` |
-| main | [`2afb2d9`](https://github.com/Kurue/bram/commit/2afb2d9) - KV/FA dimensions + padded context + teacher-forced timing |
+| main | [`51c8009`](https://github.com/Kurue/bram/commit/51c8009) - MTP/DFlash test-model search documented |
 | Target phone | Samsung `SM-S938U1` (Snapdragon 8 Elite, HTP v79), 10.9 GB app-visible RAM |
 | Test emulator | AVD `Pixel_9a`, x86_64, 6 GB RAM / 16 GB storage |
 | Reference models | `LFM2.5-2.6B-Q4_0.gguf` (phone, tool-capable), `Qwen3.5-0.8B-Q4_0.gguf` (emulator) |
+| Phone's model inventory | Qwen3.5-0.8B (Q4_0 + converted Q8_0), LFM2.5-2.6B-Q4_0, `Nvidia-Nemotron-3.5-Lightning-30B-A3B` (edcb5d4650796ed2fb412498.gguf, ~17GB, has nextn heads, runs ~0.5 tok/s decode) |
 | llama.cpp pin | `a94d563e` (2026-08-13, bumped from 132753bf for 31 upstream commits including Lightning Indexer fused ops, FA vectorize, LFM2 tool-call fix; did NOT fix the mask/8-threads arm64 hang) |
-| Build note | The Hexagon skel ExternalProject now needs Ninja on PATH: `export PATH=/home/s14/Android/Sdk/cmake/3.30.5/bin:$PATH` before building in WSL |
+| Build note | The Hexagon skel ExternalProject now needs Ninja on PATH: `export PATH=/home/s14/Android/Sdk/cmake/3.30.5/bin:$PATH` before building in WSL. Emulator builds need `BRAM_EMULATOR_ABI=true`. |
 
-main is healthy and CI-green. The auto-configure UI work (profile card, glass tuning, the
-auto-configure overlay) is merged as #20. The local Windows checkout is on `main` at #20; the WSL
-build tree is a synced copy of the same working tree.
+## Session continuation (start here)
+
+- **Phone is disconnected** — the last wireless adb endpoint was `192.168.1.169:45953`, which
+  expires. To reconnect: on the phone, Developer options → Wireless debugging → give the new
+  "IP address & Port" (and the pairing port + 6-digit code the first time). Then
+  `adb connect <ip>:<port>`. The emulator (`emulator-5554`) is up and usable for app-level
+  work, but it cannot run the phone-only models (Nemotron) and its UI automation has proven
+  unreliable for the model picker/chat send.
+- **Pending on-device validations** (each is a quick phone action):
+  1. The **multi-part GGUF load** — the import code is done; the loader + size-check plumbing
+     compile and the split files were structurally verified. On the phone, import a real split
+     set (or the split Qwen pair from `C:\Users\S14\AppData\Local\Temp\opencode\split\`) and load it.
+  2. The **Nemotron MTP assert message** — remove the `nemotron_h_moe` gate in
+     `init_speculative()` temporarily, load the Nemotron, send a message, and read the new
+     `ggml_abort` logcat line (routed via `ggml_set_abort_callback`). That tells us the exact
+     upstream assert (single-MTP-block vs the output-head) and whether a small patch or a pin
+     bump unblocks MTP.
+  3. **KV-cache Q8_0 + flash-attention tuning** — the new dimensions run on the next
+     auto-configure; the phone's long-context decode (the Nemotron at 0.5 tok/s) is the
+     yardstick for whether Q8_0 KV helps.
+- **Working tree is clean**; all work is on `main`, pushed.
+
+main is healthy. The local Windows checkout is on `main`; the WSL build tree is a synced copy
+of the same working tree (`bash.exe ./sync-wsl.sh`).
 
 ## Landed since the previous refresh
 
@@ -446,17 +468,29 @@ addresses.
 
 ## Next
 
-0. **Phase 4 continues** — the LiteRT-LM unblock is proven; the runtime-neutral tuning seam is
-   the next slice. Known issues to revisit: the converted Q8_0 model's intermittent
-   teacher-forced hangs at this pin (arm64 + x86_64; possibly upstream — worth a pin-bump
-   retest), the KleidiAI SVE kernels, moving quant conversion off the service's single
-   executor, and the deferred power hints.
-1. A larger tool-capable model for agentic use. The web tools and approval gate
-   work; LFM2.5-2.6B cannot chain tools reliably. Add one through the Models
-   screen's import picker once it is on the device.
-2. Vulkan correctness — fails in a shared operation on Adreno 830; OpenCL is
-   the validated GPU path, so chasing Vulkan is low priority unless OpenCL's
-   1.11x needs replacing.
+0. **Phone session (highest priority)** — reconnect wireless adb, install the latest build,
+   then run the three validations in "Session continuation" above: the split-model load, the
+   Nemotron MTP assert capture (gate removed temporarily), and an auto-configure with the new
+   KV/FA dimensions. These decide the MTP path (upstream patch vs pin bump) and confirm the
+   multi-part feature.
+1. **MTP speculative decoding** — the framework is built + gated. Unblocking needs either a
+   working Nemotron-H-MoE MTP builder upstream (verified still asserting "single MTP block" on
+   master as of this session) or a small patch if the captured assert is the output-head one.
+   The phone's Nemotron is the test model; no small GGUF ships nextn heads (search documented).
+2. **DFlash** — blocked on the same upstream work + a small published draft pair (drafts are
+   trained artifacts, Qwen3/DeepSeek backbones only, all large). Not actionable until one
+   exists.
+3. **Multi-part GGUF** — code complete; the on-device load validation is the remaining step
+   (pending item 0). If the loader rejects a real split set, the split-file generator in
+   `C:\Users\S14\AppData\Local\Temp\opencode\split_gguf.py` is the reference for the format.
+4. **Phase 4 continues** — the runtime-neutral tuning seam (reuse the probe/measure/winner
+   machinery for LiteRT-LM and future runtimes). Known issues to revisit: the converted Q8_0
+   model's intermittent teacher-forced hangs (mask/8-threads persist across pins on arm64; the
+   pruning/skip logic makes them cost nothing after one discovery), KleidiAI SVE kernels, quant
+   conversion off the service's single executor, and the deferred power hints.
+5. A larger tool-capable model for agentic use (LFM2.5-2.6B cannot chain tools reliably);
+   add one through the import picker.
+6. Vulkan correctness — low priority; OpenCL is the validated GPU path.
 
 Deferred from Milestone 7 (closed): batch tuning (`n_ubatch` pinned at 128,
 should follow measured prompt throughput) and surfacing the KV-reuse count in
