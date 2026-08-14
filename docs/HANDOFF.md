@@ -33,21 +33,23 @@ Last updated: 2026-08-14 (continuation-ready)
   `Temp\opencode\split\` was a naive byte split with no `split.*` metadata — it masked bug (a) and could
   never load; regenerate real splits with a host-built `llama-gguf-split`. `importModel` still has no JVM
   test (needs Android ContentResolver/Uri). Minor UX: a total load failure renders as CPU `✓ 0/0`.
+- **Nemotron MTP assert — CAPTURED and diagnosed** (2026-08-14; all temporary diagnostics reverted,
+  tree clean). On device the Nemotron loads with `arch=nemotron_h_moe` and
+  **`llama_model_n_layer_nextn=1`** (the MTP head IS exposed at pin `a94d563e`), so the line-341 nextn
+  guard passes and the arch gate at ~line 349 is the real block. With the gate bypassed and MTP init
+  forced *before* prefill (a temp `init_speculative()` call after chat-context creation — needed
+  because the real call at ~line 1075 only runs after the Nemotron's ~3000-token, uncached prefill,
+  which never completed on device), the exact abort is:
+  `nemotron-h-moe.cpp:21: GGML_ASSERT(layer.nextn.eh_proj && layer.nextn.enorm && layer.nextn.hnorm) failed`
+  → SIGABRT in `:inference` (the **app UI process survived** — process isolation held). So the block is
+  **not** the hypothesized single-MTP-block limit: the graph builder requires the MTP layer to carry
+  `eh_proj`, `enorm`, and `hnorm`, and at least one is null for this GGUF (missing in the file, or not
+  mapped by the loader at this pin). Next: dump the GGUF's `*.nextn.*` tensor names and compare to what
+  `nemotron-h-moe.cpp` reads, and/or test a newer llama.cpp pin. The `nemotron_h_moe` gate stays until
+  a pin/GGUF supplies the three tensors. (Capturing this needed the pre-prefill hook: a normal chat send
+  never completes the 30B's prefill on device, and reference/warm-up contexts tore down before decode.)
 - **Pending on-device validations** (each is a quick phone action):
-  1. The **Nemotron MTP assert message** — partially investigated 2026-08-14 with temporary
-     diagnostics (all reverted; tree clean). Confirmed on device: the Nemotron loads with
-     `arch=nemotron_h_moe` and **`llama_model_n_layer_nextn=1`** — the MTP head IS exposed at pin
-     `a94d563e`, so the `init_speculative()` line-341 nextn guard passes and the `nemotron_h_moe`
-     arch gate at line ~349 is the real block. **The `ggml_abort` was NOT captured**: with the gate
-     bypassed, `init_speculative()` runs only after prompt prefill (called at the decode section,
-     ~line 1075), and the Nemotron's ~3000-token prefill (system identity + tool schemas, no prompt
-     cache: `matched 0, reused 0`) never completed on device — generations were torn down at the
-     context level with no output before decode, consistent with the documented slow/hanging CPU
-     generation on the 8 Elite. To finish: either shrink the prompt (fewer tools/skills, shorter
-     context) so prefill completes, or move the MTP graph build ahead of prefill for the capture.
-     Note: the a94d563e pin enabled the Gated Delta Net / Lightning Indexer / DeepSeek V4 HC fused
-     ops seen while building the Nemotron context, so whether the old abort still fires is unproven.
-  2. **KV-cache Q8_0 + flash-attention tuning** — the new dimensions run on the next
+  1. **KV-cache Q8_0 + flash-attention tuning** — the new dimensions run on the next
      auto-configure; the phone's long-context decode (the Nemotron at 0.5 tok/s) is the
      yardstick for whether Q8_0 KV helps.
 - **Working tree is clean**; all work is on `main`, pushed.
