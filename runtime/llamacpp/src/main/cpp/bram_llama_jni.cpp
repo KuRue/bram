@@ -6,6 +6,7 @@
 #include "chat.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "expert_stream.h"
 #include <deque>
 
 #include <algorithm>
@@ -69,6 +70,12 @@ struct runtime_state {
     // own KV/compute buffers. spec_init owns the draft context; speculative drives it.
     common_speculative_ptr speculative;
     std::unique_ptr<common_speculative_init_result> spec_init;
+
+    // MoE expert streaming (models larger than RAM). Non-null only when the loaded model is a
+    // streamable MoE; installed as the chat context's cb_eval. A one-time warm-up decode captures
+    // the live expert tensors so later phases can stream their weights from flash on demand.
+    std::unique_ptr<bram::ExpertStreamer> streamer;
+    bool streamer_captured = false;
 };
 
 // A second, independent model + context for text embeddings, kept resident so memory recall can
@@ -291,7 +298,44 @@ bool abort_callback(void *) {
     return g_cancelled.load(std::memory_order_relaxed);
 }
 
-llama_context * create_context(int context_tokens = 0) {
+void decode_prompt(llama_context * context, const std::vector<llama_token> & tokens);
+
+// Derives the full shard path list from a multi-part model's first-part path. A single-file model
+// (no "-NNNNN-of-MMMMM.gguf" suffix) returns just that path. llama.cpp names its splits this way,
+// and Bram stores each part under its original name in the same directory, so the siblings are the
+// same prefix with the running index. Returns paths in split order (00001..0000M).
+std::vector<std::string> derive_shard_paths(const std::string & first_path) {
+    std::vector<std::string> shards;
+    // Match the trailing "-NNNNN-of-MMMMM.gguf".
+    const std::string suffix = ".gguf";
+    if (first_path.size() < 18 || first_path.compare(first_path.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        shards.push_back(first_path);
+        return shards;
+    }
+    const size_t stem_end = first_path.size() - suffix.size();      // index just past "MMMMM"
+    // Expect "...-NNNNN-of-MMMMM" ending at stem_end. Positions: MMMMM = [stem_end-5, stem_end).
+    if (stem_end < 13 || first_path.compare(stem_end - 9, 4, "-of-") != 0 ||
+        first_path[stem_end - 15] != '-') {
+        shards.push_back(first_path);
+        return shards;
+    }
+    const std::string mmmmm = first_path.substr(stem_end - 5, 5);
+    const std::string prefix = first_path.substr(0, stem_end - 14); // up to and excluding "NNNNN-of-MMMMM"
+    char * end = nullptr;
+    const long total = std::strtol(mmmmm.c_str(), &end, 10);
+    if (end == mmmmm.c_str() + 5 && total >= 1 && total <= 99999) {
+        for (long i = 1; i <= total; ++i) {
+            char idx[8];
+            snprintf(idx, sizeof(idx), "%05ld", i); // just the running index; the path can be long
+            shards.emplace_back(prefix + idx + "-of-" + mmmmm + ".gguf");
+        }
+        return shards;
+    }
+    shards.push_back(first_path);
+    return shards;
+}
+
+llama_context * create_context(int context_tokens = 0, bool attach_streamer = false) {
     llama_context_params params = llama_context_default_params();
     params.n_ctx = static_cast<uint32_t>(context_tokens > 0 ? context_tokens : g_state.context_tokens);
     // The batch settings travel with the load request: they are context parameters, so every
@@ -313,9 +357,39 @@ llama_context * create_context(int context_tokens = 0) {
     params.flash_attn_type = g_state.flash_attn_type;
     params.type_k = g_state.kv_type;
     params.type_v = g_state.kv_type;
+    // Expert streaming hooks the eval callback to learn each token's routed experts. Only the chat
+    // context carries it: the reference and self-test contexts stay unhooked so the CPU yardstick is
+    // never perturbed by the thing it measures. When the streamer is Off the callback is a no-op.
+    if (attach_streamer && g_state.streamer && g_state.streamer->ready()) {
+        params.cb_eval = bram::ExpertStreamer::eval_callback;
+        params.cb_eval_user_data = g_state.streamer.get();
+    }
     llama_context * context = llama_init_from_model(g_state.model, params);
     if (context == nullptr) throw std::runtime_error("Could not allocate the requested model context");
     return context;
+}
+
+// One-time warm-up decode that lets the streamer record every routed-expert weight tensor the
+// graph references. Runs the whole model on a single token (all layers, so all expert nodes
+// appear), then clears the KV the warm-up produced so the real conversation starts clean.
+void capture_experts(llama_context * context) {
+    if (!g_state.streamer || !g_state.streamer->ready() || g_state.streamer_captured) return;
+    const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
+    llama_token bos = llama_vocab_bos(vocab);
+    if (bos < 0) bos = 0;
+    g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Capture);
+    try {
+        decode_prompt(context, {bos});
+    } catch (...) {
+        // A failed warm-up leaves streaming off rather than aborting the load.
+    }
+    g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Off);
+    llama_memory_clear(llama_get_memory(context), true);
+    g_state.streamer_captured = true;
+    __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+        "bram_stream: captured %zu expert tensors (%zu offsets resolved, %.1f GiB total) across %zu shards",
+        g_state.streamer->captured_count(), g_state.streamer->resolved_count(),
+        g_state.streamer->captured_bytes() / (1024.0 * 1024.0 * 1024.0), g_state.streamer->shard_count());
 }
 
 /** Drops the reusable chat context, so the next turn starts from an empty cache. */
@@ -733,6 +807,10 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.load_mode = mode.empty() ? "auto" : mode;
         params.vocab_only = false;
         params.check_tensors = false;
+        // Expert streaming rebinds the live expert tensors' ->data at slices read from the gguf,
+        // which only works if the weights keep their native gguf layout. Disable the repacking
+        // buffers so a streamable MoE stays byte-addressable; harmless for models that do not stream.
+        params.use_extra_bufts = false;
 
         // The generation threadpool. Today's behavior — llama.cpp's own pool, default affinity,
         // default polling — is kept unless the load request names a mask, a poll level, strict
@@ -795,6 +873,27 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         }
         g_state.chat_templates = common_chat_templates_init(g_state.model, "");
         if (!g_state.chat_templates) throw std::runtime_error("Could not initialize the GGUF chat template");
+
+        // If this is a streamable MoE architecture, stand up the expert streamer over the model's
+        // gguf shards. Failure (a dense model, an unknown arch, a shard that will not parse) is not
+        // an error: it just leaves streaming off and the model loads resident as before.
+        {
+            char arch[64] = {0};
+            llama_model_meta_val_str(g_state.model, "general.architecture", arch, sizeof(arch));
+            auto candidate = std::make_unique<bram::ExpertStreamer>();
+            std::string stream_error;
+            const std::vector<std::string> shards = derive_shard_paths(model_path);
+            if (candidate->init(shards, arch, &stream_error)) {
+                g_state.streamer = std::move(candidate);
+                g_state.streamer_captured = false;
+                __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+                    "bram_stream: expert streaming armed for arch=%s over %zu shard(s)", arch, shards.size());
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+                    "bram_stream: streaming off (%s)", stream_error.c_str());
+            }
+        }
+
         g_state.context_tokens = context_tokens;
         g_state.batch_tokens = batch_tokens;
         g_state.ubatch_tokens = ubatch_tokens;
@@ -920,13 +1019,15 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         }
 
         if (g_state.chat_context == nullptr) {
-            g_state.chat_context = create_context();
+            g_state.chat_context = create_context(0, /*attach_streamer=*/true);
             if (g_state.chat_pool != nullptr) {
                 // The tuned pool is attached here, not in create_context, so the contexts the
                 // harness builds for the CPU reference never carry it.
                 llama_attach_threadpool(g_state.chat_context, g_state.chat_pool, g_state.chat_pool_batch);
             }
             g_state.cached_tokens.clear();
+            // One-time warm-up so the streamer records the live expert tensors before real decoding.
+            capture_experts(g_state.chat_context);
         }
         llama_context * context = g_state.chat_context;
 

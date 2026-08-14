@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 
 namespace bram {
@@ -97,6 +98,92 @@ int64_t GgufOffsetMap::read_tensor(const TensorLoc & loc, void * dst) const {
         out += r;
     }
     return static_cast<int64_t>(loc.nbytes - remaining);
+}
+
+// ---- ExpertStreamer ----------------------------------------------------------------------------
+
+bool ExpertStreamer::init(const std::vector<std::string> & shard_paths, const std::string & arch,
+                          std::string * error) {
+    recipe_ = expert_recipe_for(arch);
+    if (recipe_ == nullptr) {
+        if (error != nullptr) *error = "architecture '" + arch + "' is not a streamable MoE";
+        return false;
+    }
+    if (!offsets_.load(shard_paths, error)) {
+        recipe_ = nullptr;
+        return false;
+    }
+    return true;
+}
+
+bool ExpertStreamer::match_expert(const char * name, int * il, int * suffix_idx) const {
+    if (recipe_ == nullptr || name == nullptr) return false;
+    // Expect "blk.<il>.<suffix>.weight".
+    if (std::strncmp(name, "blk.", 4) != 0) return false;
+    const char * p = name + 4;
+    char * end = nullptr;
+    const long parsed = std::strtol(p, &end, 10);
+    if (end == p || *end != '.') return false;
+    const char * rest = end + 1; // points at "<suffix>.weight"
+    for (size_t i = 0; i < recipe_->exp_suffixes.size(); ++i) {
+        const std::string & suffix = recipe_->exp_suffixes[i];
+        if (std::strncmp(rest, suffix.c_str(), suffix.size()) == 0 &&
+            std::strcmp(rest + suffix.size(), ".weight") == 0) {
+            if (il != nullptr) *il = static_cast<int>(parsed);
+            if (suffix_idx != nullptr) *suffix_idx = static_cast<int>(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ExpertStreamer::eval_callback(ggml_tensor * t, bool ask, void * user_data) {
+    auto * self = static_cast<ExpertStreamer *>(user_data);
+    if (self == nullptr) return false;
+    return self->on_eval(t, ask);
+}
+
+bool ExpertStreamer::on_eval(ggml_tensor * t, bool ask) {
+    if (mode_ == Mode::Off || t == nullptr) return false;
+
+    if (mode_ == Mode::Capture) {
+        // Every node is offered in the ask phase; scan its sources for routed-expert weight tensors
+        // and record the live ggml_tensor* plus its file location. Observing only — never isolate.
+        if (ask) {
+            for (int s = 0; s < GGML_MAX_SRC; ++s) {
+                ggml_tensor * src = t->src[s];
+                if (src == nullptr || src->name[0] == '\0') continue;
+                int il = -1;
+                int suffix_idx = -1;
+                if (!match_expert(src->name, &il, &suffix_idx)) continue;
+                if (captured_.find(src->name) != captured_.end()) continue;
+                Captured c;
+                c.tensor = src;
+                c.il = il;
+                c.suffix_idx = suffix_idx;
+                if (const TensorLoc * loc = offsets_.find(src->name)) c.loc = *loc;
+                captured_[src->name] = c;
+            }
+        }
+        return false;
+    }
+
+    // Mode::Stream is added in P2.
+    return false;
+}
+
+size_t ExpertStreamer::resolved_count() const {
+    size_t n = 0;
+    for (const auto & kv : captured_) {
+        if (kv.second.loc.shard >= 0 && kv.second.loc.nbytes > 0) ++n;
+    }
+    return n;
+}
+
+uint64_t ExpertStreamer::captured_bytes() const {
+    uint64_t total = 0;
+    for (const auto & kv : captured_) total += kv.second.loc.nbytes;
+    return total;
 }
 
 } // namespace bram
