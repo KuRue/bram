@@ -833,10 +833,16 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.load_mode = mode.empty() ? "auto" : mode;
         params.vocab_only = false;
         params.check_tensors = false;
-        // Expert streaming rebinds the live expert tensors' ->data at slices read from the gguf,
-        // which only works if the weights keep their native gguf layout. Disable the repacking
-        // buffers so a streamable MoE stays byte-addressable; harmless for models that do not stream.
-        params.use_extra_bufts = false;
+        // Expert streaming rebinds the live expert tensors' ->data at slices read from the gguf, so
+        // the weights must keep their native gguf layout — disable the repacking buffers ONLY when
+        // streaming is requested. Every other load keeps repacking (and the KleidiAI buffer type),
+        // which is a real CPU speedup on arm64, so this change never slows a non-streaming model.
+        char stream_prop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream", stream_prop);
+        const bool stream_requested = stream_prop[0] == '1';
+        if (stream_requested) {
+            params.use_extra_bufts = false;
+        }
 
         // The generation threadpool. Today's behavior — llama.cpp's own pool, default affinity,
         // default polling — is kept unless the load request names a mask, a poll level, strict
@@ -900,10 +906,10 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.chat_templates = common_chat_templates_init(g_state.model, "");
         if (!g_state.chat_templates) throw std::runtime_error("Could not initialize the GGUF chat template");
 
-        // If this is a streamable MoE architecture, stand up the expert streamer over the model's
-        // gguf shards. Failure (a dense model, an unknown arch, a shard that will not parse) is not
-        // an error: it just leaves streaming off and the model loads resident as before.
-        {
+        // Only when streaming is requested: stand up the expert streamer over the model's gguf
+        // shards. Skipping this entirely when off means no offset-map fds, no capture warm-up, and
+        // no behaviour change at all for the resident path — the feature is fully opt-in.
+        if (stream_requested) {
             char arch[64] = {0};
             llama_model_meta_val_str(g_state.model, "general.architecture", arch, sizeof(arch));
             auto candidate = std::make_unique<bram::ExpertStreamer>();
