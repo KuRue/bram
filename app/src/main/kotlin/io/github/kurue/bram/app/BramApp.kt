@@ -117,6 +117,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.Manifest
 import android.content.pm.PackageManager
@@ -1550,18 +1552,8 @@ private fun ProfileCard(
                             color = MaterialTheme.colorScheme.primary,
                             style = MaterialTheme.typography.labelMedium,
                         )
-                    } else {
-                        Text(
-                            "${backend.label} · ${formatTokens(profile.contextTokens)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
                     }
-                    Text(
-                        if (expanded) "▲" else "▼",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    ProfilePerformancePill(profile)
                 }
             }
 
@@ -1571,20 +1563,7 @@ private fun ProfileCard(
                 exit = shrinkVertically() + fadeOut(),
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (profile.measurements.isNotEmpty()) {
-                        WinningRun(profile.measurements, Modifier.fillMaxWidth())
-                    } else {
-                        profile.autoConfiguredNote.takeIf(String::isNotBlank)?.let { note ->
-                            Text(
-                                note,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    // The shape of the tuned configuration at a glance: which dimensions were
-                    // measured and what won, so the collapsed card reads like the batch pills do.
-                    TuningSummary(profile, Modifier.fillMaxWidth())
+                    ProfileSettingPills(profile, backend)
                     if (staleMeasurement) {
                         Text(
                             "These measurements were taken on a different device or build. " +
@@ -1592,54 +1571,6 @@ private fun ProfileCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
-                    }
-                    // What this file means for each processor, from the import's per-tensor quant
-                    // counts: how much of it a backend can actually compute. A file the NPU can't
-                    // fully take offers a conversion to one it can.
-                    if (model.tensorTypeCounts.isNotEmpty()) {
-                        val report = QuantCompatibility.report(model.tensorTypeCounts)
-                        SectionLabel("Compatibility")
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            CompatChip("CPU", 100, MaterialTheme.colorScheme.surfaceContainerHighest)
-                            CompatChip(
-                                "GPU",
-                                report.gpu.sharePercent,
-                                if (report.gpu.sharePercent >= 100) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHighest
-                                },
-                            )
-                            CompatChip(
-                                "NPU",
-                                report.npu.sharePercent,
-                                if (report.npu.sharePercent >= 100) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHighest
-                                },
-                            )
-                        }
-                        if (report.npu.sharePercent < 100) {
-                            Text(
-                                "The NPU can only run ${report.npu.sharePercent}% of this file's " +
-                                    "weight tensors; the rest would fall back to the CPU. " +
-                                    "Convert a copy to a type it can run fully:",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                TextButton(onClick = { onConvertQuant("q4_0") }, enabled = !busy && !converting) {
-                                    Text(if (converting) "Converting…" else "To Q4_0")
-                                }
-                                TextButton(onClick = { onConvertQuant("q8_0") }, enabled = !busy && !converting) {
-                                    Text("To Q8_0")
-                                }
-                            }
-                        }
                     }
                 HorizontalDivider()
 
@@ -1688,6 +1619,27 @@ private fun ProfileCard(
                     )
                 }
                 if (showAdvanced) {
+                    if (model.tensorTypeCounts.isNotEmpty()) {
+                        val report = QuantCompatibility.report(model.tensorTypeCounts)
+                        if (report.npu.sharePercent < 100) {
+                            SectionLabel("Quant conversion")
+                            Text(
+                                "The NPU can run ${report.npu.sharePercent}% of this file's weight " +
+                                    "tensors. Convert a separate copy for full NPU compatibility.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TextButton(onClick = { onConvertQuant("q4_0") }, enabled = !busy && !converting) {
+                                    Text(if (converting) "Converting…" else "To Q4_0")
+                                }
+                                TextButton(onClick = { onConvertQuant("q8_0") }, enabled = !busy && !converting) {
+                                    Text("To Q8_0")
+                                }
+                            }
+                        }
+                    }
+
                     SectionLabel("Backend")
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -1906,44 +1858,39 @@ private fun ProfileCard(
                             onTune = { onTuneDimension(TuningDimension.HEX_FLAGS) },
                         )
                     }
-                }
 
-                HorizontalDivider()
-
-                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    TextButton(onClick = { editingPrompt = !editingPrompt }) {
-                        Text(if (profile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
+                    HorizontalDivider()
+                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        TextButton(onClick = { editingPrompt = !editingPrompt }) {
+                            Text(if (profile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
+                        }
+                        TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
                     }
-                    // The only way left to get a second profile for one file, now that the
-                    // separate creation row is gone.
-                    TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
-                }
 
-                if (editingPrompt) {
-                    OutlinedTextField(
-                        value = draftPrompt,
-                        onValueChange = { draftPrompt = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 3,
-                        maxLines = 8,
-                        label = { Text("Instructions for this profile") },
-                    )
-                    Text(
-                        "Added to Bram's own instructions, not replacing them.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
+                    if (editingPrompt) {
+                        OutlinedTextField(
+                            value = draftPrompt,
+                            onValueChange = { draftPrompt = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 3,
+                            maxLines = 8,
+                            label = { Text("Instructions for this profile") },
+                        )
+                        Text(
+                            "Added to Bram's own instructions, not replacing them.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
                                 onUpdateProfile(profile.copy(systemPrompt = draftPrompt.trim()))
                                 editingPrompt = false
-                            },
-                        ) { Text("Save instructions") }
-                        TextButton(onClick = {
-                            draftPrompt = profile.systemPrompt
-                            editingPrompt = false
-                        }) { Text("Cancel") }
+                            }) { Text("Save instructions") }
+                            TextButton(onClick = {
+                                draftPrompt = profile.systemPrompt
+                                editingPrompt = false
+                            }) { Text("Cancel") }
+                        }
                     }
                 }
 
@@ -2061,26 +2008,6 @@ private fun SamplerControls(
     )
 }
 
-/** How much of a file one processor can compute: a chip with its share. */
-@Composable
-private fun CompatChip(label: String, sharePercent: Int, container: Color) {
-    Row(
-        Modifier
-            .clip(RoundedCornerShape(percent = 50))
-            .background(container)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Text(label, style = MaterialTheme.typography.labelMedium)
-        Text(
-            "$sharePercent%",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
 /** One measured run in a sweep: name on the left, tok/s on the right, winner marked. */
 @Composable
 private fun RunRow(
@@ -2116,54 +2043,43 @@ private fun RunRow(
 
 enum class RunState { WINNER, LOSER, MEASURING, WAITING, FAILED, REFERENCE }
 
-/** The winning backend's throughput in one line, for the profile card. */
+/** The chosen backend's measured prompt/decode throughput, compact enough for the card header. */
 @Composable
-private fun WinningRun(measurements: List<BackendMeasurement>, modifier: Modifier = Modifier) {
-    val winner = measurements
-        .filter { it.agrees && !it.isReference }
-        .maxByOrNull { it.promptTokPerSec }
-    if (winner == null) {
-        val reference = measurements.firstOrNull { it.isReference }
-        if (reference != null) {
-            RunRow(
-                label = "CPU",
-                value = "%.0f tok/s".format(reference.promptTokPerSec),
-                state = RunState.WINNER,
-                modifier = modifier,
-            )
-        }
-        return
-    }
-    RunRow(
-        label = winner.label,
-        value = "%.0f tok/s".format(winner.promptTokPerSec),
-        state = RunState.WINNER,
-        modifier = modifier,
+private fun ProfilePerformancePill(profile: ModelProfile) {
+    val chosenId = profile.backendId.ifBlank { "" }
+    val measurement = profile.measurements.firstOrNull { it.backendId == chosenId }
+        ?: profile.measurements.firstOrNull { it.isReference && chosenId.isBlank() }
+        ?: return
+    if (measurement.promptTokPerSec <= 0.0 || measurement.decodeTokPerSec <= 0.0) return
+    ProfilePill(
+        "${measurement.label} ${measurement.promptTokPerSec.toInt()}/${measurement.decodeTokPerSec.toInt()}",
+        emphasized = true,
     )
 }
 
 /**
  * Auto-configure while it runs.
  *
- * An overlay in the app tree rather than a Dialog window, because this takes minutes and replaces
- * every setting underneath it — a person needs to see that something is happening to it. Every
+ * A full-width dialog window, so it remains above the modal profile sheet that launches it. Every
  * measured run is one compact row — name and tok/s — with the winner marked, so the whole run
  * reads as a ledger of numbers rather than sentences or charts.
- *
- * It is drawn here rather than in its own window for the same reason the panels and drawer are: a
- * separate window has nothing of the app behind it to sample, so it can never be frosted. Inside
- * the tree it blurs the recorded backdrop like any other panel. Only Done dismisses it; tapping
- * anywhere else does nothing.
  */
 @Composable
-private fun BoxScope.AutoConfigureOverlay(
+private fun AutoConfigureOverlay(
     progress: AutoConfigureProgress,
     cooldownOverride: Boolean,
     onContinueAnyway: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Box(Modifier.matchParentSize().zIndex(10f)) {
-        Scrim(onDismiss = {})
+    Dialog(
+        onDismissRequest = { if (progress.finished) onDismiss() },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.52f)))
         GlassSurface(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -2316,6 +2232,7 @@ private fun BoxScope.AutoConfigureOverlay(
             }
         }
     }
+    }
 }
 
 /**
@@ -2359,19 +2276,51 @@ private fun TuningDimensionRow(
     }
 }
 
-/** The measured tuning configuration in one line, for the collapsed profile card. */
+/** One quiet profile-summary pill; accent is reserved for the winning performance result. */
 @Composable
-private fun TuningSummary(profile: ModelProfile, modifier: Modifier = Modifier) {
-    val bits = profile.tuning.mapNotNull { note ->
-        note.chosen.takeUnless { it == "Default" }?.let { "${note.dimension.label} $it" }
-    }
-    if (bits.isNotEmpty()) {
+private fun ProfilePill(label: String, emphasized: Boolean = false) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(
+                if (emphasized) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceContainerHighest,
+            )
+            .padding(horizontal = 9.dp, vertical = 4.dp),
+    ) {
         Text(
-            bits.joinToString(" · "),
+            label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = modifier,
+            color = if (emphasized) MaterialTheme.colorScheme.onPrimaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = if (emphasized) FontWeight.SemiBold else FontWeight.Normal,
         )
+    }
+}
+
+/** The effective settings, visible at a glance without reopening each advanced control. */
+@Composable
+private fun ProfileSettingPills(profile: ModelProfile, backend: RuntimeBackend) {
+    val batch = profile.batchTokens.takeIf { it > 0 } ?: 512
+    val ubatch = profile.ubatchTokens.takeIf { it > 0 } ?: 128
+    val settings = buildList {
+        add("$batch/$ubatch")
+        add(profile.loadMode.label)
+        add(profile.cpuMask.takeIf(String::isNotEmpty)?.let { "Mask 0x$it" } ?: "All cores")
+        add(profile.threads.takeIf { it > 0 }?.let { "$it threads" } ?: "Default threads")
+        add(formatTokens(profile.contextTokens))
+        add(profile.flashAttention.label)
+        add(profile.kvCacheType.label)
+        if (profile.poll >= 0) add("Poll ${profile.poll}")
+        if (profile.thinkingEnabled) add("Reasoning")
+        if (backend == RuntimeBackend.HEXAGON && !profile.hexFlags.isDefault) add("HMX")
+    }
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        settings.forEach { ProfilePill(it) }
     }
 }
 
