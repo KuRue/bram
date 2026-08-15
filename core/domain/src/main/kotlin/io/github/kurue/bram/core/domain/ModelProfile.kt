@@ -273,6 +273,8 @@ data class ModelProfile(
     val streamCacheMb: Int = 0,
     /** Pin the always-used weights in anon RAM so the OS cannot reclaim them mid-generation. */
     val streamDenseAnon: Boolean = false,
+    /** Overlap expert reads with compute: background reader lanes plus the per-expert kernel hook. */
+    val streamOverlap: Boolean = false,
     val sampler: SamplerSettings = SamplerSettings(),
     val systemPrompt: String = "",
     val createdAtEpochMillis: Long = System.currentTimeMillis(),

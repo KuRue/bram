@@ -15,9 +15,13 @@
 
 #include "ggml.h"
 
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <list>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -107,6 +111,13 @@ public:
     void set_dense_anon(bool on) { dense_anon_ = on; }
     uint64_t dense_bytes() const { return dense_bytes_; }
     size_t dense_count() const { return dense_.size(); }
+    // Overlap expert reads with expert compute: the topk callback enqueues a layer's experts to
+    // background reader lanes (non-blocking) and the kernel's per-expert hook blocks until each
+    // slice is resident. `lanes` reader threads; 0 lanes keeps the serial path. Needs the injected
+    // ggml_cpu_set_expert_ready_hook; falls back to serial (with a log) if the hook is absent.
+    void set_overlap(bool on, int lanes) { overlap_ = on; overlap_lanes_ = lanes > 0 ? lanes : 4; }
+    // The ggml-cpu expert-ready hook trampoline; registered while armed with overlap on.
+    static void expert_ready_trampoline(const ggml_tensor * as, int64_t expert, void * user_data);
 
     // Trampoline to install as llama_context_params.cb_eval, with `this` as cb_eval_user_data.
     static bool eval_callback(ggml_tensor * t, bool ask, void * user_data);
@@ -152,6 +163,7 @@ private:
         int64_t n_expert = 0;          // tensor->ne[2]
         uint64_t expert_stride = 0;    // tensor->nb[2]: one expert's byte span
         std::vector<uint8_t> resident; // 1 once expert e's slice has been read into the buffer
+        std::vector<uint8_t> in_flight; // 1 while a reader lane is loading expert e (overlap mode)
     };
 
     Mode mode_ = Mode::Off;
@@ -191,6 +203,30 @@ private:
     uint64_t bytes_read_ = 0;
     uint64_t slices_read_ = 0;
     uint64_t verify_mismatches_ = 0;    // resident-vs-streamed byte mismatches (should stay 0)
+
+    // --- Overlap: background reader lanes + the per-expert wait hook -----------------------------
+    // One coarse mutex guards resident/in_flight, the LRU cache, and the byte counters; the slow
+    // pread itself happens unlocked, so lanes read concurrently. read_cv_ signals waiters that an
+    // expert became resident; queue_cv_ wakes reader lanes when work arrives.
+    void start_readers();
+    void stop_readers();
+    void reader_loop();
+    // Enqueue expert `e` of `c` for a lane if not resident/in-flight (caller holds mu_).
+    void enqueue_locked(Captured * c, int e);
+    // Read expert e of c from flash into its buffer slot (no lock held), then mark resident.
+    void load_slice(Captured * c, int e);
+    void on_expert_ready(const ggml_tensor * as, int e);
+
+    bool overlap_ = false;
+    int overlap_lanes_ = 4;
+    bool overlap_active_ = false;             // true only when armed with a working hook
+    std::unordered_map<const ggml_tensor *, Captured *> by_tensor_;  // for the hook to find a Captured
+    std::mutex mu_;
+    std::condition_variable read_cv_;         // an expert became resident
+    std::condition_variable queue_cv_;        // work arrived / shutting down
+    std::deque<std::pair<Captured *, int>> read_queue_;
+    std::vector<std::thread> readers_;
+    bool readers_stop_ = false;
 };
 
 } // namespace bram

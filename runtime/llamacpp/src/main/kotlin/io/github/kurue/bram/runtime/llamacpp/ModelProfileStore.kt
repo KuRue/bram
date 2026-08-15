@@ -147,6 +147,7 @@ class ModelProfileStore(context: Context) {
         .put("streamExperts", streamExperts)
         .put("streamCacheMb", streamCacheMb)
         .put("streamDenseAnon", streamDenseAnon)
+        .put("streamOverlap", streamOverlap)
         .put("temperature", sampler.temperature.toDouble())
         .put("topP", sampler.topP.toDouble())
         .put("topK", sampler.topK)
@@ -239,6 +240,7 @@ class ModelProfileStore(context: Context) {
             streamExperts = optBoolean("streamExperts", false),
             streamCacheMb = optInt("streamCacheMb", 0).coerceAtLeast(0),
             streamDenseAnon = optBoolean("streamDenseAnon", false),
+            streamOverlap = optBoolean("streamOverlap", false),
             sampler = SamplerSettings(
                 temperature = optDouble("temperature", fallback.temperature.toDouble()).toFloat(),
                 topP = optDouble("topP", fallback.topP.toDouble()).toFloat(),
