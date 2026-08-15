@@ -1382,7 +1382,15 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
                << ",\"outputTokens\":" << output_count
                << ",\"promptMillis\":" << prompt_ms
                << ",\"decodeMillis\":" << decode_ms
-               << ",\"finishReason\":\"" << finish_reason << "\"}";
+               << ",\"finishReason\":\"" << finish_reason << "\"";
+        if (g_state.streamer && g_state.streamer->armed()) {
+            result << ",\"streaming\":true"
+                   << ",\"streamFlashMiB\":" << (g_state.streamer->bytes_read() / (1024 * 1024))
+                   << ",\"streamResidentMiB\":" << (g_state.streamer->resident_bytes() / (1024 * 1024))
+                   << ",\"streamEvictions\":" << g_state.streamer->evictions()
+                   << ",\"streamDenseMiB\":" << (g_state.streamer->dense_bytes() / (1024 * 1024));
+        }
+        result << "}";
         return result.str();
     });
 }

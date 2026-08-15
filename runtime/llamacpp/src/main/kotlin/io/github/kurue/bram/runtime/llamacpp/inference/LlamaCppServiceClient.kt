@@ -13,6 +13,7 @@ import io.github.kurue.bram.core.domain.KvCacheType
 import io.github.kurue.bram.core.domain.LoadMode
 import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.GenerationMetrics
+import io.github.kurue.bram.core.domain.StreamingMetrics
 import io.github.kurue.bram.core.domain.GenerationRequest
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ThreadPriority
@@ -290,6 +291,16 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                                 decodeMillis = event.optLong("decodeMillis"),
                                 processPssBytes = event.optLong("processPssBytes").takeIf { it > 0 },
                                 cachedPromptTokens = event.optInt("cachedPromptTokens").takeIf { it > 0 },
+                                streaming = if (event.optBoolean("streaming")) {
+                                    StreamingMetrics(
+                                        flashMiB = event.optLong("streamFlashMiB"),
+                                        residentMiB = event.optLong("streamResidentMiB"),
+                                        evictions = event.optLong("streamEvictions"),
+                                        denseMiB = event.optLong("streamDenseMiB"),
+                                    )
+                                } else {
+                                    null
+                                },
                             ),
                         ),
                     )
