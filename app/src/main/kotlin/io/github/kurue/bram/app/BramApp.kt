@@ -25,6 +25,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -516,11 +518,12 @@ private fun TopBubbleBar(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // The rate and the icon get fixed widths so the status between them stays
-                    // optically centred no matter how wide the number grows.
+                    // Both flanks take the same width — rate left-aligned, thermal right-aligned —
+                    // so the status between them is centred on the pill, not nudged sideways by
+                    // whichever flank happens to be wider.
                     Text(
                         modelRateLabel(state),
-                        modifier = Modifier.width(52.dp),
+                        modifier = Modifier.width(56.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -533,11 +536,13 @@ private fun TopBubbleBar(
                     val throttled = state.deviceProfile?.thermalStatus.orEmpty().let {
                         it.isNotBlank() && it != "none" && !it.startsWith("unknown")
                     }
-                    ThrottleIcon(
-                        tint = if (throttled) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                        modifier = Modifier.size(14.dp),
-                    )
+                    Box(Modifier.width(56.dp), contentAlignment = Alignment.CenterEnd) {
+                        ThrottleIcon(
+                            tint = if (throttled) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
                 }
             }
         }
@@ -636,21 +641,26 @@ private fun ShimmerStatusText(text: String, active: Boolean, modifier: Modifier 
     )
     Text(
         label,
-        modifier = modifier.drawWithContent {
-            drawContent()
-            val band = size.width * 0.45f
-            val start = -band + (size.width + 2f * band) * sweep
-            drawRect(
-                brush = Brush.linearGradient(
-                    0f to Color.Transparent,
-                    0.5f to Color.White.copy(alpha = 0.55f),
-                    1f to Color.Transparent,
-                    start = Offset(start, 0f),
-                    end = Offset(start + band, size.height),
-                ),
-                blendMode = BlendMode.SrcAtop,
-            )
-        },
+        // The offscreen layer is what confines the sweep to the glyphs: without it SrcAtop blends
+        // against everything already on the canvas beneath the text, and the band lights up a
+        // whole stripe of the pill instead of the letters.
+        modifier = modifier
+            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+            .drawWithContent {
+                drawContent()
+                val band = size.width * 0.45f
+                val start = -band + (size.width + 2f * band) * sweep
+                drawRect(
+                    brush = Brush.linearGradient(
+                        0f to Color.Transparent,
+                        0.5f to Color.White.copy(alpha = 0.55f),
+                        1f to Color.Transparent,
+                        start = Offset(start, 0f),
+                        end = Offset(start + band, size.height),
+                    ),
+                    blendMode = BlendMode.SrcAtop,
+                )
+            },
         style = MaterialTheme.typography.labelSmall,
         color = color,
         textAlign = TextAlign.Center,
