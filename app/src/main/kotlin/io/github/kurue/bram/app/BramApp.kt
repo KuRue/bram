@@ -22,6 +22,9 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -513,27 +516,26 @@ private fun TopBubbleBar(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // The rate and the icon get fixed widths so the status between them stays
+                    // optically centred no matter how wide the number grows.
                     Text(
                         modelRateLabel(state),
+                        modifier = Modifier.width(52.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                     )
-                    Text(
-                        modelProcessLabel(state),
+                    ShimmerStatusText(
+                        text = modelProcessLabel(state),
+                        active = modelProcessActive(state),
                         modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                     )
                     val throttled = state.deviceProfile?.thermalStatus.orEmpty().let {
                         it.isNotBlank() && it != "none" && !it.startsWith("unknown")
                     }
                     ThrottleIcon(
                         tint = if (throttled) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
                         modifier = Modifier.size(14.dp),
                     )
                 }
@@ -574,7 +576,7 @@ private fun ContextMeter(state: AppUiState) {
 private fun modelRateLabel(state: AppUiState): String {
     val rate = if (state.isGenerating) state.liveDecodeTokensPerSecond
     else state.lastMetrics?.decodeTokensPerSecond
-    return rate?.let { String.format(Locale.US, "%.1f tok/s", it) } ?: "— tok/s"
+    return rate?.let { String.format(Locale.US, "%.1f", it) } ?: "tok/s"
 }
 
 private fun modelProcessLabel(state: AppUiState): String = when {
@@ -585,10 +587,76 @@ private fun modelProcessLabel(state: AppUiState): String = when {
     state.modelPhase == ModelPhase.PREPARING -> "System prompt"
     state.modelPhase == ModelPhase.THINKING -> "Thinking"
     state.modelPhase == ModelPhase.CALLING_TOOL -> "Using tool"
-    state.modelPhase == ModelPhase.GENERATING -> "Generating"
+    state.modelPhase == ModelPhase.GENERATING -> "Writing"
     state.selectedLocalModelIsLoaded || state.selectedLiteRtIsLoaded || state.selectedEndpoint != null -> "Ready"
     state.profiles.isEmpty() && state.endpoints.isEmpty() -> "Add profile"
     else -> "Idle"
+}
+
+/** Whether the status names work in progress, which is when it shimmers and gains dots. */
+private fun modelProcessActive(state: AppUiState): Boolean = when {
+    state.isLoadingModel || state.isLoadingLiteRt -> true
+    state.isImporting -> true
+    state.autoConfigure != null -> true
+    state.convertingProfileId != null -> true
+    state.modelPhase == ModelPhase.PREPARING -> true
+    state.modelPhase == ModelPhase.THINKING -> true
+    state.modelPhase == ModelPhase.CALLING_TOOL -> true
+    state.modelPhase == ModelPhase.GENERATING -> true
+    else -> false
+}
+
+/**
+ * The centred status line. While work is in flight the label carries three trailing dots and a
+ * light band sweeps across the glyphs, so "Thinking..." visibly lives even when the model has
+ * gone quiet between tokens. SrcATop keeps the sweep on the text and never the background.
+ */
+@Composable
+private fun ShimmerStatusText(text: String, active: Boolean, modifier: Modifier = Modifier) {
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    val label = if (active) "$text..." else text
+    if (!active) {
+        Text(
+            label,
+            modifier = modifier,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        return
+    }
+    val transition = rememberInfiniteTransition(label = "status-shimmer")
+    val sweep by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1_400, easing = LinearEasing)),
+        label = "status-sweep",
+    )
+    Text(
+        label,
+        modifier = modifier.drawWithContent {
+            drawContent()
+            val band = size.width * 0.45f
+            val start = -band + (size.width + 2f * band) * sweep
+            drawRect(
+                brush = Brush.linearGradient(
+                    0f to Color.Transparent,
+                    0.5f to Color.White.copy(alpha = 0.55f),
+                    1f to Color.Transparent,
+                    start = Offset(start, 0f),
+                    end = Offset(start + band, size.height),
+                ),
+                blendMode = BlendMode.SrcAtop,
+            )
+        },
+        style = MaterialTheme.typography.labelSmall,
+        color = color,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 /** Conversations, plus a way into the model and provider panels. */
@@ -904,6 +972,22 @@ private fun ChatComposer(
             .navigationBarsPadding()
             .padding(horizontal = 12.dp),
     ) {
+        // What is waiting: the queue exists because the in-flight turn owns the transcript, so
+        // the chip is the only on-screen trace of a message until its turn starts.
+        if (state.queuedMessages.isNotEmpty()) {
+            Text(
+                if (state.queuedMessages.size == 1) {
+                    "Queued: ${state.queuedMessages.first().take(60)}"
+                } else {
+                    "${state.queuedMessages.size} messages queued"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 1.dp),
+            )
+        }
         GlassSurface(
             modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
             shape = RoundedCornerShape(percent = 50),
@@ -919,7 +1003,7 @@ private fun ChatComposer(
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                     if (input.isEmpty()) {
                         Text(
-                            "Message Bram",
+                            if (state.isGenerating) "Queue a message" else "Message Bram",
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -928,7 +1012,6 @@ private fun ChatComposer(
                         value = input,
                         onValueChange = { input = it },
                         modifier = Modifier.fillMaxWidth().testTag("composer-field"),
-                        enabled = !state.isGenerating,
                         maxLines = 5,
                         textStyle = MaterialTheme.typography.bodyLarge.copy(
                             color = MaterialTheme.colorScheme.onSurface,
@@ -937,8 +1020,10 @@ private fun ChatComposer(
                     )
                 }
                 Spacer(Modifier.width(6.dp))
+                // While a turn runs the button stays a send (queue) as long as there is text to
+                // send; clearing the field brings back Stop, so both actions stay one tap away.
                 SendButton(
-                    generating = state.isGenerating,
+                    generating = state.isGenerating && input.isBlank(),
                     enabled = input.isNotBlank() && !state.routingPool.isEmpty,
                     onSend = {
                         onSend(input)
