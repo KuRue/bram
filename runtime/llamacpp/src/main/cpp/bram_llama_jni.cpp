@@ -661,6 +661,28 @@ std::string apply_chat_template(
     if (!g_state.chat_templates) {
         throw std::runtime_error("This GGUF does not contain a usable chat template");
     }
+
+    // Debug: bypass the model's Jinja chat template and build a minimal DeepSeek-style prompt from
+    // the last user message. Lets a model whose baked-in template renders thousands of tokens (e.g.
+    // DeepSeek-V4-Flash → ~2600 tokens for a one-line question) be coherence-tested cheaply. Not for
+    // production; the formatting is approximate. Enable with:  adb shell setprop debug.bram.raw_prompt 1
+    {
+        char rawprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.raw_prompt", rawprop);
+        if (rawprop[0] == '1') {
+            std::string last_user;
+            for (size_t i = 0; i < roles.size(); ++i) {
+                if (roles[i] == "user") last_user = contents[i];
+            }
+            std::string raw = "<｜User｜>" + last_user + "<｜Assistant｜>";
+            g_state.last_chat_params = common_chat_params{};
+            g_state.last_chat_params.prompt = raw;
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "chat template: DEBUG raw_prompt — bypassing Jinja (%zu bytes)", raw.size());
+            return raw;
+        }
+    }
+
     common_chat_templates_inputs inputs;
     inputs.messages.reserve(roles.size());
     for (size_t index = 0; index < roles.size(); ++index) {
