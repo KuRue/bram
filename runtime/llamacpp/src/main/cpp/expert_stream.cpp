@@ -163,14 +163,29 @@ bool ExpertStreamer::on_eval(ggml_tensor * t, bool ask) {
                 if (src == nullptr || src->name[0] == '\0') continue;
                 int il = -1;
                 int suffix_idx = -1;
-                if (!match_expert(src->name, &il, &suffix_idx)) continue;
-                if (captured_.find(src->name) != captured_.end()) continue;
-                Captured c;
-                c.tensor = src;
-                c.il = il;
-                c.suffix_idx = suffix_idx;
-                if (const TensorLoc * loc = offsets_.find(src->name)) c.loc = *loc;
-                captured_[src->name] = c;
+                if (match_expert(src->name, &il, &suffix_idx)) {
+                    if (captured_.find(src->name) != captured_.end()) continue;
+                    Captured c;
+                    c.tensor = src;
+                    c.il = il;
+                    c.suffix_idx = suffix_idx;
+                    if (const TensorLoc * loc = offsets_.find(src->name)) c.loc = *loc;
+                    captured_[src->name] = c;
+                    continue;
+                }
+                // A contiguous leaf weight that resolves in the gguf but is not a routed expert is
+                // an always-used (dense) weight — record it (with its file location) for anon
+                // pinning. Inputs and computed tensors carry no gguf name, so the offset-map lookup
+                // filters them out; views/non-contiguous are skipped so a file read maps 1:1.
+                if (src->op != GGML_OP_NONE || src->view_src != nullptr) continue;
+                if (!ggml_is_contiguous(src)) continue;
+                if (dense_.find(src->name) != dense_.end()) continue;
+                const TensorLoc * loc = offsets_.find(src->name);
+                if (loc == nullptr) continue;
+                Dense d;
+                d.tensor = src;
+                d.loc = *loc;
+                dense_[src->name] = d;
             }
         }
         return false;
@@ -339,6 +354,36 @@ bool ExpertStreamer::arm_stream(std::string * error) {
         std::sort(kv.second.begin(), kv.second.end(),
                   [](const Captured * a, const Captured * b) { return a->suffix_idx < b->suffix_idx; });
     }
+
+    // Dense-anon: give each always-used weight an anonymous copy the OS will not reclaim, filled by
+    // reading the gguf bytes for that tensor (never by dereferencing its mmap ->data, which is not
+    // always safe to memcpy). The tensor's ->data is then repointed at the copy. Best effort: a
+    // tensor whose size no longer matches the file, or that will not allocate, is left on its mmap.
+    if (dense_anon_) {
+        dense_bytes_ = 0;
+        size_t pinned = 0;
+        for (auto & d_kv : dense_) {
+            Dense & d = d_kv.second;
+            if (d.tensor == nullptr || d.tensor->data == nullptr || d.loc.nbytes == 0) continue;
+            if (d.loc.nbytes != ggml_nbytes(d.tensor)) continue; // layout changed since capture
+            void * buf = mmap(nullptr, d.loc.nbytes, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (buf == MAP_FAILED) continue;
+            if (offsets_.read_tensor(d.loc, buf) != static_cast<int64_t>(d.loc.nbytes)) {
+                munmap(buf, d.loc.nbytes);
+                continue;
+            }
+            d.buffer = buf;
+            d.orig_data = d.tensor->data;
+            d.tensor->data = buf;
+            dense_bytes_ += d.loc.nbytes;
+            ++pinned;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_stream: dense-anon pinned %zu/%zu weights (%.1f MiB) in RAM",
+            pinned, dense_.size(), dense_bytes_ / (1024.0 * 1024.0));
+    }
+
     armed_ = true;
     return true;
 }
@@ -361,11 +406,21 @@ void ExpertStreamer::disarm_stream() {
             c.resident.clear();
         }
     }
+    for (auto & kv : dense_) {
+        Dense & d = kv.second;
+        if (d.buffer != nullptr) {
+            if (d.tensor != nullptr && d.orig_data != nullptr) d.tensor->data = d.orig_data;
+            munmap(d.buffer, d.loc.nbytes);
+            d.buffer = nullptr;
+            d.orig_data = nullptr;
+        }
+    }
     by_layer_.clear();
     captured_by_id_.clear();
     lru_.clear();
     lru_pos_.clear();
     resident_bytes_ = 0;
+    dense_bytes_ = 0;
     armed_ = false;
 }
 
