@@ -102,6 +102,11 @@ public:
     void set_cache_budget(uint64_t bytes) { cache_budget_ = bytes; }
     uint64_t resident_bytes() const { return resident_bytes_; }
     uint64_t evictions() const { return evictions_; }
+    // Pin the always-used (non-expert) weights in anonymous memory at arm time so the OS cannot
+    // reclaim them mid-generation the way it drops file-backed mmap pages under pressure.
+    void set_dense_anon(bool on) { dense_anon_ = on; }
+    uint64_t dense_bytes() const { return dense_bytes_; }
+    size_t dense_count() const { return dense_.size(); }
 
     // Trampoline to install as llama_context_params.cb_eval, with `this` as cb_eval_user_data.
     static bool eval_callback(ggml_tensor * t, bool ask, void * user_data);
@@ -152,9 +157,22 @@ private:
     Mode mode_ = Mode::Off;
     bool armed_ = false;
     bool verify_ = false;
+    bool dense_anon_ = false;
     const ExpertRecipe * recipe_ = nullptr;
     GgufOffsetMap offsets_;
     std::unordered_map<std::string, Captured> captured_;
+
+    // A non-expert model weight, pinned in anonymous memory (filled by pread from the gguf, never
+    // by reading the tensor's mmap ->data). loc gives its file bytes; buffer replaces ->data.
+    struct Dense {
+        ggml_tensor * tensor = nullptr;
+        TensorLoc loc;
+        void * buffer = nullptr;
+        void * orig_data = nullptr;
+    };
+    std::unordered_map<std::string, Dense> dense_;
+    uint64_t dense_bytes_ = 0;
+
     // Expert tensors grouped by block, in recipe-suffix order, for quick lookup from a topk node.
     std::unordered_map<int, std::vector<Captured *>> by_layer_;
     std::vector<Captured *> captured_by_id_;   // id -> Captured, for LRU key decode

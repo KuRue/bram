@@ -408,6 +408,10 @@ void capture_experts(llama_context * context) {
         __system_property_get("debug.bram.stream.cache_mb", cprop);
         const long cache_mb = cprop[0] != '\0' ? strtol(cprop, nullptr, 10) : 0;
         if (cache_mb > 0) g_state.streamer->set_cache_budget(static_cast<uint64_t>(cache_mb) * 1024 * 1024);
+        // Pin the always-used weights in anon RAM so they survive memory pressure mid-generation.
+        char dprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream.dense_anon", dprop);
+        g_state.streamer->set_dense_anon(dprop[0] == '1');
         std::string arm_error;
         if (g_state.streamer->arm_stream(&arm_error)) {
             g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Stream);
