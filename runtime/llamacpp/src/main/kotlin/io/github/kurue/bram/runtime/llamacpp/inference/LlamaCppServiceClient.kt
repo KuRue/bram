@@ -138,6 +138,10 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         streamCacheMb: Int = 0,
         /** Pin the always-used weights in anon RAM so they survive memory pressure. */
         streamDenseAnon: Boolean = false,
+        /** Overlap expert reads with compute via background reader lanes + the kernel wait hook. */
+        streamOverlap: Boolean = false,
+        /** Reader-lane count for overlap; 0 lets the native side pick its default. */
+        streamOverlapLanes: Int = 0,
     ): JSONObject = withContext(Dispatchers.IO) {
         // Normalized before it reaches the service so the load identity compares concrete numbers:
         // "default" must mean the same thing on every request, or every call would force a reload.
@@ -174,6 +178,8 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("streamExperts", streamExperts)
             .put("streamCacheMb", streamCacheMb)
             .put("streamDenseAnon", streamDenseAnon)
+            .put("streamOverlap", streamOverlap)
+            .put("streamOverlapLanes", streamOverlapLanes)
         val result = JSONObject(requireService().load(request.toString()))
         if (result.optBoolean("restartRequired")) {
             android.util.Log.d("BramTune", "restartRequired: restarting the inference process")

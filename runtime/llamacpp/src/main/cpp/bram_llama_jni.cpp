@@ -81,6 +81,8 @@ struct runtime_state {
     bool stream_experts = false;
     int stream_cache_mb = 0;
     bool stream_dense_anon = false;
+    bool stream_overlap = false;
+    int stream_overlap_lanes = 0;
 };
 
 // A second, independent model + context for text embeddings, kept resident so memory recall can
@@ -408,6 +410,7 @@ void capture_experts(llama_context * context) {
             g_state.streamer->set_cache_budget(static_cast<uint64_t>(g_state.stream_cache_mb) * 1024 * 1024);
         }
         g_state.streamer->set_dense_anon(g_state.stream_dense_anon);
+        g_state.streamer->set_overlap(g_state.stream_overlap, g_state.stream_overlap_lanes);
         std::string arm_error;
         if (g_state.streamer->arm_stream(&arm_error)) {
             g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Stream);
@@ -744,7 +747,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     jstring flash_attention, jstring kv_cache, jstring cpu_mask, jboolean cpu_strict, jint poll,
     jstring thread_priority, jstring load_mode, jboolean hex_use_hmx, jboolean hex_disable_nhvx,
     jboolean hex_host_buf, jint hex_op_batch, jint hex_ndev,
-    jboolean stream_experts, jint stream_cache_mb, jboolean stream_dense_anon) {
+    jboolean stream_experts, jint stream_cache_mb, jboolean stream_dense_anon,
+    jboolean stream_overlap, jint stream_overlap_lanes) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         // The Hexagon backend reads its environment once, at backend registration, so it has to
@@ -846,6 +850,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.stream_experts = stream_experts == JNI_TRUE;
         g_state.stream_cache_mb = stream_cache_mb;
         g_state.stream_dense_anon = stream_dense_anon == JNI_TRUE;
+        g_state.stream_overlap = stream_overlap == JNI_TRUE;
+        g_state.stream_overlap_lanes = stream_overlap_lanes;
         const bool stream_requested = g_state.stream_experts;
         if (stream_requested) {
             params.use_extra_bufts = false;

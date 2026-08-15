@@ -33,6 +33,8 @@ data class LoadIdentity(
     val streamExperts: Boolean,
     val streamCacheMb: Int,
     val streamDenseAnon: Boolean,
+    val streamOverlap: Boolean,
+    val streamOverlapLanes: Int,
 ) {
     /** A stable string for the flag combination, so environment comparisons are exact. */
     val hexKey: String
@@ -75,6 +77,8 @@ data class LoadIdentity(
                 streamExperts = request.optBoolean("streamExperts", false),
                 streamCacheMb = request.optInt("streamCacheMb", 0).coerceAtLeast(0),
                 streamDenseAnon = request.optBoolean("streamDenseAnon", false),
+                streamOverlap = request.optBoolean("streamOverlap", false),
+                streamOverlapLanes = request.optInt("streamOverlapLanes", 0).coerceIn(0, 16),
             )
         }
     }

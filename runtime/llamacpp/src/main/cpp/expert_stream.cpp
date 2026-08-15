@@ -1,6 +1,7 @@
 #include "expert_stream.h"
 
 #include "ggml-backend.h"
+#include "ggml-cpu.h"
 #include "gguf.h"
 
 #include <android/log.h>
@@ -224,6 +225,31 @@ void ExpertStreamer::stream_layer(int il, const ggml_tensor * topk) {
     ggml_backend_tensor_get(topk, id_scratch_.data(), 0, static_cast<size_t>(n_ids) * sizeof(int32_t));
     const int32_t * ids = id_scratch_.data();
 
+    // Overlap path: hand this layer's routed experts to the background reader lanes and return.
+    // The per-expert kernel hook blocks each compute thread until its slice is resident, so the
+    // reads run concurrently with the previous layers' compute instead of serially before it.
+    // Eviction runs here (a layer boundary, where no expert is mid-compute) rather than in the
+    // reader lanes, so a slice is never dropped while a matmul is reading it. See docs/overlap.
+    if (overlap_active_) {
+        std::lock_guard<std::mutex> lk(mu_);
+        evict_to_budget();
+        for (Captured * c : it->second) {
+            if (c == nullptr || c->buffer == nullptr) continue;
+            for (int64_t k = 0; k < n_ids; ++k) {
+                const int32_t e = ids[k];
+                if (e < 0 || e >= c->n_expert) continue;
+                if (c->resident[e]) {
+                    const uint64_t key = (static_cast<uint64_t>(c->id) << 24) | static_cast<uint32_t>(e);
+                    const auto pit = lru_pos_.find(key);
+                    if (pit != lru_pos_.end()) lru_.splice(lru_.begin(), lru_, pit->second);
+                    continue;
+                }
+                enqueue_locked(c, static_cast<int>(e));
+            }
+        }
+        return;
+    }
+
     const uint64_t slices_before = slices_read_;
     for (Captured * c : it->second) {
         if (c == nullptr || c->buffer == nullptr) continue;
@@ -284,15 +310,25 @@ void ExpertStreamer::stream_layer(int il, const ggml_tensor * topk) {
 void ExpertStreamer::evict_to_budget() {
     if (cache_budget_ == 0) return; // unbounded: keep every streamed expert
     static const uint64_t page = static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
-    while (resident_bytes_ > cache_budget_ && !lru_.empty()) {
+    size_t scanned = 0;
+    const size_t lru_size = lru_.size();
+    while (resident_bytes_ > cache_budget_ && !lru_.empty() && scanned < lru_size) {
         const uint64_t key = lru_.back();
         lru_.pop_back();
-        lru_pos_.erase(key);
         const int cid = static_cast<int>(key >> 24);
         const int e = static_cast<int>(key & 0xFFFFFF);
-        if (cid < 0 || cid >= static_cast<int>(captured_by_id_.size())) continue;
+        if (cid < 0 || cid >= static_cast<int>(captured_by_id_.size())) { lru_pos_.erase(key); continue; }
         Captured * c = captured_by_id_[cid];
-        if (c == nullptr || e < 0 || e >= c->n_expert || !c->resident[e]) continue;
+        if (c == nullptr || e < 0 || e >= c->n_expert || !c->resident[e]) { lru_pos_.erase(key); continue; }
+        // A slice a reader lane is still filling must not be dropped: keep it in the LRU (at the MRU
+        // end so it is reconsidered later) and look further down for an evictable one.
+        if (!c->in_flight.empty() && c->in_flight[e]) {
+            lru_.push_front(key);
+            lru_pos_[key] = lru_.begin();
+            ++scanned;
+            continue;
+        }
+        lru_pos_.erase(key);
 
         // Drop only whole pages fully inside this expert's slice, so an edge page shared with a
         // neighbouring expert is never released (madvise(DONTNEED) zero-fills anonymous pages).
@@ -307,6 +343,111 @@ void ExpertStreamer::evict_to_budget() {
         resident_bytes_ -= c->expert_stride;
         ++evictions_;
     }
+}
+
+// ---- Overlap: background reader lanes + the per-expert wait hook -------------------------------
+
+void ExpertStreamer::expert_ready_trampoline(const ggml_tensor * as, int64_t expert, void * user_data) {
+    auto * self = static_cast<ExpertStreamer *>(user_data);
+    if (self != nullptr) self->on_expert_ready(as, static_cast<int>(expert));
+}
+
+// Read expert e's slice from flash into its buffer slot, then mark it resident and wake waiters.
+// Runs with no lock held (the pread is the slow part); only the bookkeeping takes the mutex.
+void ExpertStreamer::load_slice(Captured * c, int e) {
+    if (c == nullptr || e < 0 || e >= c->n_expert) return;
+    const TensorLoc slice{c->loc.shard, c->loc.file_offset + static_cast<uint64_t>(e) * c->expert_stride,
+                          c->expert_stride};
+    void * dst = static_cast<uint8_t *>(c->buffer) + static_cast<uint64_t>(e) * c->expert_stride;
+    const bool ok = offsets_.read_tensor(slice, dst) == static_cast<int64_t>(c->expert_stride);
+    uint64_t mism = 0;
+    if (ok && verify_ && c->orig_data != nullptr) {
+        const void * ref = static_cast<const uint8_t *>(c->orig_data) + static_cast<uint64_t>(e) * c->expert_stride;
+        if (memcmp(dst, ref, c->expert_stride) != 0) mism = 1;
+    }
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        c->in_flight[e] = 0;
+        if (ok && !c->resident[e]) {
+            c->resident[e] = 1;
+            bytes_read_ += c->expert_stride;
+            ++slices_read_;
+            resident_bytes_ += c->expert_stride;
+            verify_mismatches_ += mism;
+            const uint64_t key = (static_cast<uint64_t>(c->id) << 24) | static_cast<uint32_t>(e);
+            lru_.push_front(key);
+            lru_pos_[key] = lru_.begin();
+        }
+    }
+    read_cv_.notify_all();
+}
+
+void ExpertStreamer::enqueue_locked(Captured * c, int e) {
+    if (c == nullptr || e < 0 || e >= c->n_expert) return;
+    if (c->resident[e] || c->in_flight[e]) return;
+    c->in_flight[e] = 1;
+    read_queue_.emplace_back(c, e);
+    queue_cv_.notify_one();
+}
+
+void ExpertStreamer::reader_loop() {
+    for (;;) {
+        std::pair<Captured *, int> job;
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            queue_cv_.wait(lk, [&] { return readers_stop_ || !read_queue_.empty(); });
+            if (readers_stop_ && read_queue_.empty()) return;
+            job = read_queue_.front();
+            read_queue_.pop_front();
+        }
+        load_slice(job.first, job.second);
+    }
+}
+
+void ExpertStreamer::start_readers() {
+    readers_stop_ = false;
+    for (int i = 0; i < overlap_lanes_; ++i) {
+        readers_.emplace_back([this] { reader_loop(); });
+    }
+}
+
+void ExpertStreamer::stop_readers() {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        readers_stop_ = true;
+    }
+    queue_cv_.notify_all();
+    for (auto & t : readers_) {
+        if (t.joinable()) t.join();
+    }
+    readers_.clear();
+    read_queue_.clear();
+}
+
+// Called by every compute thread for each routed expert, just before the kernel reads its weight
+// slice. Block until the slice is resident; if it was evicted or never enqueued, read it here.
+void ExpertStreamer::on_expert_ready(const ggml_tensor * as, int e) {
+    const auto it = by_tensor_.find(as);
+    if (it == by_tensor_.end()) return; // not a streamed expert tensor
+    Captured * c = it->second;
+    if (c == nullptr || e < 0 || e >= c->n_expert) return;
+
+    std::unique_lock<std::mutex> lk(mu_);
+    if (c->resident[e]) {
+        const uint64_t key = (static_cast<uint64_t>(c->id) << 24) | static_cast<uint32_t>(e);
+        const auto pit = lru_pos_.find(key);
+        if (pit != lru_pos_.end()) lru_.splice(lru_.begin(), lru_, pit->second);
+        return;
+    }
+    if (c->in_flight[e]) {
+        read_cv_.wait(lk, [&] { return c->resident[e]; });
+        return;
+    }
+    // Not resident and no lane is loading it (evicted, or the enqueue was missed): load it now so a
+    // compute thread never reads an empty slot. Marked in-flight so a second waiter blocks instead.
+    c->in_flight[e] = 1;
+    lk.unlock();
+    load_slice(c, e);
 }
 
 bool ExpertStreamer::arm_stream(std::string * error) {
@@ -344,10 +485,12 @@ bool ExpertStreamer::arm_stream(std::string * error) {
         c.buffer = buf;
         c.orig_data = c.tensor->data;
         c.resident.assign(static_cast<size_t>(c.n_expert), 0);
+        c.in_flight.assign(static_cast<size_t>(c.n_expert), 0);
         c.tensor->data = buf;
         c.id = static_cast<int>(captured_by_id_.size());
         captured_by_id_.push_back(&c);
         by_layer_[c.il].push_back(&c);
+        by_tensor_[c.tensor] = &c;
     }
     // Keep each layer's tensors in a stable order (gate, up, down) for readable telemetry.
     for (auto & kv : by_layer_) {
@@ -384,6 +527,23 @@ bool ExpertStreamer::arm_stream(std::string * error) {
             pinned, dense_.size(), dense_bytes_ / (1024.0 * 1024.0));
     }
 
+    // Overlap: register the per-expert kernel hook and spin up the reader lanes. Requires the
+    // injected ggml_cpu_set_expert_ready_hook; without it, stay on the validated serial path.
+    overlap_active_ = false;
+    if (overlap_) {
+#ifdef BMOE_HAVE_EXPERT_READY_HOOK
+        readers_stop_ = false;
+        start_readers();
+        ggml_cpu_set_expert_ready_hook(&ExpertStreamer::expert_ready_trampoline, this);
+        overlap_active_ = true;
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_stream: overlap on, %d reader lanes", overlap_lanes_);
+#else
+        __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+            "bram_stream: overlap requested but expert-ready hook unavailable; serial reads");
+#endif
+    }
+
     armed_ = true;
     return true;
 }
@@ -396,6 +556,15 @@ void ExpertStreamer::disarm_stream() {
             (unsigned long long) (resident_bytes_ / (1024 * 1024)), (unsigned long long) evictions_,
             (unsigned long long) verify_mismatches_);
     }
+    // Stop the reader lanes and pull the kernel hook before any buffer is unmapped, so no lane or
+    // compute thread can touch a Captured while it is being torn down.
+    if (overlap_active_) {
+#ifdef BMOE_HAVE_EXPERT_READY_HOOK
+        ggml_cpu_set_expert_ready_hook(nullptr, nullptr);
+#endif
+        stop_readers();
+        overlap_active_ = false;
+    }
     for (auto & kv : captured_) {
         Captured & c = kv.second;
         if (c.buffer != nullptr) {
@@ -404,8 +573,10 @@ void ExpertStreamer::disarm_stream() {
             c.buffer = nullptr;
             c.orig_data = nullptr;
             c.resident.clear();
+            c.in_flight.clear();
         }
     }
+    by_tensor_.clear();
     for (auto & kv : dense_) {
         Dense & d = kv.second;
         if (d.buffer != nullptr) {

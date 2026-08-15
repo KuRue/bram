@@ -1869,6 +1869,20 @@ private fun ProfileCard(
                                     enabled = !busy,
                                 )
                             }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                SectionLabel("Overlap reads with compute", Modifier.weight(1f))
+                                Checkbox(
+                                    checked = profile.streamOverlap,
+                                    onCheckedChange = { onUpdateProfile(profile.copy(streamOverlap = it)) },
+                                    enabled = !busy,
+                                )
+                            }
+                            Text(
+                                "Prefetches each layer's routed experts on background threads while " +
+                                    "the previous layers compute, instead of reading them one at a time.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
 

@@ -2002,6 +2002,7 @@ class MainViewModel(
                 streamExperts = profile.streamExperts,
                 streamCacheMb = profile.streamCacheMb,
                 streamDenseAnon = profile.streamDenseAnon,
+                streamOverlap = profile.streamOverlap,
             )
         }
         outcome.onSuccess { result ->
