@@ -73,13 +73,13 @@ fun NewChatIcon(tint: Color, modifier: Modifier = Modifier) {
     }
 }
 
-/** Three descending lanes: dim when unrestricted, accented when Android reports heat pressure. */
+/** Three ascending lanes: dim when unrestricted, accented when Android reports heat pressure. */
 @Composable
 fun ThrottleIcon(tint: Color, modifier: Modifier = Modifier) {
     Canvas(modifier) {
         val stroke = size.minDimension * 0.13f
         val xs = listOf(0.24f, 0.50f, 0.76f)
-        val tops = listOf(0.22f, 0.36f, 0.50f)
+        val tops = listOf(0.50f, 0.36f, 0.22f)
         xs.zip(tops).forEach { (x, top) ->
             drawLine(
                 color = tint,

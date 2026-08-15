@@ -400,6 +400,12 @@ data class AppUiState(
     val liteRtLoadDetail: String? = null,
     val messages: List<ConversationMessage> = emptyList(),
     val isGenerating: Boolean = false,
+    /**
+     * Messages the user sent while a turn was already running. They are held here — not in
+     * [messages], which the in-flight turn overwrites as it settles — and each one starts a
+     * fresh turn as soon as the previous reply finishes.
+     */
+    val queuedMessages: List<String> = emptyList(),
     /** Current model phase, shared by the in-app instrument and foreground notification. */
     val modelPhase: ModelPhase = ModelPhase.IDLE,
     /** Rolling decode rate while a reply is streaming; final runtime metrics replace it. */
@@ -3667,7 +3673,8 @@ class MainViewModel(
 
     fun stopGeneration() {
         if (!mutableState.value.isGenerating) return
-        mutableState.update { it.copy(status = "Stopping…") }
+        // Stopping is an intent to halt, so anything waiting in the queue goes with it.
+        mutableState.update { it.copy(queuedMessages = emptyList(), status = "Stopping…") }
         generationJob?.cancel(CancellationException("Stopped by user"))
     }
 
@@ -3729,6 +3736,12 @@ class MainViewModel(
     fun send(text: String) {
         val prompt = text.trim()
         if (prompt.isEmpty()) return
+        // A turn in flight holds the transcript: appending now would be wiped when it settles.
+        // The message queues here instead and starts its own turn the moment the reply lands.
+        if (mutableState.value.isGenerating) {
+            mutableState.update { it.copy(queuedMessages = it.queuedMessages + prompt) }
+            return
+        }
         val priorMessages = mutableState.value.messages
         runTurn(priorMessages + ConversationMessage(role = MessageRole.USER, content = prompt))
     }
@@ -3784,6 +3797,16 @@ class MainViewModel(
         // the ViewModel is cleared. AgentTaskService keeps the process alive for the duration.
         generationJob = container.appScope.launch {
             container.turnMutex.withLock { runTurnInProgress(requestMessages, snapshot) }
+            // Anything the user sent mid-turn now runs, one message per turn, newest transcript
+            // first. runTurn refuses while a turn is live, and the previous finally has already
+            // cleared isGenerating, so the first queued message simply starts the next turn.
+            val queued = mutableState.value.queuedMessages
+            if (queued.isNotEmpty()) {
+                val next = queued.first()
+                mutableState.update { it.copy(queuedMessages = queued.drop(1)) }
+                val messages = mutableState.value.messages
+                runTurn(messages + ConversationMessage(role = MessageRole.USER, content = next))
+            }
         }
     }
 
@@ -3912,9 +3935,14 @@ class MainViewModel(
                     when (event) {
                         is AgentEvent.Status -> {
                             mutableState.update { it.copy(status = event.text) }
-                            val preparing = event.text.contains("context", ignoreCase = true) ||
-                                event.text.contains("prompt", ignoreCase = true) ||
-                                event.text.contains("prepar", ignoreCase = true)
+                            // Preparation labels only before the first token: a status event that
+                            // mentions "prompt" or "context" mid-turn (memory recall, a tool
+                            // retry) must not flip an already-writing turn back to "System prompt".
+                            val preparing = assistantText.isEmpty() && (
+                                event.text.contains("context", ignoreCase = true) ||
+                                    event.text.contains("prompt", ignoreCase = true) ||
+                                    event.text.contains("prepar", ignoreCase = true)
+                                )
                             pushModelStatus(if (preparing) ModelPhase.PREPARING else ModelPhase.GENERATING)
                         }
                         is AgentEvent.Reasoning -> reasoningFormat = event.format
@@ -3932,7 +3960,15 @@ class MainViewModel(
                         }
                         is AgentEvent.TextDelta -> {
                             val rateNow = android.os.SystemClock.elapsedRealtime()
-                            if (decodeStartedAt == 0L) decodeStartedAt = rateNow
+                            if (decodeStartedAt == 0L) {
+                                decodeStartedAt = rateNow
+                                // The first token is writing, whatever the last status event
+                                // said: a late "…prompt…" status used to strand the phase here
+                                // while the reply streamed under a "System prompt" label.
+                                if (mutableState.value.modelPhase == ModelPhase.PREPARING) {
+                                    pushModelStatus(ModelPhase.GENERATING)
+                                }
+                            }
                             // Local runtimes emit one delta per decoded token. Remote providers
                             // generally do the same, making this a useful live estimate until their
                             // authoritative metrics arrive at the end of the turn.
