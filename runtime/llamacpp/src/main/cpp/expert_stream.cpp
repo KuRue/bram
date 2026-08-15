@@ -353,6 +353,31 @@ void ExpertStreamer::expert_ready_trampoline(const ggml_tensor * as, int64_t exp
     if (self != nullptr) self->on_expert_ready(as, static_cast<int>(expert));
 }
 
+void ExpertStreamer::expert_batch_trampoline(const ggml_tensor * as, const int64_t * counts, int64_t n_as,
+                                             void * user_data) {
+    auto * self = static_cast<ExpertStreamer *>(user_data);
+    if (self != nullptr) self->on_expert_batch(as, counts, n_as);
+}
+
+// Fires once per MoE matmul (ith==0) before the compute loop. Enqueue every routed expert of this
+// tensor AND its gate/up/down siblings (same layer, same expert indices) to the reader lanes, so
+// the reads run concurrently with the expert compute instead of blocking it one slice at a time.
+void ExpertStreamer::on_expert_batch(const ggml_tensor * as, const int64_t * counts, int64_t n_as) {
+    if (readers_.empty() || counts == nullptr) return; // no reader lanes: on_expert_ready reads sync
+    const auto it = by_tensor_.find(as);
+    if (it == by_tensor_.end() || it->second == nullptr) return;
+    const int il = it->second->il;
+    const auto lit = by_layer_.find(il);
+    if (lit == by_layer_.end()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    for (int64_t e = 0; e < n_as; ++e) {
+        if (counts[e] <= 0) continue;
+        for (Captured * cs : lit->second) {
+            if (cs != nullptr && cs->buffer != nullptr) enqueue_locked(cs, static_cast<int>(e));
+        }
+    }
+}
+
 // Read expert e's slice from flash into its buffer slot, then mark it resident and wake waiters.
 // Runs with no lock held (the pread is the slow part); only the bookkeeping takes the mutex.
 void ExpertStreamer::load_slice(Captured * c, int e) {
@@ -543,8 +568,19 @@ bool ExpertStreamer::arm_stream(std::string * error) {
 #ifdef BMOE_HAVE_EXPERT_READY_HOOK
     ggml_cpu_set_expert_ready_hook(&ExpertStreamer::expert_ready_trampoline, this);
     hook_active_ = true;
+    // Batch prefetch: spin up reader lanes and register the per-matmul hook so a layer's experts are
+    // loaded concurrently with compute. Falls back to the per-expert synchronous read if the batch
+    // hook is unavailable. Reader lanes are I/O-bound (pread), so they mostly wait on flash, not CPU.
+#ifdef BMOE_HAVE_EXPERT_BATCH_HOOK
+    readers_stop_ = false;
+    start_readers();
+    ggml_cpu_set_expert_batch_hook(&ExpertStreamer::expert_batch_trampoline, this);
     __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-        "bram_stream: hook-driven streaming armed (no graph split)");
+        "bram_stream: hook-driven streaming armed (prefetch, %d reader lanes)", overlap_lanes_);
+#else
+    __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+        "bram_stream: hook-driven streaming armed (synchronous, no prefetch)");
+#endif
 #else
     if (error != nullptr) *error = "expert-ready hook unavailable; cannot stream without corruption";
     disarm_stream();
@@ -577,6 +613,9 @@ void ExpertStreamer::disarm_stream() {
     // Pull the kernel hook (and stop any reader lanes) before any buffer is unmapped, so no compute
     // thread can touch a Captured while it is being torn down.
     if (hook_active_) {
+#ifdef BMOE_HAVE_EXPERT_BATCH_HOOK
+        ggml_cpu_set_expert_batch_hook(nullptr, nullptr);
+#endif
 #ifdef BMOE_HAVE_EXPERT_READY_HOOK
         ggml_cpu_set_expert_ready_hook(nullptr, nullptr);
 #endif

@@ -118,6 +118,10 @@ public:
     void set_overlap(bool on, int lanes) { overlap_ = on; overlap_lanes_ = lanes > 0 ? lanes : 4; }
     // The ggml-cpu expert-ready hook trampoline; registered while armed with overlap on.
     static void expert_ready_trampoline(const ggml_tensor * as, int64_t expert, void * user_data);
+    // The batch-prefetch trampoline: fires once per MoE matmul with the routed-row counts, so the
+    // whole layer's experts can be enqueued to reader lanes before the compute loop.
+    static void expert_batch_trampoline(const ggml_tensor * as, const int64_t * counts, int64_t n_as,
+                                        void * user_data);
 
     // Trampoline to install as llama_context_params.cb_eval, with `this` as cb_eval_user_data.
     static bool eval_callback(ggml_tensor * t, bool ask, void * user_data);
@@ -220,6 +224,9 @@ private:
     // Read expert e of c from flash into its buffer slot (no lock held), then mark resident.
     void load_slice(Captured * c, int e);
     void on_expert_ready(const ggml_tensor * as, int e);
+    // Prefetch: enqueue every routed expert (counts[e] > 0) of tensor `as` AND its gate/up/down
+    // layer siblings (they share expert indices) to the reader lanes, before the compute loop.
+    void on_expert_batch(const ggml_tensor * as, const int64_t * counts, int64_t n_as);
 
     bool overlap_ = false;
     int overlap_lanes_ = 4;
