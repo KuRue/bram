@@ -2729,6 +2729,14 @@ private fun SessionScreen(
                                 "${formatTokens(metrics.promptTokens)} in · ${formatTokens(metrics.outputTokens)} out" +
                                     metrics.decodeTokensPerSecond?.let { " · ${formatRate(it)}" }.orEmpty(),
                             )
+                            metrics.streaming?.let { s ->
+                                StatRow(
+                                    "Streaming",
+                                    "${s.flashMiB} MiB read · ${s.residentMiB} MiB cached" +
+                                        (if (s.evictions > 0) " · ${s.evictions} evicted" else "") +
+                                        (if (s.denseMiB > 0) " · ${s.denseMiB} MiB pinned" else ""),
+                                )
+                            }
                         }
                     }
                 }

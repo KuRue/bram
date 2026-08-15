@@ -78,6 +78,8 @@ data class GenerationMetrics(
     val processPssBytes: Long? = null,
     /** Prompt tokens covered by the KV cache kept from the previous turn; null when unknown. */
     val cachedPromptTokens: Int? = null,
+    /** Expert-streaming telemetry, non-null only when the run streamed experts from flash. */
+    val streaming: StreamingMetrics? = null,
 ) {
     val promptTokensPerSecond: Double?
         get() = promptMillis.takeIf { it > 0 }?.let { promptTokens * 1_000.0 / it }
@@ -85,6 +87,14 @@ data class GenerationMetrics(
     val decodeTokensPerSecond: Double?
         get() = decodeMillis.takeIf { it > 0 }?.let { outputTokens * 1_000.0 / it }
 }
+
+/** What an expert-streamed run read and held, cumulative for the loaded model. */
+data class StreamingMetrics(
+    val flashMiB: Long,
+    val residentMiB: Long,
+    val evictions: Long,
+    val denseMiB: Long,
+)
 
 sealed interface GenerationEvent {
     data class Started(
