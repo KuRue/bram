@@ -229,6 +229,59 @@ else()
     message(WARNING "Bram: ggml-cpu source not found; expert-ready hook not injected")
 endif()
 
+# BMOE batch prefetch hook: fires once per MoE matmul (ith==0), after the per-expert routed-row
+# counts are computed and before the compute loop, so a streamer can enqueue a whole layer's
+# experts to background readers and overlap flash reads with compute. Same idempotent,
+# zero-cost-when-null pattern as the per-expert ready hook above.
+if(EXISTS "${_bmoe_cpu_h}" AND EXISTS "${_bmoe_cpu_c}")
+    file(READ "${_bmoe_cpu_h}" _bmoe_h2)
+    if(NOT _bmoe_h2 MATCHES "ggml_cpu_set_expert_batch_hook")
+        string(REPLACE
+            [==[    GGML_BACKEND_API void ggml_cpu_init(void);]==]
+            [==[    // BMOE batch prefetch hook: called once per MoE matmul with the per-expert routed-row
+    // counts, so a streamer can prefetch this layer's experts before the compute loop.
+    typedef void (*ggml_expert_batch_hook_t)(const struct ggml_tensor * as, const int64_t * counts, int64_t n_as, void * user_data);
+    GGML_BACKEND_API void ggml_cpu_set_expert_batch_hook(ggml_expert_batch_hook_t hook, void * user_data);
+
+    GGML_BACKEND_API void ggml_cpu_init(void);]==]
+            _bmoe_h2 "${_bmoe_h2}")
+        file(WRITE "${_bmoe_cpu_h}" "${_bmoe_h2}")
+    endif()
+    file(READ "${_bmoe_cpu_c}" _bmoe_c2)
+    if(NOT _bmoe_c2 MATCHES "g_bmoe_expert_batch_hook")
+        string(REPLACE
+            [==[static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {]==]
+            [==[// BMOE batch prefetch hook (declared in ggml-cpu.h).
+void (*g_bmoe_expert_batch_hook)(const struct ggml_tensor *, const int64_t *, int64_t, void *) = NULL;
+void * g_bmoe_expert_batch_hook_ud = NULL;
+void ggml_cpu_set_expert_batch_hook(void (*hook)(const struct ggml_tensor *, const int64_t *, int64_t, void *), void * user_data) {
+    g_bmoe_expert_batch_hook = hook;
+    g_bmoe_expert_batch_hook_ud = user_data;
+}
+
+static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {]==]
+            _bmoe_c2 "${_bmoe_c2}")
+        string(REPLACE
+            [==[    ggml_barrier(params->threadpool);
+
+    for (int cur_a = 0; cur_a < n_as; ++cur_a) {
+        const int64_t cne1 = matrix_row_counts[cur_a];]==]
+            [==[    ggml_barrier(params->threadpool);
+
+    // BMOE: hand the full routing to the streamer once, before the compute loop, so it can prefetch
+    // this layer's experts on background readers (overlap the reads with expert compute).
+    if (g_bmoe_expert_batch_hook && ith == 0) {
+        g_bmoe_expert_batch_hook(src0, matrix_row_counts, n_as, g_bmoe_expert_batch_hook_ud);
+    }
+
+    for (int cur_a = 0; cur_a < n_as; ++cur_a) {
+        const int64_t cne1 = matrix_row_counts[cur_a];]==]
+            _bmoe_c2 "${_bmoe_c2}")
+        file(WRITE "${_bmoe_cpu_c}" "${_bmoe_c2}")
+    endif()
+    message(STATUS "Bram: expert batch-prefetch hook present in ggml-cpu")
+endif()
+
 # ggml-vulkan.cpp includes <spirv/unified1/spirv.hpp>. In a Vulkan SDK that header sits under the
 # same include root as vulkan/, but with vendored headers it lives in the separate SPIRV-Headers
 # tree, and ggml-vulkan does not link the SPIRV-Headers target for its own compile. Add the include
@@ -298,7 +351,7 @@ endif()
 add_library(bram_llama SHARED bram_llama_jni.cpp expert_stream.cpp)
 target_compile_features(bram_llama PRIVATE cxx_std_17)
 # The expert-ready hook was injected into ggml-cpu above, so the streamer's overlap path may use it.
-target_compile_definitions(bram_llama PRIVATE BMOE_HAVE_EXPERT_READY_HOOK)
+target_compile_definitions(bram_llama PRIVATE BMOE_HAVE_EXPERT_READY_HOOK BMOE_HAVE_EXPERT_BATCH_HOOK)
 target_compile_options(bram_llama PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(bram_llama PRIVATE llama-common llama android log)
 
