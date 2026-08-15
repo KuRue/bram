@@ -223,7 +223,8 @@ private:
 
     bool overlap_ = false;
     int overlap_lanes_ = 4;
-    bool overlap_active_ = false;             // true only when armed with a working hook
+    bool overlap_active_ = false;             // (legacy) reader-lane prefetch; unused in hook-driven path
+    bool hook_active_ = false;                // true while the ggml_cpu expert-ready hook is registered
     std::unordered_map<const ggml_tensor *, Captured *> by_tensor_;  // for the hook to find a Captured
     std::mutex mu_;
     std::condition_variable read_cv_;         // an expert became resident

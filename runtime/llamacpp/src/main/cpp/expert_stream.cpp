@@ -192,12 +192,13 @@ bool ExpertStreamer::on_eval(ggml_tensor * t, bool ask) {
         return false;
     }
 
-    // Stream: isolate each layer's routing node so its selected expert ids are materialized, then
-    // read exactly those experts from flash into the tensor buffers before the expert matmuls run.
-    const int il = parse_topk_layer(t->name);
-    if (il < 0) return false;         // not a routing node: compute normally, no callback
-    if (ask) return true;             // request isolation so the ids are ready in the non-ask call
-    stream_layer(il, t);              // non-ask: ids are computed; stream the experts they need
+    // Stream: nothing happens in the graph callback. Reads are driven entirely by the per-expert
+    // kernel hook (on_expert_ready), which fires inside ggml_compute_forward_mul_mat_id for exactly
+    // the routed experts, right before their weights are read. We must NEVER return true / isolate a
+    // node here: forcing a graph split at ffn_moe_topk corrupts the forward pass on some archs
+    // (confirmed on deepseek2 — garbage output even with byte-correct experts). Observe-only.
+    (void) ask;
+    (void) t;
     return false;
 }
 
@@ -377,6 +378,12 @@ void ExpertStreamer::load_slice(Captured * c, int e) {
             const uint64_t key = (static_cast<uint64_t>(c->id) << 24) | static_cast<uint32_t>(e);
             lru_.push_front(key);
             lru_pos_[key] = lru_.begin();
+            // Keep resident memory under budget. Safe during compute: the just-loaded and other
+            // current-working-set experts sit at the MRU front and are evicted last, so as long as
+            // the budget exceeds one layer's routed experts, eviction only drops already-computed
+            // slices from earlier layers (never one a thread is mid-matmul on). in_flight slices are
+            // skipped inside evict_to_budget.
+            evict_to_budget();
         }
     }
     read_cv_.notify_all();
@@ -527,22 +534,22 @@ bool ExpertStreamer::arm_stream(std::string * error) {
             pinned, dense_.size(), dense_bytes_ / (1024.0 * 1024.0));
     }
 
-    // Overlap: register the per-expert kernel hook and spin up the reader lanes. Requires the
-    // injected ggml_cpu_set_expert_ready_hook; without it, stay on the validated serial path.
-    overlap_active_ = false;
-    if (overlap_) {
+    // Register the per-expert kernel hook — the ONLY streaming trigger now. It fires inside
+    // ggml_compute_forward_mul_mat_id for each routed expert, just before its weights are read, and
+    // on_expert_ready loads the slice from flash if it is not already resident. This replaces the
+    // old cb_eval topk-node isolation, which split the graph at ffn_moe_topk and corrupted the pass
+    // on deepseek2. Without the hook there is no correct way to stream, so refuse to arm.
+    hook_active_ = false;
 #ifdef BMOE_HAVE_EXPERT_READY_HOOK
-        readers_stop_ = false;
-        start_readers();
-        ggml_cpu_set_expert_ready_hook(&ExpertStreamer::expert_ready_trampoline, this);
-        overlap_active_ = true;
-        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-            "bram_stream: overlap on, %d reader lanes", overlap_lanes_);
+    ggml_cpu_set_expert_ready_hook(&ExpertStreamer::expert_ready_trampoline, this);
+    hook_active_ = true;
+    __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+        "bram_stream: hook-driven streaming armed (no graph split)");
 #else
-        __android_log_print(ANDROID_LOG_WARN, "BramLlama",
-            "bram_stream: overlap requested but expert-ready hook unavailable; serial reads");
+    if (error != nullptr) *error = "expert-ready hook unavailable; cannot stream without corruption";
+    disarm_stream();
+    return false;
 #endif
-    }
 
     armed_ = true;
     return true;
@@ -567,14 +574,14 @@ void ExpertStreamer::disarm_stream() {
             (unsigned long long) (resident_bytes_ / (1024 * 1024)), (unsigned long long) evictions_,
             (unsigned long long) verify_mismatches_);
     }
-    // Stop the reader lanes and pull the kernel hook before any buffer is unmapped, so no lane or
-    // compute thread can touch a Captured while it is being torn down.
-    if (overlap_active_) {
+    // Pull the kernel hook (and stop any reader lanes) before any buffer is unmapped, so no compute
+    // thread can touch a Captured while it is being torn down.
+    if (hook_active_) {
 #ifdef BMOE_HAVE_EXPERT_READY_HOOK
         ggml_cpu_set_expert_ready_hook(nullptr, nullptr);
 #endif
         stop_readers();
-        overlap_active_ = false;
+        hook_active_ = false;
     }
     for (auto & kv : captured_) {
         Captured & c = kv.second;
