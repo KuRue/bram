@@ -133,6 +133,7 @@ import io.github.kurue.bram.core.domain.AgentActivity
 import org.json.JSONObject
 import io.github.kurue.bram.core.domain.Automation
 import io.github.kurue.bram.core.domain.isHybridArchitecture
+import io.github.kurue.bram.core.domain.isStreamableMoeArchitecture
 import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
@@ -1826,6 +1827,50 @@ private fun ProfileCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+
+                    // Expert streaming — only for MoE architectures whose routed experts can be
+                    // read from flash. This is what lets a model several times larger than RAM run.
+                    if (isStreamableMoeArchitecture(model.architecture)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            SectionLabel("Stream experts", Modifier.weight(1f))
+                            Checkbox(
+                                checked = profile.streamExperts,
+                                onCheckedChange = { onUpdateProfile(profile.copy(streamExperts = it)) },
+                                enabled = !busy,
+                            )
+                        }
+                        Text(
+                            "Read each token's experts from flash instead of loading the whole " +
+                                "model. Runs a MoE larger than RAM, losslessly, at a cost in speed.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (profile.streamExperts) {
+                            SectionLabel("Expert cache")
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                listOf(0 to "Unbounded", 1024 to "1 GiB", 2048 to "2 GiB", 4096 to "4 GiB")
+                                    .forEach { (mb, label) ->
+                                        FilterChip(
+                                            selected = profile.streamCacheMb == mb,
+                                            onClick = { onUpdateProfile(profile.copy(streamCacheMb = mb)) },
+                                            enabled = !busy,
+                                            label = { Text(label) },
+                                        )
+                                    }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                SectionLabel("Pin dense weights in RAM", Modifier.weight(1f))
+                                Checkbox(
+                                    checked = profile.streamDenseAnon,
+                                    onCheckedChange = { onUpdateProfile(profile.copy(streamDenseAnon = it)) },
+                                    enabled = !busy,
+                                )
+                            }
+                        }
+                    }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         SectionLabel("Reasoning", Modifier.weight(1f))

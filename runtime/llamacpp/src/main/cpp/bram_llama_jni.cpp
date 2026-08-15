@@ -77,6 +77,10 @@ struct runtime_state {
     // the live expert tensors so later phases can stream their weights from flash on demand.
     std::unique_ptr<bram::ExpertStreamer> streamer;
     bool streamer_captured = false;
+    // Expert-streaming settings from the load request (a real profile setting, not a debug flag).
+    bool stream_experts = false;
+    int stream_cache_mb = 0;
+    bool stream_dense_anon = false;
 };
 
 // A second, independent model + context for text embeddings, kept resident so memory recall can
@@ -393,25 +397,17 @@ void capture_experts(llama_context * context) {
         g_state.streamer->captured_bytes() / (1024.0 * 1024.0 * 1024.0), g_state.streamer->shard_count());
 
     // Arm the actual streaming only when explicitly enabled (P2 is validated by comparing streamed
-    // vs resident output, so the toggle has to be flippable without changing the build):
-    //   adb shell setprop debug.bram.stream 1   # stream experts from flash
-    //   adb shell setprop debug.bram.stream 0   # resident mmap baseline (default)
-    // P4 replaces this debug property with a real profile setting.
-    char prop[PROP_VALUE_MAX] = {0};
-    __system_property_get("debug.bram.stream", prop);
-    if (prop[0] == '1') {
+    // vs resident output. The settings come from the load request (a real profile setting); only
+    // the byte-for-byte self-check stays a dev-only property since it pages the resident weights:
+    //   adb shell setprop debug.bram.stream.verify 1
+    if (g_state.stream_experts) {
         char vprop[PROP_VALUE_MAX] = {0};
         __system_property_get("debug.bram.stream.verify", vprop);
         g_state.streamer->set_verify(vprop[0] == '1');
-        // Resident expert-cache budget in MiB (0 or unset = unbounded). P4 makes this a real setting.
-        char cprop[PROP_VALUE_MAX] = {0};
-        __system_property_get("debug.bram.stream.cache_mb", cprop);
-        const long cache_mb = cprop[0] != '\0' ? strtol(cprop, nullptr, 10) : 0;
-        if (cache_mb > 0) g_state.streamer->set_cache_budget(static_cast<uint64_t>(cache_mb) * 1024 * 1024);
-        // Pin the always-used weights in anon RAM so they survive memory pressure mid-generation.
-        char dprop[PROP_VALUE_MAX] = {0};
-        __system_property_get("debug.bram.stream.dense_anon", dprop);
-        g_state.streamer->set_dense_anon(dprop[0] == '1');
+        if (g_state.stream_cache_mb > 0) {
+            g_state.streamer->set_cache_budget(static_cast<uint64_t>(g_state.stream_cache_mb) * 1024 * 1024);
+        }
+        g_state.streamer->set_dense_anon(g_state.stream_dense_anon);
         std::string arm_error;
         if (g_state.streamer->arm_stream(&arm_error)) {
             g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Stream);
@@ -747,7 +743,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     jint threads, jint gpu_layers, jstring device_filter, jboolean enable_thinking,
     jstring flash_attention, jstring kv_cache, jstring cpu_mask, jboolean cpu_strict, jint poll,
     jstring thread_priority, jstring load_mode, jboolean hex_use_hmx, jboolean hex_disable_nhvx,
-    jboolean hex_host_buf, jint hex_op_batch, jint hex_ndev) {
+    jboolean hex_host_buf, jint hex_op_batch, jint hex_ndev,
+    jboolean stream_experts, jint stream_cache_mb, jboolean stream_dense_anon) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         // The Hexagon backend reads its environment once, at backend registration, so it has to
@@ -846,9 +843,10 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         // the weights must keep their native gguf layout — disable the repacking buffers ONLY when
         // streaming is requested. Every other load keeps repacking (and the KleidiAI buffer type),
         // which is a real CPU speedup on arm64, so this change never slows a non-streaming model.
-        char stream_prop[PROP_VALUE_MAX] = {0};
-        __system_property_get("debug.bram.stream", stream_prop);
-        const bool stream_requested = stream_prop[0] == '1';
+        g_state.stream_experts = stream_experts == JNI_TRUE;
+        g_state.stream_cache_mb = stream_cache_mb;
+        g_state.stream_dense_anon = stream_dense_anon == JNI_TRUE;
+        const bool stream_requested = g_state.stream_experts;
         if (stream_requested) {
             params.use_extra_bufts = false;
         }
@@ -1710,7 +1708,18 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_state(
         std::ostringstream result;
         result << "{\"loaded\":" << (g_state.model != nullptr ? "true" : "false")
                << ",\"contextTokens\":" << g_state.context_tokens
-               << ",\"threads\":" << g_state.threads << "}";
+               << ",\"threads\":" << g_state.threads;
+        // Expert-streaming telemetry so the UI can show what a >>RAM run is actually doing.
+        const bool streaming = g_state.streamer && g_state.streamer->armed();
+        result << ",\"streaming\":" << (streaming ? "true" : "false");
+        if (streaming) {
+            result << ",\"streamFlashMiB\":" << (g_state.streamer->bytes_read() / (1024 * 1024))
+                   << ",\"streamSlices\":" << g_state.streamer->slices_read()
+                   << ",\"streamResidentMiB\":" << (g_state.streamer->resident_bytes() / (1024 * 1024))
+                   << ",\"streamEvictions\":" << g_state.streamer->evictions()
+                   << ",\"streamDenseMiB\":" << (g_state.streamer->dense_bytes() / (1024 * 1024));
+        }
+        result << "}";
         return result.str();
     });
 }

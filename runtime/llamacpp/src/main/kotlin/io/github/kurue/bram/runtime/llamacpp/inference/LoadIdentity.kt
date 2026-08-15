@@ -30,6 +30,9 @@ data class LoadIdentity(
     val hexHostBuf: Boolean,
     val hexOpBatch: Int,
     val hexNDev: Int,
+    val streamExperts: Boolean,
+    val streamCacheMb: Int,
+    val streamDenseAnon: Boolean,
 ) {
     /** A stable string for the flag combination, so environment comparisons are exact. */
     val hexKey: String
@@ -69,6 +72,9 @@ data class LoadIdentity(
                 hexHostBuf = request.optBoolean("hexHostBuf", false),
                 hexOpBatch = request.optInt("hexOpBatch", 0).coerceIn(0, 0xF),
                 hexNDev = request.optInt("hexNDev", 0).coerceIn(0, 8),
+                streamExperts = request.optBoolean("streamExperts", false),
+                streamCacheMb = request.optInt("streamCacheMb", 0).coerceAtLeast(0),
+                streamDenseAnon = request.optBoolean("streamDenseAnon", false),
             )
         }
     }

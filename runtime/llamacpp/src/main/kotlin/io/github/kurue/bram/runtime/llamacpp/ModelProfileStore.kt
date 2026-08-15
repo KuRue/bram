@@ -144,6 +144,9 @@ class ModelProfileStore(context: Context) {
         .put("hexHostBuf", hexFlags.hostBuf)
         .put("hexOpBatch", hexFlags.opBatch)
         .put("hexNDev", hexFlags.nDev)
+        .put("streamExperts", streamExperts)
+        .put("streamCacheMb", streamCacheMb)
+        .put("streamDenseAnon", streamDenseAnon)
         .put("temperature", sampler.temperature.toDouble())
         .put("topP", sampler.topP.toDouble())
         .put("topK", sampler.topK)
@@ -233,6 +236,9 @@ class ModelProfileStore(context: Context) {
                 opBatch = optInt("hexOpBatch", 0).coerceIn(0, 0xF),
                 nDev = optInt("hexNDev", 0).coerceIn(0, 8),
             ).sanitized(),
+            streamExperts = optBoolean("streamExperts", false),
+            streamCacheMb = optInt("streamCacheMb", 0).coerceAtLeast(0),
+            streamDenseAnon = optBoolean("streamDenseAnon", false),
             sampler = SamplerSettings(
                 temperature = optDouble("temperature", fallback.temperature.toDouble()).toFloat(),
                 topP = optDouble("topP", fallback.topP.toDouble()).toFloat(),
