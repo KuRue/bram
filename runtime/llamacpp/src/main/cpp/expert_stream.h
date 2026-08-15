@@ -128,6 +128,10 @@ public:
     bool arm_stream(std::string * error);
     // Restore every expert tensor's original ->data and release the buffers. Safe if not armed.
     void disarm_stream();
+    // Debug isolation: after arming, fill EVERY expert's anon buffer from its mmap ->data (memcpy)
+    // and mark it resident, so the experts are anon-backed with correct bytes but static — no
+    // per-token streaming and no cb_eval graph splits. Separates "rebind to anon" from "streaming".
+    void fill_all_from_mmap();
 
     size_t captured_count() const { return captured_.size(); }
     // Captured tensors whose byte location resolved in the offset map (should equal captured_count()).

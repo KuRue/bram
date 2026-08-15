@@ -548,6 +548,17 @@ bool ExpertStreamer::arm_stream(std::string * error) {
     return true;
 }
 
+void ExpertStreamer::fill_all_from_mmap() {
+    for (auto & kv : captured_) {
+        Captured & c = kv.second;
+        if (c.buffer == nullptr || c.orig_data == nullptr) continue;
+        memcpy(c.buffer, c.orig_data, c.buffer_size);
+        std::fill(c.resident.begin(), c.resident.end(), static_cast<uint8_t>(1));
+    }
+    __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+        "bram_stream: DEBUG static_anon — all experts memcpy'd from mmap into anon buffers, mode Off");
+}
+
 void ExpertStreamer::disarm_stream() {
     if (armed_) {
         __android_log_print(ANDROID_LOG_WARN, "BramLlama",
