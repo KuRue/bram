@@ -131,6 +131,12 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         threadPriority: ThreadPriority = ThreadPriority.NORMAL,
         loadMode: LoadMode = LoadMode.AUTO,
         hexFlags: HexFlags = HexFlags(),
+        /** Stream MoE experts from flash instead of loading them resident (for models past RAM). */
+        streamExperts: Boolean = false,
+        /** Resident expert-cache budget in MiB, or 0 for unbounded. */
+        streamCacheMb: Int = 0,
+        /** Pin the always-used weights in anon RAM so they survive memory pressure. */
+        streamDenseAnon: Boolean = false,
     ): JSONObject = withContext(Dispatchers.IO) {
         // Normalized before it reaches the service so the load identity compares concrete numbers:
         // "default" must mean the same thing on every request, or every call would force a reload.
@@ -164,6 +170,9 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("hexHostBuf", hexFlags.hostBuf)
             .put("hexOpBatch", hexFlags.opBatch)
             .put("hexNDev", hexFlags.nDev)
+            .put("streamExperts", streamExperts)
+            .put("streamCacheMb", streamCacheMb)
+            .put("streamDenseAnon", streamDenseAnon)
         val result = JSONObject(requireService().load(request.toString()))
         if (result.optBoolean("restartRequired")) {
             android.util.Log.d("BramTune", "restartRequired: restarting the inference process")

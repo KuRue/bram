@@ -30,6 +30,9 @@ internal class NativeLlamaBridge {
         hexHostBuf: Boolean,
         hexOpBatch: Int,
         hexNDev: Int,
+        streamExperts: Boolean,
+        streamCacheMb: Int,
+        streamDenseAnon: Boolean,
     ): String
     external fun referenceDecode(tokenCount: Int, padTokens: Int): String
     external fun teacherForced(forcedTokens: IntArray, padTokens: Int): String

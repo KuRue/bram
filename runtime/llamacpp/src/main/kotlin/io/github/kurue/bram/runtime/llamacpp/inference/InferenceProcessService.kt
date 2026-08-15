@@ -369,6 +369,9 @@ class InferenceProcessService : Service() {
                     hexHostBuf = identity.hexHostBuf,
                     hexOpBatch = identity.hexOpBatch,
                     hexNDev = identity.hexNDev,
+                    streamExperts = identity.streamExperts,
+                    streamCacheMb = identity.streamCacheMb,
+                    streamDenseAnon = identity.streamDenseAnon,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())

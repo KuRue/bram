@@ -1999,6 +1999,9 @@ class MainViewModel(
                 threadPriority = profile.threadPriority,
                 loadMode = profile.loadMode,
                 hexFlags = profile.hexFlags,
+                streamExperts = profile.streamExperts,
+                streamCacheMb = profile.streamCacheMb,
+                streamDenseAnon = profile.streamDenseAnon,
             )
         }
         outcome.onSuccess { result ->

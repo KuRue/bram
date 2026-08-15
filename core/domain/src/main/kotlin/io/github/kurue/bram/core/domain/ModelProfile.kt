@@ -262,6 +262,17 @@ data class ModelProfile(
     val threadPriority: ThreadPriority = ThreadPriority.NORMAL,
     val loadMode: LoadMode = LoadMode.AUTO,
     val hexFlags: HexFlags = HexFlags(),
+    /**
+     * Stream this MoE's experts from flash instead of loading them resident. This is what lets a
+     * model several times larger than RAM run at all — each token reads only the experts it routes
+     * to, straight from the gguf, so the whole model never has to fit in memory. Off for models that
+     * fit, and only offered for streamable MoE architectures.
+     */
+    val streamExperts: Boolean = false,
+    /** Resident expert-cache budget in MiB while streaming, or 0 for unbounded (fits-in-RAM only). */
+    val streamCacheMb: Int = 0,
+    /** Pin the always-used weights in anon RAM so the OS cannot reclaim them mid-generation. */
+    val streamDenseAnon: Boolean = false,
     val sampler: SamplerSettings = SamplerSettings(),
     val systemPrompt: String = "",
     val createdAtEpochMillis: Long = System.currentTimeMillis(),
