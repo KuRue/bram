@@ -115,7 +115,7 @@ public:
     // background reader lanes (non-blocking) and the kernel's per-expert hook blocks until each
     // slice is resident. `lanes` reader threads; 0 lanes keeps the serial path. Needs the injected
     // ggml_cpu_set_expert_ready_hook; falls back to serial (with a log) if the hook is absent.
-    void set_overlap(bool on, int lanes) { overlap_ = on; overlap_lanes_ = lanes > 0 ? lanes : 4; }
+    void set_overlap(bool on, int lanes) { overlap_ = on; overlap_lanes_ = lanes > 0 ? lanes : 8; }
     // The ggml-cpu expert-ready hook trampoline; registered while armed with overlap on.
     static void expert_ready_trampoline(const ggml_tensor * as, int64_t expert, void * user_data);
     // The batch-prefetch trampoline: fires once per MoE matmul with the routed-row counts, so the
@@ -229,7 +229,7 @@ private:
     void on_expert_batch(const ggml_tensor * as, const int64_t * counts, int64_t n_as);
 
     bool overlap_ = false;
-    int overlap_lanes_ = 4;
+    int overlap_lanes_ = 8;
     bool overlap_active_ = false;             // (legacy) reader-lane prefetch; unused in hook-driven path
     bool hook_active_ = false;                // true while the ggml_cpu expert-ready hook is registered
     std::unordered_map<const ggml_tensor *, Captured *> by_tensor_;  // for the hook to find a Captured

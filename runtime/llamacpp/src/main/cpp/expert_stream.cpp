@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -348,6 +349,20 @@ void ExpertStreamer::evict_to_budget() {
 
 // ---- Overlap: background reader lanes + the per-expert wait hook -------------------------------
 
+// Current MemAvailable from /proc/meminfo, in bytes (0 if it cannot be read). Used to auto-size the
+// resident-expert cache without inviting the low-memory killer.
+static uint64_t read_mem_available_bytes() {
+    FILE * f = fopen("/proc/meminfo", "r");
+    if (f == nullptr) return 0;
+    char line[256];
+    unsigned long long kb = 0;
+    while (fgets(line, sizeof(line), f) != nullptr) {
+        if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1) break;
+    }
+    fclose(f);
+    return static_cast<uint64_t>(kb) * 1024ull;
+}
+
 void ExpertStreamer::expert_ready_trampoline(const ggml_tensor * as, int64_t expert, void * user_data) {
     auto * self = static_cast<ExpertStreamer *>(user_data);
     if (self != nullptr) self->on_expert_ready(as, static_cast<int>(expert));
@@ -557,6 +572,25 @@ bool ExpertStreamer::arm_stream(std::string * error) {
         __android_log_print(ANDROID_LOG_INFO, "BramLlama",
             "bram_stream: dense-anon pinned %zu/%zu weights (%.1f MiB) in RAM",
             pinned, dense_.size(), dense_bytes_ / (1024.0 * 1024.0));
+    }
+
+    // Auto cache budget: when none was set explicitly (0), size the resident-expert cache to what
+    // safely fits — as much as the whole expert set, capped at half of currently-available RAM so
+    // the anon cache never starves the (mmap, re-read-every-token) dense weights or invites the OOM
+    // killer. Measured ~1.8x on V2-Lite going 1 GiB -> 4 GiB, since hot experts stop being re-read
+    // cold across tokens. Runs after dense-anon pinning so MemAvailable reflects that.
+    if (cache_budget_ == 0) {
+        uint64_t total = 0;
+        for (auto & kv : captured_) total += kv.second.buffer_size;
+        const uint64_t avail = read_mem_available_bytes();
+        uint64_t budget = avail > 0 ? avail / 2 : (2ull << 30);
+        if (budget > total) budget = total;
+        if (budget < (1ull << 30)) budget = (1ull << 30);
+        cache_budget_ = budget;
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_stream: auto cache budget %llu MiB (avail %llu MiB, experts %llu MiB)",
+            (unsigned long long) (budget >> 20), (unsigned long long) (avail >> 20),
+            (unsigned long long) (total >> 20));
     }
 
     // Register the per-expert kernel hook — the ONLY streaming trigger now. It fires inside
