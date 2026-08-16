@@ -1,6 +1,6 @@
 # Session handoff
 
-Last updated: 2026-08-16 (tools overhaul validated on device; continuation-ready)
+Last updated: 2026-08-16 (tools overhaul fully validated on device; continuation-ready)
 
 ## Session continuation (start here)
 
@@ -29,15 +29,35 @@ Last updated: 2026-08-16 (tools overhaul validated on device; continuation-ready
     3. Refuse branch: write_note ask ("Grocery List") → card → Refuse → the model received the
        `permission_denied` envelope verbatim ("The user declined this tool call. Do not call it
        again this run...") and replied appropriately (no retry, offered alternatives).
-  - **Remaining (priority order):** (a) tool-selection trimming is unit-tested and proven
-    ⊇{get_weather, write_note} on-device, but the selected subset is not observable in the field —
-    add a logcat line (orchestrator emits the selected tool names per run) and re-verify on a
-    8K-context model; (b) description diet — trim the 17 tool descriptions to function-only prose
+  - **Remaining (priority order):** (a) ~~tool-selection trimming~~ **DONE** — verified on device
+    below (17 of 20 tools offered; `BramTools` logcat line ships in the installed APK);
+    (b) description diet — trim the 17 tool descriptions to function-only prose
     (~½ the tokens), best done with an on-model eval; (c) skill-declared capabilities: `tools:`
     front matter in SKILL.md granting host-scoped allowances only while that skill is active (needs
     SkillDocument version bump; old skills still parse); (d) per-conversation permission presets +
     pre-authorized tool sets for automations so scheduled runs never hit an unanswerable gate;
     (e) on-device check of list_skills/read_skill (unit-tested only).
+  - **Selection trimming VERIFIED on device (2026-08-16, this session).** Root cause of the
+    earlier "offering 20 tools" was NOT the selector: the runtime embedder (Qwen3.5-0.8B, a chat
+    GGUF) loaded but every `llama_decode` in embed mode failed **silently** ("The embedding model
+    failed while encoding the text" — no llama.cpp log line). Chat-model GGUFs cannot serve as
+    pooling embedders in this pin (BERT/embedding GGUFs are the supported kind, per the loader's
+    own comment). Fix: designated `bge-small-en-v1.5-q8_0.gguf` (35 MB, BERT 33M, 384-dim) as the
+    embedding model — file pushed to `files/models/ec38e8da142596baa913124a.gguf` and
+    `bram-embedding-model.xml` rewritten to `local:ec38e8da142596baa913124a` (id = sha256[0:24]).
+    Embed now works; weather run offered **17 of 20 tools** (`Log.d("BramTools", "offering N
+    tools: ...")` — `AgentEvent.ToolsSelected` in `core/domain/AgentContracts.kt`, emitted in
+    `DefaultAgentOrchestrator`; both MainViewModel `when` blocks log it). Dropped that run:
+    write_file, clipboard_set, termux_exec; get_weather ranked 3rd. Diagnostics added while
+    debugging: `InferenceProcessService.embed` and `LlamaCppServiceClient.embed` now log the
+    thrown exception (the client previously swallowed it via runCatching).
+  - **Skill read-back (P4) validated on device, organically.** The trimmed Paris run: LFM2.5
+    called `list_skills` → `read_skill · weather-fetcher`, narrated reading it, then called
+    `web_search` (NEW tool → card → Allow once → executed) and `web_fetch timeanddate.com` (card →
+    Allow once). Run then aborted at the designed context guard: "Prompt and reserved output
+    exceed the loaded context (6226 + 2048 > 8192)" — correct refusal, no silent truncation. The
+    run's verbosity (narrative between calls + 17-tool schema + skill body) is what blew the
+    8K budget; Allow once does not persist, so the permission store is unchanged by this run.
 - **NEXT UP (other session, active): MoE expert streaming perf** — see the expert-streaming
   section below; branch tip carries the dense-aware auto cache budget (V4 OOM fix). Note: that
   session has **uncommitted `runtime/llamacpp/src/main/cpp/expert_stream.cpp`** in the tree at

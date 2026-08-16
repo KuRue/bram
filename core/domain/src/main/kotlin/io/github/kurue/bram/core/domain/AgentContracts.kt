@@ -219,6 +219,12 @@ sealed interface AgentEvent {
         val omittedMessageCount: Int,
     ) : AgentEvent
     /**
+     * The tools the run was actually offered, in order. Emitted once per run, after triage, so
+     * observability can show that a small-context run got a bounded subset rather than the full
+     * registry (and which subset, when a model declines to call anything).
+     */
+    data class ToolsSelected(val names: List<String>) : AgentEvent
+    /**
      * The reasoning markers the runtime is using, reported before any text arrives so a partial
      * reply can be split with the loaded format's own tags rather than an assumed `<think>`.
      */
