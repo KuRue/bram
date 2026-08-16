@@ -560,69 +560,73 @@ bool ExpertStreamer::arm_stream(std::string * error) {
                   [](const Captured * a, const Captured * b) { return a->suffix_idx < b->suffix_idx; });
     }
 
-    // Dense-anon: give each always-used weight an anonymous copy the OS will not reclaim, filled by
-    // reading the gguf bytes for that tensor (never by dereferencing its mmap ->data, which is not
-    // always safe to memcpy). The tensor's ->data is then repointed at the copy. Best effort: a
-    // tensor whose size no longer matches the file, or that will not allocate, is left on its mmap.
-    if (dense_anon_) {
-        dense_bytes_ = 0;
-        size_t pinned = 0;
-        for (auto & d_kv : dense_) {
-            Dense & d = d_kv.second;
-            if (d.tensor == nullptr || d.tensor->data == nullptr || d.loc.nbytes == 0) continue;
-            if (d.loc.nbytes != ggml_nbytes(d.tensor)) continue; // layout changed since capture
-            void * buf = mmap(nullptr, d.loc.nbytes, PROT_READ | PROT_WRITE,
-                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (buf == MAP_FAILED) continue;
-            if (offsets_.read_tensor(d.loc, buf) != static_cast<int64_t>(d.loc.nbytes)) {
-                munmap(buf, d.loc.nbytes);
-                continue;
-            }
-            d.buffer = buf;
-            d.orig_data = d.tensor->data;
-            d.tensor->data = buf;
-            dense_bytes_ += d.loc.nbytes;
-            ++pinned;
-        }
-        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-            "bram_stream: dense-anon pinned %zu/%zu weights (%.1f MiB) in RAM",
-            pinned, dense_.size(), dense_bytes_ / (1024.0 * 1024.0));
-    }
-
-    // Auto cache budget: when none was set explicitly (0), size the resident-expert cache to what
-    // safely fits. The anon expert cache COMPETES for RAM with the model's dense (non-expert)
-    // weights, which stay mmap'd and are re-read every token — so we reserve room for the dense
-    // working set (summed from the tensors capture recorded) plus headroom for KV/compute/OS/other
-    // apps, and give the cache whatever is left, capped at the whole expert set and floored small.
-    // On a model whose dense alone barely fits (DeepSeek-V4: ~6.6 GB dense) this yields a small
-    // cache and lets the OS page-cache the experts, instead of OOM-killing the process; on a model
-    // with light dense weights (V2-Lite: ~1.1 GB) it yields a big cache (~1.8x fewer cold re-reads).
-    // Runs after dense-anon pinning so MemAvailable is accurate.
+    // Coordinated RAM budget. Two anon consumers share what's free: selective dense pinning and the
+    // resident expert cache. We only PIN dense when the model is memory-pressured (dense nearly fills
+    // RAM, e.g. DeepSeek-V4) — pinning the always-hot non-expert weights (attention, shared experts,
+    // norms, output) in anon stops them re-faulting from mmap every token, which profiling showed
+    // throttles V4's effective read throughput ~5x (251 vs 1283 MiB/s). The big token-embedding matrix
+    // is SKIPPED (sparsely accessed). A model that fits comfortably (V2-Lite) keeps dense on mmap —
+    // it stays resident there anyway — and simply RESERVES that dense from the cache budget so the
+    // cache never grows big enough to evict the hot dense pages. Everything leaves a fixed headroom
+    // for compute/KV/OS so it can't OOM (an earlier over-aggressive pin did, on V4). Dense is filled
+    // by pread (never memcpy from mmap ->data, which SEGV'd); ->data is repointed at the copy.
     uint64_t experts_total = 0;
     for (auto & kv : captured_) experts_total += kv.second.buffer_size;
     uint64_t dense_total = 0;
     for (auto & kv : dense_) dense_total += kv.second.loc.nbytes;
-    const uint64_t avail = read_mem_available_bytes();
-    if (cache_budget_ == 0) {
-        const uint64_t reserve = dense_total + (1024ull << 20); // dense + headroom
-        uint64_t budget = avail > reserve ? (avail - reserve) : 0;
-        if (budget > experts_total) budget = experts_total;
-        if (budget < (768ull << 20)) budget = (768ull << 20);
-        cache_budget_ = budget;
+    const uint64_t avail0 = read_mem_available_bytes();
+    const uint64_t cache_floor = 768ull << 20;
+    const bool pressured = avail0 > 0 && (dense_total + (2ull << 30)) > avail0;
+    dense_bytes_ = 0;
+
+    if (pressured) {
+        const uint64_t headroom = 2ull << 30;   // compute + KV + embedding working set + OS + safety
+        const uint64_t committable = avail0 > headroom ? (avail0 - headroom) : 0;
+        const uint64_t pin_budget = committable > cache_floor ? (committable - cache_floor) : 0;
+        // Drop each dense range's file pages as we read it (the anon copy is authoritative) so the
+        // pread doesn't transiently double residency and blow the budget mid-pin.
+        offsets_.set_drop_after_read(true);
+        size_t pinned = 0, skipped = 0;
+        for (auto & d_kv : dense_) {
+            Dense & d = d_kv.second;
+            if (d.tensor == nullptr || d.tensor->data == nullptr || d.loc.nbytes == 0) continue;
+            if (d.loc.nbytes != ggml_nbytes(d.tensor)) continue;
+            if (d_kv.first.find("token_embd") != std::string::npos) { ++skipped; continue; }
+            if (dense_bytes_ + d.loc.nbytes > pin_budget) { ++skipped; continue; }
+            void * buf = mmap(nullptr, d.loc.nbytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (buf == MAP_FAILED) { ++skipped; continue; }
+            if (offsets_.read_tensor(d.loc, buf) != static_cast<int64_t>(d.loc.nbytes)) {
+                munmap(buf, d.loc.nbytes); ++skipped; continue;
+            }
+            d.buffer = buf; d.orig_data = d.tensor->data; d.tensor->data = buf;
+            dense_bytes_ += d.loc.nbytes; ++pinned;
+        }
+        if (cache_budget_ == 0) {
+            uint64_t budget = committable > dense_bytes_ ? (committable - dense_bytes_) : 0;
+            if (budget > experts_total) budget = experts_total;
+            if (budget < cache_floor) budget = cache_floor;
+            cache_budget_ = budget;
+        }
         __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-            "bram_stream: auto cache budget %llu MiB (avail %llu, dense %llu, experts %llu MiB)",
-            (unsigned long long) (budget >> 20), (unsigned long long) (avail >> 20),
-            (unsigned long long) (dense_total >> 20), (unsigned long long) (experts_total >> 20));
+            "bram_stream: pressured — pinned %zu dense (%.0f MiB), skipped %zu, cache %llu MiB (avail %.0f MiB)",
+            pinned, dense_bytes_ / (1024.0 * 1024.0), skipped,
+            (unsigned long long) (cache_budget_ >> 20), avail0 / (1024.0 * 1024.0));
+    } else {
+        // Fits comfortably: no pinning; reserve the (hot, mmap) dense plus 1 GiB headroom, cache gets
+        // the rest. Keeping expert file pages cached helps warm re-reads, so no drop-after-read.
+        if (cache_budget_ == 0) {
+            const uint64_t reserve = dense_total + (1024ull << 20);
+            uint64_t budget = avail0 > reserve ? (avail0 - reserve) : 0;
+            if (budget > experts_total) budget = experts_total;
+            if (budget < cache_floor) budget = cache_floor;
+            cache_budget_ = budget;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+            "bram_stream: fits — dense %llu MiB on mmap, cache %llu MiB (avail %.0f MiB)",
+            (unsigned long long) (dense_total >> 20), (unsigned long long) (cache_budget_ >> 20),
+            avail0 / (1024.0 * 1024.0));
     }
-    // Memory-pressured model (dense weights alone nearly fill RAM, e.g. DeepSeek-V4): drop each
-    // expert's file pages after reading so they stop competing with the hot dense mmap. On a model
-    // that comfortably fits, keep them cached for warm re-reads of evicted experts.
-    const bool pressured = avail > 0 && (dense_total + (2ull << 30)) > avail;
     offsets_.set_drop_after_read(pressured);
-    __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-        "bram_stream: page-cache drop-after-read %s (dense %llu MiB, avail %llu MiB)",
-        pressured ? "ON" : "off", (unsigned long long) (dense_total >> 20),
-        (unsigned long long) (avail >> 20));
 
     // Register the per-expert kernel hook — the ONLY streaming trigger now. It fires inside
     // ggml_compute_forward_mul_mat_id for each routed expert, just before its weights are read, and
