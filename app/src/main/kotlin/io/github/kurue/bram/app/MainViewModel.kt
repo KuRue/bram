@@ -833,6 +833,16 @@ class MainViewModel(
         viewModelScope.launch {
             runCatching { container.conversationStore.save(conversationId, messages) }
                 .onSuccess { summary ->
+                    // The first save creates the file, which is the earliest a per-conversation
+                    // setting can persist — so a mode or privacy class chosen before the first
+                    // message is written now, rather than surviving only in memory.
+                    val snapshot = mutableState.value
+                    if (snapshot.permissionMode != PermissionMode.AUTO) {
+                        runCatching { container.conversationStore.setPermissionMode(summary.id, snapshot.permissionMode) }
+                    }
+                    if (snapshot.privacyClass != PrivacyClass.STANDARD) {
+                        runCatching { container.conversationStore.setPrivacyClass(summary.id, snapshot.privacyClass) }
+                    }
                     val summaries = runCatching { container.conversationStore.list() }
                         .getOrDefault(listOf(summary))
                     mutableState.update {
