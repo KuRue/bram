@@ -494,11 +494,13 @@ void ExpertStreamer::on_expert_ready(const ggml_tensor * as, int e) {
 
     std::unique_lock<std::mutex> lk(mu_);
     if (c->resident[e]) {
+        ++cache_hits_;
         const uint64_t key = (static_cast<uint64_t>(c->id) << 24) | static_cast<uint32_t>(e);
         const auto pit = lru_pos_.find(key);
         if (pit != lru_pos_.end()) lru_.splice(lru_.begin(), lru_, pit->second);
         return;
     }
+    ++cache_misses_;
     if (c->in_flight[e]) {
         read_cv_.wait(lk, [&] { return c->resident[e]; });
         return;

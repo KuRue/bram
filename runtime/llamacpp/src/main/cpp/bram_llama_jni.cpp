@@ -1335,6 +1335,14 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         std::string raw_reply;
         std::string finish_reason = "length";
         const auto decode_start = std::chrono::steady_clock::now();
+        // Snapshot the streamer counters so the per-generation profile below reports deltas for THIS
+        // decode, not cumulative totals — that's what tells us bandwidth vs latency and hit rate.
+        const bool prof = g_state.streamer && g_state.streamer->armed();
+        const uint64_t p_bytes0 = prof ? g_state.streamer->bytes_read() : 0;
+        const uint64_t p_slices0 = prof ? g_state.streamer->slices_read() : 0;
+        const uint64_t p_hits0 = prof ? g_state.streamer->cache_hits() : 0;
+        const uint64_t p_miss0 = prof ? g_state.streamer->cache_misses() : 0;
+        const uint64_t p_evict0 = prof ? g_state.streamer->evictions() : 0;
 
         // MTP speculative decoding: models with nextn heads draft several tokens from their own
         // MTP head and verify them in one batched decode, so a correct draft is several tokens
@@ -1507,6 +1515,31 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
 
         const auto prompt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prompt_end - prompt_start).count();
         const auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start).count();
+
+        // Per-generation streaming profile: where a >>RAM decode's time actually goes. tok/s vs the
+        // per-token flash read volume and the effective read bandwidth (delta bytes / decode time)
+        // says whether we're bandwidth-bound (near device max) or latency/parallelism-bound (far
+        // below it); the hit rate says how much the cache is buying. Logged, not returned.
+        if (prof && output_count > 0 && decode_ms > 0) {
+            const double secs = decode_ms / 1000.0;
+            const uint64_t d_bytes = g_state.streamer->bytes_read() - p_bytes0;
+            const uint64_t d_slices = g_state.streamer->slices_read() - p_slices0;
+            const uint64_t d_hits = g_state.streamer->cache_hits() - p_hits0;
+            const uint64_t d_miss = g_state.streamer->cache_misses() - p_miss0;
+            const uint64_t d_evict = g_state.streamer->evictions() - p_evict0;
+            const uint64_t d_lookups = d_hits + d_miss;
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "bram_prof: %d tok in %.2fs = %.2f tok/s | read %.1f MiB (%.1f MiB/tok) @ %.0f MiB/s "
+                "| %llu slices | hit %.1f%% (%llu/%llu) | %llu evict",
+                output_count, secs, output_count / secs,
+                d_bytes / (1024.0 * 1024.0), d_bytes / (1024.0 * 1024.0) / output_count,
+                (d_bytes / (1024.0 * 1024.0)) / secs,
+                (unsigned long long) d_slices,
+                d_lookups ? (100.0 * d_hits / d_lookups) : 0.0,
+                (unsigned long long) d_hits, (unsigned long long) d_lookups,
+                (unsigned long long) d_evict);
+        }
+
         std::ostringstream result;
         result << "{\"rawReply\":\"" << json_escape(raw_reply) << "\""
                << ",\"promptTokens\":" << prompt_tokens.size()
