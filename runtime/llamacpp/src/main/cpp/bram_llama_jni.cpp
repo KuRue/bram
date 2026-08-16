@@ -623,11 +623,62 @@ std::string json_object_at(const std::string & source, size_t key) {
     return "{}";
 }
 
+/** The balanced object starting exactly at [open], string- and escape-aware; empty on failure. */
+std::string json_balanced_object(const std::string & source, size_t open) {
+    if (open == std::string::npos || open >= source.size() || source[open] != '{') return {};
+    int depth = 0;
+    bool in_string = false;
+    for (size_t index = open; index < source.size(); ++index) {
+        const char character = source[index];
+        if (in_string) {
+            if (character == '\\') ++index;
+            else if (character == '"') in_string = false;
+            continue;
+        }
+        if (character == '"') in_string = true;
+        else if (character == '{') ++depth;
+        else if (character == '}' && --depth == 0) return source.substr(open, index - open + 1);
+    }
+    return {};
+}
+
+/**
+ * First occurrence of the quoted [key] that sits at brace depth [want_depth], skipping anything
+ * inside strings. Depth counts braces consumed before the key's opening quote, so members of an
+ * element object `{...}` are at depth 1 and anything nested in a schema value is deeper.
+ */
+size_t json_key_at_depth(const std::string & source, const char * key, int want_depth) {
+    const std::string quoted = std::string("\"") + key + "\"";
+    int depth = 0;
+    bool in_string = false;
+    for (size_t index = 0; index < source.size(); ++index) {
+        const char character = source[index];
+        if (in_string) {
+            if (character == '\\') ++index;
+            else if (character == '"') in_string = false;
+            continue;
+        }
+        if (character == '"') {
+            if (depth == want_depth && source.compare(index, quoted.size(), quoted) == 0) return index;
+            in_string = true;
+            continue;
+        }
+        if (character == '{' || character == '[') ++depth;
+        else if (character == '}' || character == ']') --depth;
+    }
+    return std::string::npos;
+}
+
 /**
  * Parses the tool list the app sends into what the template engine expects.
  *
  * Each entry is `{"name","description","parameters"}`, where parameters is the JSON schema as a
  * string — llama.cpp wants the schema unparsed, since it feeds it to the grammar builder.
+ *
+ * Field lookup is depth-aware: only the element's own members are read. A flat find() used to
+ * splice schema internals into the tool list — read_skill's `{"name": {...}}` property became a
+ * phantom tool literally named "type" while real tools vanished — and whether it derailed
+ * depended on the JSON's key order, which org.json does not guarantee.
  */
 std::vector<common_chat_tool> parse_tools(const std::string & tools_json) {
     std::vector<common_chat_tool> tools;
@@ -636,17 +687,30 @@ std::vector<common_chat_tool> parse_tools(const std::string & tools_json) {
     // only nested value is the schema. Reading it with the string helpers keeps this file free of
     // a JSON dependency that the vendored headers only forward-declare here.
     size_t cursor = 0;
-    while (true) {
-        const size_t name = tools_json.find("\"name\"", cursor);
-        if (name == std::string::npos) break;
+    while (cursor < tools_json.size()) {
+        const size_t open = tools_json.find('{', cursor);
+        if (open == std::string::npos) break;
+        const std::string element = json_balanced_object(tools_json, open);
+        if (element.empty()) break;
+        cursor = open + element.size();
+        const size_t name = json_key_at_depth(element, "name", 1);
+        if (name == std::string::npos) continue;
         common_chat_tool tool;
-        tool.name = json_field(tools_json, name);
-        const size_t description = tools_json.find("\"description\"", name);
-        tool.description = description == std::string::npos ? "" : json_field(tools_json, description);
-        const size_t parameters = tools_json.find("\"parameters\"", name);
-        tool.parameters = parameters == std::string::npos ? "{}" : json_object_at(tools_json, parameters);
-        cursor = parameters == std::string::npos ? name + 6 : parameters + 12;
+        tool.name = json_field(element, name);
+        const size_t description = json_key_at_depth(element, "description", 1);
+        tool.description = description == std::string::npos ? "" : json_field(element, description);
+        const size_t parameters = json_key_at_depth(element, "parameters", 1);
+        tool.parameters = parameters == std::string::npos ? "{}" : json_object_at(element, parameters);
         if (!tool.name.empty()) tools.push_back(std::move(tool));
+    }
+    // One line per run round: what actually reached the template. A parse that silently drops
+    // tools or invents phantoms looks exactly like a model that cannot choose tools, which is
+    // how this bug once hid in plain sight.
+    {
+        std::string names;
+        for (const auto & t : tools) { if (!names.empty()) names += ","; names += t.name; }
+        __android_log_print(ANDROID_LOG_DEBUG, "BramTools",
+            "template received %zu tools: [%s]", tools.size(), names.c_str());
     }
     return tools;
 }

@@ -65,6 +65,56 @@ class SkillSelection(private val cacheLimit: Int = DEFAULT_CACHE_LIMIT) {
         return best?.takeIf { it.second >= threshold }?.first
     }
 
+    /**
+     * Drops active skills whose description is already covered by a tool the run is offering.
+     *
+     * Proven on device: a small model reliably abandons a purpose-built, pre-granted tool the
+     * moment the prompt also names a skill that sounds like it — it chases the skill through
+     * web_search, read_file on an invented path, or a hallucinated tool instead. Telling the
+     * model "the tool wins" did not fix it; removing the duplicate advertisement does. A skill
+     * that duplicates nothing keeps its advertisement, and a suppressed skill reappears the
+     * moment its covering tool is not offered, so this is steering, not deletion.
+     *
+     * Best-effort like [rank]: no embedder or any failed embedding returns the skills unchanged.
+     */
+    suspend fun withoutCovered(
+        skills: List<ActiveSkill>,
+        offeredTools: List<ToolDefinition>,
+        embedder: Embedder?,
+        threshold: Float = DEFAULT_COVERAGE_THRESHOLD,
+    ): List<ActiveSkill> {
+        if (skills.isEmpty() || offeredTools.isEmpty()) return skills
+        if (embedder == null) return skills
+        return skills.filter { skill ->
+            (toolCoverage(skill, offeredTools, embedder) ?: return skills) < threshold
+        }
+    }
+
+    /**
+     * The highest cosine between one skill's description and any offered tool's text, or null
+     * when the comparison cannot run. Public so the caller can log the number — the threshold
+     * is empirical, and field data is how it gets set honestly.
+     *
+     * Compares against both the bare description and the name-prefixed text: a tool's name
+     * ("get_weather") carries meaning the skill text will not match, and steering prose in a
+     * description dilutes it, so the bare form is the fairer of the two.
+     */
+    suspend fun toolCoverage(
+        skill: ActiveSkill,
+        offeredTools: List<ToolDefinition>,
+        embedder: Embedder?,
+    ): Float? {
+        if (offeredTools.isEmpty() || embedder == null) return null
+        val skillVector = embeddingFor(skill.id, skill.version, skill.description, embedder) ?: return null
+        var best = -1f
+        for (tool in offeredTools) {
+            val named = embeddingFor("tool:${tool.name}", "", "${tool.name}: ${tool.description}", embedder) ?: return null
+            val bare = embeddingFor("tool:${tool.name}:bare", "", tool.description, embedder) ?: return null
+            best = maxOf(best, VectorSearch.cosine(skillVector, named), VectorSearch.cosine(skillVector, bare))
+        }
+        return best
+    }
+
     private suspend fun embeddingFor(
         id: String,
         version: String,
@@ -109,5 +159,13 @@ class SkillSelection(private val cacheLimit: Int = DEFAULT_CACHE_LIMIT) {
         // so 0.60 favors precision over recall and the caller's per-conversation dedup bounds the
         // rare loose match.
         const val DEFAULT_DRAFT_HINT_THRESHOLD = 0.60f
+
+        // Empirical: with bge-small-en-v1.5 the weather-fetcher stub ("Automatically fetches
+        // current weather data for a specified location") scores 0.73 against get_weather's
+        // description — a true duplicate pair. Unrelated skills (git-helper vs weather) sit near
+        // 0.4. The bar lands just under the measured duplicate; when a covering tool is offered,
+        // suppressing a same-topic skill is the safe direction — the skill survives in
+        // list_skills and read_skill, only its passive advertisement waits.
+        const val DEFAULT_COVERAGE_THRESHOLD = 0.70f
     }
 }

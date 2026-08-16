@@ -143,6 +143,14 @@ class AppContainer(application: Application) {
      * survives across per-run orchestrator instances.
      */
     val skillSelection = SkillSelection()
+    /**
+     * Ranks the registry's tools against the turn's ask so a small-context local model is not
+     * offered seventeen prose definitions every run. Shared by the orchestrator and by prompt
+     * assembly (skill-vs-tool dedup) so both see the identical selection; embeddings are cached
+     * inside, so the second evaluation of a run costs nothing. With no embedding model
+     * designated the selector returns the full list, which is exactly the previous behavior.
+     */
+    val toolSelector = RankingToolSelector(embedder)
     val runJournal = SqliteRunJournal(application)
     /**
      * Built-ins plus whatever MCP servers contribute. Mutable so a server's tools can be swapped in
@@ -197,10 +205,7 @@ class AppContainer(application: Application) {
         approvalGate = approvalGate,
         journal = runJournal,
         memoryExtractor = GeneratingMemoryExtractor(),
-        // Rank the registry's tools against the turn's ask so a small-context local model is not
-        // offered seventeen prose definitions every run. With no embedding model designated the
-        // selector returns the full list, which is exactly the previous behavior.
-        toolSelector = RankingToolSelector(embedder),
+        toolSelector = toolSelector,
     )
 
     init {

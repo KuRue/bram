@@ -76,9 +76,40 @@ Last updated: 2026-08-16 (tools overhaul fully validated on device; continuation
        `web_search` "…only when no purpose-built tool covers it"; tightened web_fetch,
        list_skills, read_skill, memory_search.
     Tests updated (`SkillLibraryTest` now asserts instructions are NOT inlined). All suites green.
-    **On-device validation of this pass still pending** (phone disconnected mid-install): rerun
-    the Largo ask — expect a direct `get_weather` call with the skill still active (the
-    adversarial case), no context abort, and a materially smaller prompt.
+  - **ROOT CAUSE FOUND (2026-08-16, emulator session): the native `parse_tools` corrupted every
+    tool list — this was almost the entire "clunky" story.** The C++ parser scanned the app's
+    tools JSON with flat `find("\"name\"")`; a schema property literally keyed `"name"`
+    (read_skill's, write_note's) derailed it: it **fabricated phantom tools — one literally named
+    `"type"` (the string value read out of `"name": {"type": "string"}`) — and dropped real ones,
+    including get_weather entirely**. Whether it derailed depended on org.json's key order, which
+    is why early runs (Tokyo/Osaka/Paris ×4) called get_weather cleanly and every run after the
+    diet/trim "hallucinated" `type`, chased web_search/wttr.in/termux/read_file, and blew the
+    context. The model was never hallucinating; it was calling tools we actually offered it.
+    Proven by chunk-logging the rendered prompt (`BramPrompt` tag, since removed): the tool list
+    contained `"name": "type"` twice and no `get_weather`. **Fix:** depth-aware, string-safe
+    parsing (`json_balanced_object` + `json_key_at_depth` in `bram_llama_jni.cpp`) that only
+    reads element-top-level keys; a one-line `BramTools` log now reports what the template
+    received ("template received 12 tools: […]") so this class of bug can never hide again.
+  - **Skill-vs-tool suppression added (`SkillSelection.withoutCovered`, threshold 0.70).** Even
+    with correct parsing, an ACTIVE skill whose description duplicates an offered tool is a lure
+    for a small model (it chased the skill advertisement instead of the tool). A skill whose
+    description clears 0.70 cosine against any offered tool's text (measured: the
+    weather-fetcher stub scores 0.73 vs get_weather with bge-small; unrelated pairs sit ~0.4) is
+    hidden from the prompt for that run — it stays in list_skills/read_skill and reappears when
+    its covering tool is not offered. `runInstructions` evaluates the same selection the
+    orchestrator will (selector is now a shared field on the app container) and logs
+    `BramSkill: skill X: max tool coverage N, advertised|suppressed`. `get_weather`'s description
+    keeps the literal word "weather" (small models match literally; the diet's "Current
+    conditions…" cost ranking and recall both).
+  - **End-to-end re-validated on the emulator (Pixel_9a, LFM2.5-2.6B-Q4_0, weather-fetcher stub
+    ACTIVE):** "can you get the forecast for largo florida?" → ONE get_weather call ("Largo,
+    FL"), no approval card (Always grant held), real Open-Meteo answer (92.1°F clear sky), 2
+    messages total. The full adversarial chain (skill ad, wttr.in workflow in other
+    conversations, original phrasing) defeated. Emulator setup notes: LFM2.5 imported via the
+    app's SAF flow (auto-configure's CPU-mask measurement hangs under QEMU — force-stop, the
+    profile is created already); bge embedder + routing + skills.json wired via run-as (same
+    patterns as the phone). **Phone sync pending: install the parser-fix build on the S25 when
+    reconnected** (the phone's last build predates the parse_tools fix and suppression).
 - **NEXT UP (other session, active): MoE expert streaming perf** — see the expert-streaming
   section below; branch tip carries the dense-aware auto cache budget (V4 OOM fix). Note: that
   session has **uncommitted `runtime/llamacpp/src/main/cpp/expert_stream.cpp`** in the tree at
