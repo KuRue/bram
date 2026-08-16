@@ -153,6 +153,10 @@ public:
     // Bytes read from flash so far (this run), and the number of expert-slice reads served.
     uint64_t bytes_read() const { return bytes_read_; }
     uint64_t slices_read() const { return slices_read_; }
+    // Per-expert hook outcomes: cache hit (already resident) vs miss (had to wait for / read a slice).
+    // The ratio drives the perf story — a low hit rate means the model is read-bound.
+    uint64_t cache_hits() const { return cache_hits_; }
+    uint64_t cache_misses() const { return cache_misses_; }
 
 private:
     bool on_eval(ggml_tensor * t, bool ask);
@@ -217,6 +221,8 @@ private:
 
     uint64_t bytes_read_ = 0;
     uint64_t slices_read_ = 0;
+    uint64_t cache_hits_ = 0;           // hook found the expert already resident
+    uint64_t cache_misses_ = 0;         // hook had to wait for / read the expert
     uint64_t verify_mismatches_ = 0;    // resident-vs-streamed byte mismatches (should stay 0)
 
     // --- Overlap: background reader lanes + the per-expert wait hook -----------------------------
