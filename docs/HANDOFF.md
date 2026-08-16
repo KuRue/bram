@@ -1,6 +1,52 @@
 # Session handoff
 
-Last updated: 2026-08-14 (continuation-ready)
+Last updated: 2026-08-15 (tools/skills overhaul landed; continuation-ready)
+
+## Session continuation (start here)
+
+- **Tools & skills overhaul — implemented + unit-tested, NOT yet validated on device** (2026-08-15
+  session). Diagnosis that drove it: every run shipped all 17+ tool definitions (~9 KB / ~2.3K
+  tokens) regardless of ask or context size; `approvalScopeKeys` were dead code so "always allow"
+  was per-tool-forever; denials from timeout/attended were indistinguishable from user refusals;
+  the "weather skill always fails" was structural (no weather tool — a skill could only say "use
+  web_search", three fragile hops); and `propose_skill` had no read-back so a model couldn't see
+  what it was improving.
+  - **Landed** (all JVM tests green; full plan + research in this session's messages):
+    1. `get_weather` (app/…/WeatherTool.kt) — Open-Meteo, keyless (geocoding + forecast, WMO codes
+       worded), `returnsUntrustedContent`, core tool. Both API shapes verified live.
+    2. Per-run tool selection (core/domain/…/ToolSelection.kt): 5-tool core set always offered
+       (`write_note`, `memory_search`, `device_status`, `propose_skill`, `get_weather`); the rest
+       ranked by the skill-embedding `Embedder` and admitted under a 6K-char budget; contexts
+       ≥32K tokens skip triage; no embedder → full list (old behavior). Wired via
+       `DefaultAgentOrchestrator` (`toolSelector` param, selects once per run) → `GenerationRequest.tools`.
+    3. Scoped always-allow grants (ToolApproval.kt `approvalScope`): host-scoped for
+       `web_fetch`/`launch_uri` urls, top-folder for file paths, exact command/shell line for
+       `termux_exec`, per-note for `write_note`; tools with no meaningful target (`web_search`,
+       `get_weather`, `search_contacts`) grant per-tool. Settings "Persistent permissions" rows
+       already render `tool@target` strings and Withdraw works unchanged.
+    4. Actionable denials: `ToolApprovalDecision.DENY_TIMEOUT` / `DENY_UNATTENDED` +
+       orchestrator error envelopes (`approval_timeout`, `approval_unattended`) that tell the model
+       what to do next, vs `permission_denied`'s "do not retry".
+    5. Skill read-back loop (app/…/SkillTools.kt): `list_skills` + `read_skill` (read-only,
+       approval-free; drafts listed by name/description only, never their instructions);
+       `propose_skill` result now names the active version the draft supersedes and points at
+       `read_skill`.
+    6. Selection eval (core/domain ToolSelectionEval.kt): deterministic keyword-embedder contract
+       tests — core survives every ask, relevant tools outrank noise, budget holds vs a 27-tool
+       registry.
+  - **Commit archaeology:** all of the above is inside `234208e` on `feat/expert-streaming`, swept
+    in by a concurrent session whose message only describes the expert-streaming cache fix. Tests:
+    `:core:domain:test :core:agent:test :app:testDebugUnitTest`.
+  - **Remaining (priority order):** (a) on-device validation — install, weather ask end-to-end,
+    first `get_weather` approval shows "Always" scoped to whole tool, small-model run trims tool
+    list (verify via a logcat line or telemetry if added later); (b) description diet — trim the
+    17 tool descriptions to function-only prose (~½ the tokens), best done with an on-model eval;
+    (c) skill-declared capabilities: `tools:` front matter in SKILL.md granting host-scoped
+    allowances only while that skill is active (needs SkillDocument version bump; old skills still
+    parse); (d) per-conversation permission presets + pre-authorized tool sets for automations so
+    scheduled runs never hit an unanswerable gate.
+- **NEXT UP (other session, active): MoE expert streaming perf** — see the expert-streaming
+  section below; branch tip `234208e` also carries the dense-aware auto cache budget (V4 OOM fix).
 
 ## Current source of truth
 
@@ -15,9 +61,9 @@ Last updated: 2026-08-14 (continuation-ready)
 | llama.cpp pin | `a94d563e` (2026-08-13, bumped from 132753bf for 31 upstream commits including Lightning Indexer fused ops, FA vectorize, LFM2 tool-call fix; did NOT fix the mask/8-threads arm64 hang) |
 | Build note | The Hexagon skel ExternalProject now needs Ninja on PATH: `export PATH=/home/s14/Android/Sdk/cmake/3.30.5/bin:$PATH` before building in WSL. Emulator builds need `BRAM_EMULATOR_ABI=true`. |
 
-## Session continuation (start here)
+## Prior session notes (2026-08-14, expert streaming)
 
-- **NEXT UP: MoE expert streaming (feature branch `feat/expert-streaming`).** Building the ability
+- **MoE expert streaming (feature branch `feat/expert-streaming`).** Building the ability
   to run MoE models several times larger than RAM, losslessly, by reading only each token's routed
   experts from flash instead of resident-loading the whole file — the technique
   [BigMoeOnEdge](https://github.com/Helldez/BigMoeOnEdge) uses to run DeepSeek V4 Flash (91 GB) at
@@ -51,6 +97,11 @@ Last updated: 2026-08-14 (continuation-ready)
   - **Already staged:** DeepSeek V4 Flash 0731 (IQ2_M, 84.7 GB, 3 shards) is **imported into Bram's
     `files/models/`** (validated the multi-part import at 91 GB scale). Both Nemotron quants were
     deleted this session to free ~44 GB (→ ~136 GB free); the dead Nemotron profile record may remain.
+- **Also verified this session (GGUF provenance, for whenever DeepSeek V4 runs again):** the
+  imported 84.7 GB IQ2_M 3-shard set is `unsloth/DeepSeek-V4-Flash-0731-GGUF` → `UD-IQ2_M`
+  (sums to exactly 84.7 GiB). HF metadata confirms `architecture: "deepseek4"` (loads on pin
+  `a94d563e`) **and** a full DSML chat template with tool-call format embedded — llama.cpp's
+  chat.cpp:3330 routes it to the V3.2/V4 grammar, so Bram's DSML tool-call chain needs no changes.
 - **Phone is disconnected** — the last wireless adb endpoint was `192.168.1.169:45953`, which
   expires. To reconnect: on the phone, Developer options → Wireless debugging → give the new
   "IP address & Port" (and the pairing port + 6-digit code the first time). Then
