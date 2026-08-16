@@ -24,8 +24,9 @@ class WebSearchTool : ToolHandler {
         name = "web_search",
         // Results are titles and snippets written by whoever owns the page.
         returnsUntrustedContent = true,
-        description = "Search the public web (DuckDuckGo) and return the top results as title, " +
-            "URL, and a snippet. Use for current or factual information you do not already have.",
+        description = "Search the public web (DuckDuckGo) and return top results as title, URL, " +
+            "and snippet. Use only for current or factual information that no purpose-built " +
+            "tool offered this run covers.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{
@@ -61,8 +62,8 @@ class WebFetchTool : ToolHandler {
         name = "web_fetch",
         // The whole point of the tool is to put a page Bram did not write into the context.
         returnsUntrustedContent = true,
-        description = "Download a web page and return its text with HTML stripped. Use after " +
-            "web_search to read a specific page in full.",
+        description = "Download one web page and return its text with HTML stripped. Use after " +
+            "web_search has picked a URL to read.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{

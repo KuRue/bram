@@ -58,6 +58,27 @@ Last updated: 2026-08-16 (tools overhaul fully validated on device; continuation
     exceed the loaded context (6226 + 2048 > 8192)" — correct refusal, no silent truncation. The
     run's verbosity (narrative between calls + 17-tool schema + skill body) is what blew the
     8K budget; Allow once does not persist, so the permission store is unchanged by this run.
+  - **Cross-model quality pass (2026-08-16, later session) — "clunky" evidence → redesign.** The
+    user's follow-up Largo run exposed the real failure: asked for a forecast, LFM2.5 called
+    `web_search`+`memory_search` instead of the offered `get_weather` (then answered from
+    wttr.in), because the active `weather-fetcher` skill's full instructions ("call the weather
+    API…") were inlined in every system prompt and out-competed the tool. Changes, modeled on how
+    the major harnesses do it (Claude Code skills = progressive disclosure: name+description in
+    the listing, body loads on demand; OpenAI guidance = short purpose-scoped descriptions):
+    1. `SkillPrompt` now renders **descriptions only** (+ "call read_skill to load it; a
+       purpose-built tool still wins over a skill"); budget 100K→2K chars. Skill bodies reach the
+       model only via `read_skill`.
+    2. `read_skill` joined `DEFAULT_CORE_TOOLS` — the prompt names it, so it must always be
+       offered.
+    3. Reserved output `minOf(2048, ctx/4)` → `minOf(1024, ctx/8)` (both MainViewModel sites):
+       the Paris abort was 6226+2048>8192; 1024 reserve buys 1K more prompt on an 8K model.
+    4. Description diet + primacy: `get_weather` "…never web_search or web_fetch";
+       `web_search` "…only when no purpose-built tool covers it"; tightened web_fetch,
+       list_skills, read_skill, memory_search.
+    Tests updated (`SkillLibraryTest` now asserts instructions are NOT inlined). All suites green.
+    **On-device validation of this pass still pending** (phone disconnected mid-install): rerun
+    the Largo ask — expect a direct `get_weather` call with the skill still active (the
+    adversarial case), no context abort, and a materially smaller prompt.
 - **NEXT UP (other session, active): MoE expert streaming perf** — see the expert-streaming
   section below; branch tip carries the dense-aware auto cache budget (V4 OOM fix). Note: that
   session has **uncommitted `runtime/llamacpp/src/main/cpp/expert_stream.cpp`** in the tree at

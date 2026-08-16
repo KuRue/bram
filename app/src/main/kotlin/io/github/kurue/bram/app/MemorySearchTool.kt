@@ -17,7 +17,7 @@ class MemorySearchTool(
     override val definition = ToolDefinition(
         name = "memory_search",
         description = "Search Bram's persistent memory across all conversations for facts, " +
-            "decisions, and summaries from earlier work. Returns the most important matches.",
+            "decisions, and summaries from earlier work.",
         inputSchemaJson = """{"type":"object","properties":{"query":{"type":"string","description":"What to look for in plain words"},"limit":{"type":"integer","description":"How many matches to return (default 5)"}},"required":["query"],"additionalProperties":false}""",
         readOnly = true,
         approvalScopeKeys = listOf(),
