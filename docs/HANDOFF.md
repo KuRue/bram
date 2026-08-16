@@ -1,52 +1,47 @@
 # Session handoff
 
-Last updated: 2026-08-15 (tools/skills overhaul landed; continuation-ready)
+Last updated: 2026-08-16 (tools overhaul validated on device; continuation-ready)
 
 ## Session continuation (start here)
 
-- **Tools & skills overhaul — implemented + unit-tested, NOT yet validated on device** (2026-08-15
-  session). Diagnosis that drove it: every run shipped all 17+ tool definitions (~9 KB / ~2.3K
-  tokens) regardless of ask or context size; `approvalScopeKeys` were dead code so "always allow"
-  was per-tool-forever; denials from timeout/attended were indistinguishable from user refusals;
-  the "weather skill always fails" was structural (no weather tool — a skill could only say "use
-  web_search", three fragile hops); and `propose_skill` had no read-back so a model couldn't see
-  what it was improving.
-  - **Landed** (all JVM tests green; full plan + research in this session's messages):
-    1. `get_weather` (app/…/WeatherTool.kt) — Open-Meteo, keyless (geocoding + forecast, WMO codes
-       worded), `returnsUntrustedContent`, core tool. Both API shapes verified live.
-    2. Per-run tool selection (core/domain/…/ToolSelection.kt): 5-tool core set always offered
-       (`write_note`, `memory_search`, `device_status`, `propose_skill`, `get_weather`); the rest
-       ranked by the skill-embedding `Embedder` and admitted under a 6K-char budget; contexts
-       ≥32K tokens skip triage; no embedder → full list (old behavior). Wired via
-       `DefaultAgentOrchestrator` (`toolSelector` param, selects once per run) → `GenerationRequest.tools`.
-    3. Scoped always-allow grants (ToolApproval.kt `approvalScope`): host-scoped for
-       `web_fetch`/`launch_uri` urls, top-folder for file paths, exact command/shell line for
-       `termux_exec`, per-note for `write_note`; tools with no meaningful target (`web_search`,
-       `get_weather`, `search_contacts`) grant per-tool. Settings "Persistent permissions" rows
-       already render `tool@target` strings and Withdraw works unchanged.
-    4. Actionable denials: `ToolApprovalDecision.DENY_TIMEOUT` / `DENY_UNATTENDED` +
-       orchestrator error envelopes (`approval_timeout`, `approval_unattended`) that tell the model
-       what to do next, vs `permission_denied`'s "do not retry".
-    5. Skill read-back loop (app/…/SkillTools.kt): `list_skills` + `read_skill` (read-only,
-       approval-free; drafts listed by name/description only, never their instructions);
-       `propose_skill` result now names the active version the draft supersedes and points at
-       `read_skill`.
-    6. Selection eval (core/domain ToolSelectionEval.kt): deterministic keyword-embedder contract
-       tests — core survives every ask, relevant tools outrank noise, budget holds vs a 27-tool
-       registry.
-  - **Commit archaeology:** all of the above is inside `234208e` on `feat/expert-streaming`, swept
-    in by a concurrent session whose message only describes the expert-streaming cache fix. Tests:
-    `:core:domain:test :core:agent:test :app:testDebugUnitTest`.
-  - **Remaining (priority order):** (a) on-device validation — install, weather ask end-to-end,
-    first `get_weather` approval shows "Always" scoped to whole tool, small-model run trims tool
-    list (verify via a logcat line or telemetry if added later); (b) description diet — trim the
-    17 tool descriptions to function-only prose (~½ the tokens), best done with an on-model eval;
-    (c) skill-declared capabilities: `tools:` front matter in SKILL.md granting host-scoped
-    allowances only while that skill is active (needs SkillDocument version bump; old skills still
-    parse); (d) per-conversation permission presets + pre-authorized tool sets for automations so
-    scheduled runs never hit an unanswerable gate.
+- **Tools & skills overhaul — VALIDATED on device** (2026-08-15/16). All of the below is inside
+  `234208e` on `feat/expert-streaming` (swept in by a concurrent session whose message only
+  describes the streaming cache fix). Unit tests: `:core:domain:test :core:agent:test
+  :app:testDebugUnitTest`.
+  - **The working on-device tool-calling model is LFM2.5-2.6B-Q4_0.** DeepSeek-Coder-V2-Lite
+    never emits a tool call; Qwen3.5-0.8B answered from knowledge even with tools offered (its
+    template in the pin may not inject them); LFM2.5 reliably calls tools in the real template.
+  - **Device gotcha: `debug.bram.raw_prompt` must be 0 (unset).** The streaming session's dev
+    toggle was left at 1, which bypasses the chat template (no system prompt, no tools) and
+    silently breaks every tool interaction — it invalidated the first three validation runs.
+    Restored to 0; if streaming coherence tests re-enable it, reset it afterward.
+  - **Validated end-to-end on the S25 Ultra, 2026-08-16:**
+    1. Weather ask → LFM2.5 emitted `get_weather` → approval card showed "Allow Bram to get_weather
+       Tokyo?" with **Allow once | Always | Refuse** → tapped Always → tool ran (Open-Meteo,
+       geocoded "Tokyo, Tokyo, Japan", local_time 2026-08-16T12:30, current + forecast) → coherent
+       answer with real data. Card's accept branch verified for the first time.
+    2. Persistence: a second ask (Osaka, with `days:2`) ran with **no card** — grant held. Store:
+       `alwaysAllowed` contains `get_weather` (whole-tool scope, as designed — get_weather has no
+       approvalScopeKeys). Note a legacy `web_fetch(url=https://www.weather.com/.../largo-fl)`
+       exact-arg record also persists; it is dormant under the new host-scope format (won't match,
+       will just re-ask — safe direction). A `propose_skill` allowance in the store was granted by
+       the streaming session, not this one.
+    3. Refuse branch: write_note ask ("Grocery List") → card → Refuse → the model received the
+       `permission_denied` envelope verbatim ("The user declined this tool call. Do not call it
+       again this run...") and replied appropriately (no retry, offered alternatives).
+  - **Remaining (priority order):** (a) tool-selection trimming is unit-tested and proven
+    ⊇{get_weather, write_note} on-device, but the selected subset is not observable in the field —
+    add a logcat line (orchestrator emits the selected tool names per run) and re-verify on a
+    8K-context model; (b) description diet — trim the 17 tool descriptions to function-only prose
+    (~½ the tokens), best done with an on-model eval; (c) skill-declared capabilities: `tools:`
+    front matter in SKILL.md granting host-scoped allowances only while that skill is active (needs
+    SkillDocument version bump; old skills still parse); (d) per-conversation permission presets +
+    pre-authorized tool sets for automations so scheduled runs never hit an unanswerable gate;
+    (e) on-device check of list_skills/read_skill (unit-tested only).
 - **NEXT UP (other session, active): MoE expert streaming perf** — see the expert-streaming
-  section below; branch tip `234208e` also carries the dense-aware auto cache budget (V4 OOM fix).
+  section below; branch tip carries the dense-aware auto cache budget (V4 OOM fix). Note: that
+  session has **uncommitted `runtime/llamacpp/src/main/cpp/expert_stream.cpp`** in the tree at
+  times; do not build/commit over it without coordination.
 
 ## Current source of truth
 
