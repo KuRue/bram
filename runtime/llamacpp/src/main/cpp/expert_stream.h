@@ -69,9 +69,16 @@ public:
     size_t tensor_count() const { return offsets_.size(); }
     size_t shard_count() const { return fds_.size(); }
 
+    // When set, read_tensor drops each read range from the OS page cache (POSIX_FADV_DONTNEED) after
+    // copying it out. Only worth it on memory-pressured (>>RAM) models, where the leftover file
+    // pages would otherwise thrash the hot mmap'd dense weights; on a model that fits, keeping them
+    // enables warm re-reads of evicted experts, so leave this off.
+    void set_drop_after_read(bool on) { drop_after_read_ = on; }
+
 private:
     std::vector<int> fds_;
     std::unordered_map<std::string, TensorLoc> offsets_;
+    bool drop_after_read_ = false;
 };
 
 // Drives MoE expert streaming for one loaded model. Installed as the context's cb_eval callback.

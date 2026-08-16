@@ -75,6 +75,10 @@ bool GgufOffsetMap::load(const std::vector<std::string> & shard_paths, std::stri
             if (error != nullptr) *error = std::string("open failed for ") + path + ": " + strerror(errno);
             return false;
         }
+        // Experts are read at scattered offsets, so the kernel's default sequential readahead only
+        // wastes flash bandwidth and evicts useful (dense-weight) pages from the page cache. Ask for
+        // random-access behaviour so each pread fetches just the bytes requested.
+        posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
         fds_.push_back(fd);
     }
     return true;
@@ -102,6 +106,15 @@ int64_t GgufOffsetMap::read_tensor(const TensorLoc & loc, void * dst) const {
         remaining -= static_cast<uint64_t>(r);
         offset += static_cast<uint64_t>(r);
         out += r;
+    }
+    // On memory-pressured models: we've copied these bytes into the caller's buffer, so drop the
+    // file's page-cache pages for this range — leaving them cached would compete with the hot, mmap'd
+    // dense weights for RAM. Off by default because on a model that fits, those pages give warm
+    // re-reads of evicted experts. Also drops the model's own mmap pages here, which is fine —
+    // streamed experts are never read through the mmap.
+    if (drop_after_read_) {
+        posix_fadvise(fd, static_cast<off_t>(loc.file_offset), static_cast<off_t>(loc.nbytes),
+                      POSIX_FADV_DONTNEED);
     }
     return static_cast<int64_t>(loc.nbytes - remaining);
 }
@@ -583,12 +596,12 @@ bool ExpertStreamer::arm_stream(std::string * error) {
     // cache and lets the OS page-cache the experts, instead of OOM-killing the process; on a model
     // with light dense weights (V2-Lite: ~1.1 GB) it yields a big cache (~1.8x fewer cold re-reads).
     // Runs after dense-anon pinning so MemAvailable is accurate.
+    uint64_t experts_total = 0;
+    for (auto & kv : captured_) experts_total += kv.second.buffer_size;
+    uint64_t dense_total = 0;
+    for (auto & kv : dense_) dense_total += kv.second.loc.nbytes;
+    const uint64_t avail = read_mem_available_bytes();
     if (cache_budget_ == 0) {
-        uint64_t experts_total = 0;
-        for (auto & kv : captured_) experts_total += kv.second.buffer_size;
-        uint64_t dense_total = 0;
-        for (auto & kv : dense_) dense_total += kv.second.loc.nbytes;
-        const uint64_t avail = read_mem_available_bytes();
         const uint64_t reserve = dense_total + (1024ull << 20); // dense + headroom
         uint64_t budget = avail > reserve ? (avail - reserve) : 0;
         if (budget > experts_total) budget = experts_total;
@@ -599,6 +612,15 @@ bool ExpertStreamer::arm_stream(std::string * error) {
             (unsigned long long) (budget >> 20), (unsigned long long) (avail >> 20),
             (unsigned long long) (dense_total >> 20), (unsigned long long) (experts_total >> 20));
     }
+    // Memory-pressured model (dense weights alone nearly fill RAM, e.g. DeepSeek-V4): drop each
+    // expert's file pages after reading so they stop competing with the hot dense mmap. On a model
+    // that comfortably fits, keep them cached for warm re-reads of evicted experts.
+    const bool pressured = avail > 0 && (dense_total + (2ull << 30)) > avail;
+    offsets_.set_drop_after_read(pressured);
+    __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+        "bram_stream: page-cache drop-after-read %s (dense %llu MiB, avail %llu MiB)",
+        pressured ? "ON" : "off", (unsigned long long) (dense_total >> 20),
+        (unsigned long long) (avail >> 20));
 
     // Register the per-expert kernel hook — the ONLY streaming trigger now. It fires inside
     // ggml_compute_forward_mul_mat_id for each routed expert, just before its weights are read, and
