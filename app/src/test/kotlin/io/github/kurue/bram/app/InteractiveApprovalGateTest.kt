@@ -164,9 +164,9 @@ class InteractiveApprovalGateTest {
     @Test
     fun `silence is refusal rather than a hang`() = runTest {
         // An unattended run has nobody to answer it. Waiting forever holds the foreground service
-        // open with nothing happening.
+        // open with nothing happening. The refusal is named: an expired ask, not a declined one.
         val gate = InteractiveApprovalGate(FakePermissions(), timeoutMillis = 50)
-        assertEquals(ToolApprovalDecision.DENY, gate.decide(tool(), "{}"))
+        assertEquals(ToolApprovalDecision.DENY_TIMEOUT, gate.decide(tool(), "{}"))
         assertNull(gate.pending.value)
     }
 
@@ -174,13 +174,14 @@ class InteractiveApprovalGateTest {
     fun `an unattended run refuses a tool that needs asking instead of waiting`() = runTest {
         // A backgrounded or scheduled run cannot reach the approval card, so it must not hold the
         // run for the timeout. The long timeout is deliberate: if the gate waited, the card would
-        // be published and this test would fail on the pending assertion.
+        // be published and this test would fail on the pending assertion. The refusal is named:
+        // nobody could be asked at all, which the model reports differently from a timeout.
         val gate = InteractiveApprovalGate(FakePermissions(), timeoutMillis = 60_000)
         gate.setAttended(false)
         val decision = async { gate.decide(tool(), "{}") }
         yield()
         assertNull("no card is published when nobody can answer it", gate.pending.value)
-        assertEquals(ToolApprovalDecision.DENY, decision.await())
+        assertEquals(ToolApprovalDecision.DENY_UNATTENDED, decision.await())
     }
 
     @Test
@@ -255,9 +256,9 @@ class InteractiveApprovalGateTest {
     }
 
     @Test
-    fun `an allowance covers a different target for the same tool`() = runTest {
-        // Deliberate: "you may fetch" rather than "you may fetch this one address". The narrower
-        // grant is recorded in the git history if it needs to come back.
+    fun `an allowance covers a different target asks again`() = runTest {
+        // "Always allow git status" says nothing about git log: the new target is asked about
+        // rather than silently covered by the earlier grant.
         val permissions = FakePermissions()
         val gate = InteractiveApprovalGate(permissions)
         val runner = tool(name = "run_command", scopeKeys = listOf("command"))
@@ -267,19 +268,59 @@ class InteractiveApprovalGateTest {
         gate.pending.value?.resolve(ToolApprovalDecision.ALLOW_ALWAYS)
         first.await()
 
-        assertEquals(
-            ToolApprovalDecision.ALLOW_ONCE,
-            gate.decide(runner, """{"command":"git log"}"""),
-        )
+        val second = async { gate.decide(runner, """{"command":"git log"}""") }
+        yield()
+        assertEquals("the new target is asked about, not silently covered", "run_command", gate.pending.value?.toolName)
+        gate.pending.value?.resolve(ToolApprovalDecision.DENY)
+        assertEquals(ToolApprovalDecision.DENY, second.await())
     }
 
 
     @Test
-    fun `a tool with no target scopes to the tool itself`() = runTest {
+    fun `a tool with no target scopes to the tool itself`() {
         assertEquals(
             "read_clock",
             InteractiveApprovalGate.approvalScope(tool(name = "read_clock"), """{"zone":"UTC"}"""),
         )
+    }
+
+    @Test
+    fun `a url scope keeps the host and drops the rest`() {
+        val fetch = tool(name = "web_fetch", scopeKeys = listOf("url"))
+        assertEquals(
+            "web_fetch@host:api.open-meteo.com",
+            InteractiveApprovalGate.approvalScope(fetch, """{"url":"https://api.open-meteo.com/v1/forecast?x=1"}"""),
+        )
+        assertEquals(
+            "the www prefix is not part of what a person vouches for",
+            "web_fetch@host:example.com",
+            InteractiveApprovalGate.approvalScope(fetch, """{"url":"https://www.example.com/a/b/c"}"""),
+        )
+        // A url that does not parse has no stable target, so the grant falls back to the tool.
+        assertEquals(
+            "web_fetch",
+            InteractiveApprovalGate.approvalScope(fetch, """{"url":"not a url"}"""),
+        )
+    }
+
+    @Test
+    fun `a path scope keeps the top folder`() {
+        val writer = tool(name = "write_file", scopeKeys = listOf("path"))
+        assertEquals(
+            "write_file@folder:notes",
+            InteractiveApprovalGate.approvalScope(writer, """{"path":"notes/todo.txt"}"""),
+        )
+        assertEquals(
+            "write_file@folder:notes",
+            InteractiveApprovalGate.approvalScope(writer, """{"path":"notes/deeply/nested/file.md"}"""),
+        )
+    }
+
+    @Test
+    fun `blank or missing scope values fall back to the tool itself`() {
+        val runner = tool(name = "run_command", scopeKeys = listOf("command"))
+        assertEquals("run_command", InteractiveApprovalGate.approvalScope(runner, """{"command":"  "}"""))
+        assertEquals("run_command", InteractiveApprovalGate.approvalScope(runner, "not json at all"))
     }
 
     @Test
@@ -288,7 +329,7 @@ class InteractiveApprovalGateTest {
             tool(name = "run_command", scopeKeys = listOf("command")),
             """{"command":"git status"}""",
         )
-        assertEquals("every use of run_command", label)
+        assertEquals("every use of run_command for git status", label)
     }
 
     // A recovered call is text read as an intent, and text can be echoed from anywhere the model

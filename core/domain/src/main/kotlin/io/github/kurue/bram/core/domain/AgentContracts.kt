@@ -143,6 +143,10 @@ enum class ToolApprovalDecision {
     /** Remembered past the end of the run, until the user withdraws it. */
     ALLOW_ALWAYS,
     DENY,
+    /** The ask expired with nobody answering it; the run may be unattended. */
+    DENY_TIMEOUT,
+    /** Nobody could be asked at all: the run is unattended and no notification could be posted. */
+    DENY_UNATTENDED,
 }
 
 /**

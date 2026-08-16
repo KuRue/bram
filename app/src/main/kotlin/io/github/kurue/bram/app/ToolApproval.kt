@@ -141,18 +141,58 @@ class InteractiveApprovalGate(
 
     companion object {
         /**
-         * The key an allowance is remembered under: the tool itself.
+         * The key an allowance is remembered under: the tool, plus a coarse target when the tool
+         * names one.
          *
-         * It used to include the arguments a tool named as its target, so allowing one URL did not
-         * allow the next. That was safer and unusable: a person who allows a fetch means "you may
-         * fetch", not "you may fetch this one address", and re-approving every page made the grant
-         * worthless. Narrowing again should come with a way to see and revoke what was granted,
-         * rather than by making every grant too small to be worth making.
+         * Two previous designs bracket this one. Exact-argument scoping ("allow web_fetch of this
+         * one URL") was safer and unusable — every page re-asked, so grants were never made.
+         * Tool-name scoping went the other way: "always allow termux_exec" vouches for whatever
+         * command a future turn dreams up. The middle: the target a person actually vouches for,
+         * reduced to its stable part — the *host* of a url, the *top folder* of a path, the exact
+         * *command* text for a shell. "Always allow web_fetch on api.open-meteo.com" is a decision
+         * someone can make once and mean it.
+         *
+         * A tool with no scope keys, or a call whose keys carry nothing usable, scopes to the tool
+         * itself.
          */
-        fun approvalScope(tool: ToolDefinition, argumentsJson: String): String = tool.name
+        fun approvalScope(tool: ToolDefinition, argumentsJson: String): String {
+            if (tool.approvalScopeKeys.isEmpty()) return tool.name
+            val arguments = runCatching { JSONObject(argumentsJson) }.getOrNull() ?: return tool.name
+            val targets = tool.approvalScopeKeys.mapNotNull { key -> scopeTarget(key, arguments) }
+            if (targets.isEmpty()) return tool.name
+            return tool.name + "@" + targets.joinToString(";")
+        }
 
         /** The same thing said to a person rather than to a preferences file. */
-        fun scopeLabel(tool: ToolDefinition, argumentsJson: String): String = "every use of ${tool.name}"
+        fun scopeLabel(tool: ToolDefinition, argumentsJson: String): String {
+            val scope = approvalScope(tool, argumentsJson)
+            val at = scope.indexOf('@')
+            return if (at <= 0) "every use of ${tool.name}" else "every use of ${tool.name} for ${scope.substring(at + 1)}"
+        }
+
+        /**
+         * One scope key's target, reduced to the part that identifies what a grant vouches for.
+         * Urls keep their host (www dropped), paths keep their top folder, everything else keeps
+         * the raw value capped to a length a preferences key and a settings row can hold.
+         */
+        private fun scopeTarget(key: String, arguments: JSONObject): String? {
+            val raw = arguments.optString(key).trim()
+            if (raw.isEmpty()) return null
+            return when (key) {
+                "url", "uri" -> {
+                    val host = runCatching { java.net.URL(raw).host }.getOrNull()
+                        ?.lowercase()?.removePrefix("www.")?.takeIf(String::isNotEmpty)
+                    host?.let { "host:$it" }
+                }
+                "path" -> {
+                    val top = raw.split('/', '\\').firstOrNull { it.isNotBlank() }
+                    top?.take(MAX_SCOPE_TARGET_CHARS)?.let { "folder:$it" }
+                }
+                else -> raw.take(MAX_SCOPE_TARGET_CHARS)
+            }
+        }
+
+        private const val MAX_SCOPE_TARGET_CHARS = 64
     }
     val pending: StateFlow<PendingToolApproval?> = mutablePending.asStateFlow()
 
@@ -207,7 +247,7 @@ class InteractiveApprovalGate(
             // No one is at the card. Posting a notification turns the wait into a reachable ask
             // instead of silence; when nothing can be posted the call is refused at once so an
             // unattended run reacts to the denial instead of hanging the full timeout.
-            if (notifyRequest?.invoke(request) != true) return ToolApprovalDecision.DENY
+            if (notifyRequest?.invoke(request) != true) return ToolApprovalDecision.DENY_UNATTENDED
         }
         mutablePending.value = request
         return try {
@@ -217,7 +257,7 @@ class InteractiveApprovalGate(
             }
             decision
         } catch (_: TimeoutCancellationException) {
-            ToolApprovalDecision.DENY
+            ToolApprovalDecision.DENY_TIMEOUT
         } finally {
             // Cleared whatever the outcome, including cancellation of the run, so a stale card
             // cannot outlive the call it belonged to.

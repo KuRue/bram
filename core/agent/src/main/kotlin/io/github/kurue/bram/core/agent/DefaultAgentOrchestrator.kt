@@ -23,6 +23,8 @@ import io.github.kurue.bram.core.domain.ToolCall
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import io.github.kurue.bram.core.domain.ToolRegistry
+import io.github.kurue.bram.core.domain.ToolSelector
+import io.github.kurue.bram.core.domain.AllToolsSelector
 import io.github.kurue.bram.core.domain.toRecord
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
@@ -36,6 +38,7 @@ class DefaultAgentOrchestrator(
     private val approvalGate: ToolApprovalGate,
     private val journal: RunJournal = NoopRunJournal,
     private val memoryExtractor: MemoryExtractor = NoopMemoryExtractor,
+    private val toolSelector: ToolSelector = AllToolsSelector,
 ) : AgentOrchestrator {
 
     override fun run(request: AgentRunRequest, runtime: ModelRuntime): Flow<AgentEvent> = flow {
@@ -81,6 +84,14 @@ class DefaultAgentOrchestrator(
         // the context this run generates from.
         var untrustedContext = hasUntrustedContent(workingMessages)
         var compacted = false
+        // Tools are chosen once per run, from the ask that started it. Mid-run re-selection would
+        // let the set change under the model's feet (a tool it planned to chain vanishing after a
+        // tool result), and the query the run started with stays the best statement of its intent.
+        val selectedTools = toolSelector.select(
+            query = request.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
+            contextWindowTokens = runtime.model.contextWindowTokens,
+            available = toolRegistry.definitions(),
+        )
 
         repeat(request.maxToolTurns + 1) { turn ->
             var context = contextWindowManager.plan(
@@ -143,7 +154,7 @@ class DefaultAgentOrchestrator(
             runtime.generate(
                 GenerationRequest(
                     messages = context.messages,
-                    tools = toolRegistry.definitions(),
+                    tools = selectedTools,
                     maxOutputTokens = request.maxOutputTokens,
                     sampler = request.sampler,
                     requestId = UUID.randomUUID().toString(),
@@ -317,7 +328,25 @@ class DefaultAgentOrchestrator(
         }
 
         when (decision) {
-            ToolApprovalDecision.DENY -> return errorJson("permission_denied", "The user or policy denied this tool call")
+            ToolApprovalDecision.DENY -> return errorJson(
+                "permission_denied",
+                "The user declined this tool call. Do not call it again this run; continue " +
+                    "without it or explain what you need from the user.",
+            )
+            // The two silent refusals differ from a declined call in what the model should do
+            // next: nobody was there to say no, so the limitation is worth naming in the reply.
+            ToolApprovalDecision.DENY_TIMEOUT -> return errorJson(
+                "approval_timeout",
+                "The approval request expired with nobody answering it; the run may be " +
+                    "unattended. Continue without the tool, say so in your reply, and do not " +
+                    "immediately retry.",
+            )
+            ToolApprovalDecision.DENY_UNATTENDED -> return errorJson(
+                "approval_unattended",
+                "Nobody could be asked to approve this call: the run is unattended and no " +
+                    "notification could be posted. Continue without the tool and mention the " +
+                    "limitation.",
+            )
             // Remembering past the run is the gate's business, not the loop's; here both mean the
             // same thing — do not ask again before this run ends.
             // A recovered call grants nothing forward: allowing this one says nothing about the

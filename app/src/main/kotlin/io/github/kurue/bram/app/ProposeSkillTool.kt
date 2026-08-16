@@ -45,15 +45,28 @@ class ProposeSkillTool(
             append(instructions)
         }
         return when (val outcome = skillStore.proposeDraft(document)) {
-            is SkillImportOutcome.Imported -> JSONObject()
-                .put("packageId", outcome.packageId)
-                .put("version", outcome.version)
-                .put(
-                    "note",
-                    "Staged as a draft. It is NOT active yet; the user must activate it in Settings " +
-                        "before it joins the system prompt.",
-                )
-                .toString()
+            is SkillImportOutcome.Imported -> {
+                // What the draft supersedes, so the model knows what stays in effect: the active
+                // version keeps driving the harness until the user activates the draft.
+                val activeVersion = runCatching { skillStore.packages() }.getOrDefault(emptyList())
+                    .firstOrNull { it.id == outcome.packageId }?.activeVersion
+                val supersedeNote = if (activeVersion == null) {
+                    "This is a new skill; nothing is active yet."
+                } else {
+                    "Version $activeVersion stays active until the user activates this draft."
+                }
+                JSONObject()
+                    .put("packageId", outcome.packageId)
+                    .put("version", outcome.version)
+                    .put(
+                        "note",
+                        "Staged as a draft. It is NOT active yet; the user must activate it in " +
+                            "Settings before it joins the system prompt. $supersedeNote To improve " +
+                            "an existing skill, read it with read_skill first so the new version " +
+                            "builds on what is active.",
+                    )
+                    .toString()
+            }
             is SkillImportOutcome.Rejected -> errorJson("rejected", outcome.reason)
         }
     }

@@ -539,7 +539,6 @@ class ContactsTool(context: Context) : ToolHandler {
         """.trimIndent(),
         readOnly = true,
         requiredPermissions = setOf(RuntimePermissions.TOKEN_CONTACTS),
-        approvalScopeKeys = listOf("query"),
     )
 
     override suspend fun execute(argumentsJson: String): String = withContext(Dispatchers.IO) {

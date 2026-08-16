@@ -11,6 +11,7 @@ import io.github.kurue.bram.core.domain.Embedder
 import io.github.kurue.bram.core.domain.EndpointCredentialResolver
 import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
+import io.github.kurue.bram.core.domain.RankingToolSelector
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.SkillSelection
 import io.github.kurue.bram.core.domain.ToolDefinition
@@ -144,6 +145,7 @@ class AppContainer(application: Application) {
                 ScratchNoteTool(application),
                 WebSearchTool(),
                 WebFetchTool(),
+                WeatherTool(),
                 FilesTool(application),
                 ListFilesTool(application),
                 ReadFileTool(application),
@@ -157,6 +159,8 @@ class AppContainer(application: Application) {
                 termuxTool,
                 MemorySearchTool(memoryStore),
                 ProposeSkillTool(skillStore),
+                ListSkillsTool(skillStore),
+                ReadSkillTool(skillStore),
             ),
         ),
     )
@@ -183,6 +187,10 @@ class AppContainer(application: Application) {
         approvalGate = approvalGate,
         journal = runJournal,
         memoryExtractor = GeneratingMemoryExtractor(),
+        // Rank the registry's tools against the turn's ask so a small-context local model is not
+        // offered seventeen prose definitions every run. With no embedding model designated the
+        // selector returns the full list, which is exactly the previous behavior.
+        toolSelector = RankingToolSelector(embedder),
     )
 
     init {
