@@ -30,13 +30,15 @@ class ScratchNoteToolTest {
     }
 
     @Test
-    fun `an allowance covers the tool rather than one note`() {
-        // Allowing write_note means "you may write notes", not "you may write this one".
+    fun `an allowance covers one note, not every note`() {
+        // The note's name is the target: allowing a rewrite of "shopping" should not allow
+        // writing anything else.
         val shopping = InteractiveApprovalGate.approvalScope(definition, """{"name":"shopping"}""")
         val secrets = InteractiveApprovalGate.approvalScope(definition, """{"name":"secrets"}""")
-        assertEquals(shopping, secrets)
+        assertEquals("write_note@shopping", shopping)
+        assertEquals("write_note@secrets", secrets)
         assertEquals(
-            "every use of write_note",
+            "every use of write_note for shopping",
             InteractiveApprovalGate.scopeLabel(definition, """{"name":"shopping"}"""),
         )
     }

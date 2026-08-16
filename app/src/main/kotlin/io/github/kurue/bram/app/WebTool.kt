@@ -36,7 +36,6 @@ class WebSearchTool : ToolHandler {
         """.trimIndent(),
         requiredPermissions = setOf("internet"),
         readOnly = false,
-        approvalScopeKeys = listOf("query"),
     )
 
     override suspend fun execute(argumentsJson: String): String = withContext(Dispatchers.IO) {

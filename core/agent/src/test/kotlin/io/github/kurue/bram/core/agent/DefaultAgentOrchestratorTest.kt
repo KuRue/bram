@@ -16,6 +16,11 @@ import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.ModelLocation
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.RuntimeAvailability
+import io.github.kurue.bram.core.domain.ToolApprovalDecision
+import io.github.kurue.bram.core.domain.ToolApprovalGate
+import io.github.kurue.bram.core.domain.ToolCall
+import io.github.kurue.bram.core.domain.ToolDefinition
+import io.github.kurue.bram.core.domain.ToolHandler
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
@@ -121,6 +126,126 @@ class DefaultAgentOrchestratorTest {
         assertTrue("the turn must still complete", events.any { it is AgentEvent.Completed })
         assertTrue(memory.searchAll("anything", 10).isEmpty())
     }
+
+    @Test
+    fun `the selected tools reach the generation request`() = runBlocking {
+        val runtime = CapturingRuntime()
+        val offered = ToolDefinition(name = "only_me", description = "the one tool this run gets", inputSchemaJson = "{}")
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(NoopHandler("only_me"), NoopHandler("trimmed_away"))),
+            approvalGate = ReadOnlyApprovalGate(),
+            toolSelector = { _, _, _ -> listOf(offered) },
+        )
+
+        orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("select"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Trim the tool list")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = runtime,
+        ).toList()
+
+        assertEquals(listOf("only_me"), runtime.lastRequest?.tools?.map { it.name })
+    }
+
+    // A refusal's error envelope says what happened and what to do, because "denied" from a
+    // timeout reads to a model exactly like "the user said no" — and the right next action differs.
+
+    @Test
+    fun `an expired approval reads as a timeout, not a refusal`() = runBlocking {
+        val events = runWithToolCall { ToolApprovalDecision.DENY_TIMEOUT }
+        val result = (events.filterIsInstance<AgentEvent.ToolFinished>().single()).result
+        assertTrue(result.contains("\"code\":\"approval_timeout\""))
+        assertTrue(result.contains("unattended"))
+    }
+
+    @Test
+    fun `an unattended refusal names the limitation`() = runBlocking {
+        val events = runWithToolCall { ToolApprovalDecision.DENY_UNATTENDED }
+        val result = (events.filterIsInstance<AgentEvent.ToolFinished>().single()).result
+        assertTrue(result.contains("\"code\":\"approval_unattended\""))
+    }
+
+    @Test
+    fun `a declined call says not to retry it`() = runBlocking {
+        val events = runWithToolCall { ToolApprovalDecision.DENY }
+        val result = (events.filterIsInstance<AgentEvent.ToolFinished>().single()).result
+        assertTrue(result.contains("\"code\":\"permission_denied\""))
+        assertTrue(result.contains("Do not call it again"))
+    }
+
+    /** One run whose model calls a tool once, with the gate answering [decision]. */
+    private suspend fun runWithToolCall(decision: () -> ToolApprovalDecision): List<AgentEvent> {
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(NoopHandler("asked_about"))),
+            approvalGate = object : ToolApprovalGate {
+                override suspend fun decide(
+                    tool: ToolDefinition,
+                    argumentsJson: String,
+                    recovered: Boolean,
+                    untrustedContext: Boolean,
+                ): ToolApprovalDecision = decision()
+            },
+        )
+        return orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("deny"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = ToolCallingRuntime(),
+        ).toList()
+    }
+}
+
+/**
+ * A runtime that asks for one tool call on the first generation and answers plainly after it, so
+ * a denied call produces exactly one ToolFinished before the run completes.
+ */
+private class ToolCallingRuntime : ModelRuntime {
+    override val model = ModelDescriptor(
+        id = ModelId("test"),
+        displayName = "Test",
+        providerName = "Test",
+        modelName = "test",
+        location = ModelLocation.LOCAL,
+        contextWindowTokens = 4_096,
+    )
+
+    private var generations = 0
+
+    override suspend fun availability() = RuntimeAvailability(available = true, summary = "Ready")
+
+    override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+        emit(GenerationEvent.Started("Test"))
+        if (generations == 0) {
+            emit(GenerationEvent.ToolCallReady(ToolCall(id = "call_1", name = "asked_about", argumentsJson = "{}")))
+        } else {
+            emit(GenerationEvent.TextDelta("Done without it"))
+        }
+        generations++
+        emit(GenerationEvent.Finished("stop"))
+    }
+}
+
+private class NoopHandler(name: String) : ToolHandler {
+    override val definition = ToolDefinition(name = name, description = name, inputSchemaJson = "{}")
+    override suspend fun execute(argumentsJson: String): String = "{}"
 }
 
 private class StubMemoryExtractor(

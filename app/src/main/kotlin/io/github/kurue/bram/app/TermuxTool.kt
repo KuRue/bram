@@ -84,8 +84,10 @@ class TermuxCommandTool(context: Context) : ToolHandler {
         """.trimIndent(),
         readOnly = false,
         requiredPermissions = setOf(RuntimePermissions.TOKEN_TERMUX),
-        // An allowance is for one executable, not for whatever a later call happens to name.
-        approvalScopeKeys = listOf("command"),
+        // An allowance is for one executable or one exact shell line, not for whatever a later
+        // call happens to name. A `shell` call is scoped by its whole line: chains and pipes make
+        // the first word meaningless as an identity, and the line is what the user read.
+        approvalScopeKeys = listOf("command", "shell"),
     )
 
     override suspend fun execute(argumentsJson: String): String = withContext(Dispatchers.IO) {
