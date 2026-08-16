@@ -63,6 +63,11 @@ class ConversationStore(context: Context) {
             .put("title", resolvedTitle)
             .put("updatedAtEpochMillis", updatedAt)
             .put("messages", JSONArray().apply { messages.forEach { put(it.toJson()) } })
+        // Settings that live beside the messages must survive a rewrite: save() rebuilds the file
+        // from scratch, so without this a permission mode set between messages would silently
+        // reset to AUTO (and a privacy class to STANDARD) the next time one arrived.
+        carryForward(root, conversationFile(id), "permissionMode")
+        carryForward(root, conversationFile(id), "privacyClass")
         writeAtomically(conversationFile(id), root.toString())
 
         val summary = ConversationSummary(id, resolvedTitle, updatedAt, messages.size)
@@ -123,6 +128,15 @@ class ConversationStore(context: Context) {
     }
 
     fun newId(): ConversationId = ConversationId(UUID.randomUUID().toString())
+
+    /** Copies one persisted setting key from the conversation's previous file into its rewrite. */
+    private fun carryForward(root: JSONObject, previous: File, key: String) {
+        if (!previous.isFile) return
+        runCatching {
+            val value = JSONObject(previous.readText()).optString(key, "")
+            if (value.isNotBlank()) root.put(key, value)
+        }
+    }
 
     private fun existingTitle(id: ConversationId): String? =
         readIndex().firstOrNull { it.id == id }?.title?.takeIf(String::isNotBlank)

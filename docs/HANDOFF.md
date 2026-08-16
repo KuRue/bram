@@ -108,8 +108,20 @@ Last updated: 2026-08-16 (tools overhaul fully validated on device; continuation
     conversations, original phrasing) defeated. Emulator setup notes: LFM2.5 imported via the
     app's SAF flow (auto-configure's CPU-mask measurement hangs under QEMU — force-stop, the
     profile is created already); bge embedder + routing + skills.json wired via run-as (same
-    patterns as the phone). **Phone sync pending: install the parser-fix build on the S25 when
-    reconnected** (the phone's last build predates the parse_tools fix and suppression).
+    patterns as the phone).
+  - **Per-conversation permission presets verified on device (2026-08-16).** Drawer →
+    Conversation panel → "Tool approvals": **Ask when needed** (AUTO, default: read-only,
+    no-permission tools run silently; everything else asks unless Always-granted) | **Always
+    ask** (MANUAL: every tool asks, even read-only) | **Don't ask** (BYPASS: everything runs,
+    except a call recovered from text after untrusted content). Mode persists per conversation
+    in its JSON (`permissionMode`). Verified end-to-end on the emulator: BYPASS ran web_search
+    with no card and no stored grant; MANUAL made read-only device_status show a card; both
+    survived app restarts. Two persistence fixes shipped with this verification:
+    `ConversationStore.save()` now carries `permissionMode`/`privacyClass` forward (it used to
+    rebuild the file from scratch and silently reset both to defaults on the next message), and
+    `persistActiveConversation` writes a mode/privacy chosen before the conversation's first
+    message once the file exists. UI nit learned while testing: the mode chips' label text is a
+    dead tap zone on some densities — tap near the top of the chip.
 - **NEXT UP (other session, active): MoE expert streaming perf** — see the expert-streaming
   section below; branch tip carries the dense-aware auto cache budget (V4 OOM fix). Note: that
   session has **uncommitted `runtime/llamacpp/src/main/cpp/expert_stream.cpp`** in the tree at
