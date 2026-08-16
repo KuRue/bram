@@ -101,7 +101,8 @@ class RankingToolSelector(
     companion object {
         /**
          * The always-on set: small descriptions, useful in almost any turn, and the pieces the
-         * skill-improvement loop needs. Everything else waits for relevance.
+         * skill-improvement loop needs. read_skill is core because the prompt names it as the way
+         * to load a skill — offering that instruction without the tool would strand the model.
          */
         val DEFAULT_CORE_TOOLS: Set<String> = setOf(
             "write_note",
@@ -109,6 +110,7 @@ class RankingToolSelector(
             "device_status",
             "propose_skill",
             "get_weather",
+            "read_skill",
         )
 
         /**

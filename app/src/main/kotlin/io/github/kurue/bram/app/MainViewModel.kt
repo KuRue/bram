@@ -723,7 +723,7 @@ class MainViewModel(
                 conversationId = task.conversationId,
                 messages = listOf(ConversationMessage(role = MessageRole.USER, content = task.prompt)),
                 identity = BramDefaults.IDENTITY,
-                maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
+                maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
                 sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
                 profileInstructions = runInstructions(snapshot),
             )
@@ -3933,7 +3933,7 @@ class MainViewModel(
                     conversationId = conversationId,
                     messages = requestMessages,
                     identity = BramDefaults.IDENTITY,
-                    maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
+                    maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
                     sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
                     profileInstructions = runInstructions(snapshot),
                 ),

@@ -24,9 +24,8 @@ class ListSkillsTool(
 ) : ToolHandler {
     override val definition = ToolDefinition(
         name = "list_skills",
-        description = "List installed skills: active ones (which the harness follows when their " +
-            "description matches the task) and drafts awaiting the user's activation. Use before " +
-            "improving a skill with propose_skill.",
+        description = "List installed skills — active ones and drafts awaiting activation — as " +
+            "name, version, and description. Use before improving a skill with propose_skill.",
         inputSchemaJson = """{"type":"object","properties":{},"additionalProperties":false}""",
         readOnly = true,
     )
@@ -60,8 +59,9 @@ class ListSkillsTool(
         return JSONObject()
             .put(
                 "note",
-                "Active skills are followed when relevant. Drafts are staged by propose_skill and " +
-                    "join the system prompt only after the user activates them.",
+                "Active skills appear in the system prompt by description only; call read_skill " +
+                    "to load one before following it. Drafts are staged by propose_skill and " +
+                    "become usable after the user activates them.",
             )
             .put("active", active)
             .put("drafts", drafts)
@@ -75,10 +75,8 @@ class ReadSkillTool(
 ) : ToolHandler {
     override val definition = ToolDefinition(
         name = "read_skill",
-        description = "Read one active skill's version, description, and full instructions. Use to " +
-            "follow the skill exactly, or as the starting point for improving it with " +
-            "propose_skill at a higher version number. Drafted versions cannot be read until the " +
-            "user activates them.",
+        description = "Read one active skill's full instructions. Call this before following a " +
+            "skill or proposing an improved version of it.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{

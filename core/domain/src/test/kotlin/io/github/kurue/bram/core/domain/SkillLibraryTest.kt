@@ -180,7 +180,9 @@ class SkillLibraryTest {
         assertTrue(prompt.contains("ACTIVE SKILLS"))
         assertTrue(prompt.contains("Weather Scout (v1.0.0)"))
         assertTrue(prompt.contains("untrusted input"))
-        assertTrue(prompt.contains("Before any outdoor plan"))
+        // Progressive disclosure: the body loads through read_skill, never the prompt itself.
+        assertTrue(!prompt.contains("Before any outdoor plan"))
+        assertTrue(prompt.contains("read_skill"))
     }
 
     @Test
