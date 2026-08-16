@@ -725,7 +725,7 @@ class MainViewModel(
                 identity = BramDefaults.IDENTITY,
                 maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
                 sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
-                profileInstructions = runInstructions(snapshot),
+                profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
             )
             try {
                 container.agent().run(request, selection.runtime).collect { event ->
@@ -3547,7 +3547,10 @@ class MainViewModel(
      * The profile's instructions with the active skills and the user's standing memories appended,
      * read fresh for every run so newly activated skills and freshly extracted facts apply at once.
      */
-    private suspend fun runInstructions(snapshot: AppUiState): String {
+    private suspend fun runInstructions(
+        snapshot: AppUiState,
+        contextWindowTokens: Int = 8_192,
+    ): String {
         val base = snapshot.activeProfile?.systemPrompt.orEmpty()
         val skills = runCatching { container.skillStore.activeSkills() }.getOrDefault(emptyList())
         // Rank skills by description similarity to this turn's ask, so the ones that matter land
@@ -3555,7 +3558,26 @@ class MainViewModel(
         // ranker returns the input unchanged, so every active skill still joins the prompt.
         val query = snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
         val ranked = container.skillSelection.rank(skills, query, container.embedder)
-        var prompt = SkillPrompt.append(base, ranked)
+        // Evaluate the same selection the orchestrator will make (deterministic, and its
+        // embeddings are cached) so a skill that merely duplicates an offered tool is not
+        // advertised at all — on a small model the duplicate is a lure away from the tool.
+        val offered = runCatching {
+            container.toolSelector.select(
+                query = query,
+                contextWindowTokens = contextWindowTokens,
+                available = container.toolRegistry.definitions(),
+            )
+        }.getOrDefault(emptyList())
+        val advertised = container.skillSelection.withoutCovered(ranked, offered, container.embedder)
+        for (skill in ranked) {
+            val coverage = container.skillSelection.toolCoverage(skill, offered, container.embedder)
+            android.util.Log.d(
+                "BramSkill",
+                "skill ${skill.name}: max tool coverage ${coverage ?: "<unavailable>"}, " +
+                    "${if (skill in advertised) "advertised" else "suppressed"}",
+            )
+        }
+        var prompt = SkillPrompt.append(base, advertised)
         // One nudge per conversation: surface a drafted (inactive) skill whose description matches
         // this task so the user learns it exists. Drafts are unreviewed text and are never followed
         // — only their existence is named — and the set keeps a match from being suggested twice.
@@ -3935,7 +3957,7 @@ class MainViewModel(
                     identity = BramDefaults.IDENTITY,
                     maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
                     sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
-                    profileInstructions = runInstructions(snapshot),
+                    profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
                 ),
                 runtime = selection.runtime,
             ).collect { event ->
