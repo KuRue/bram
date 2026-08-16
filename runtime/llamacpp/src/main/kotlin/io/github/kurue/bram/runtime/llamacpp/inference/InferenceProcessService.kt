@@ -271,7 +271,12 @@ class InferenceProcessService : Service() {
         override fun loadEmbedder(modelPath: String?, threads: Int): String =
             bridge.loadEmbedder(modelPath.orEmpty(), threads)
 
-        override fun embed(text: String?): FloatArray = bridge.embed(text.orEmpty())
+        override fun embed(text: String?): FloatArray = try {
+            bridge.embed(text.orEmpty())
+        } catch (error: Throwable) {
+            android.util.Log.d("BramEmbed", "native embed threw ${error::class.simpleName}: ${error.message}")
+            throw error
+        }
 
         override fun unloadEmbedder(): String = bridge.unloadEmbedder()
     }

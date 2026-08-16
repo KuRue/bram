@@ -731,6 +731,9 @@ class MainViewModel(
                 container.agent().run(request, selection.runtime).collect { event ->
                     when (event) {
                         is AgentEvent.Status -> Unit
+                        is AgentEvent.ToolsSelected -> {
+                            android.util.Log.d("BramTools", "offering ${event.names.size} tools: ${event.names.joinToString()}")
+                        }
                         is AgentEvent.Reasoning -> Unit
                         is AgentEvent.ContextPrepared -> attemptActivity += "Context prepared (${event.estimatedInputTokens} tokens)"
                         is AgentEvent.ToolStarted -> attemptActivity += "Called ${event.call.name}"
@@ -3950,6 +3953,9 @@ class MainViewModel(
                             pushModelStatus(if (preparing) ModelPhase.PREPARING else ModelPhase.GENERATING)
                         }
                         is AgentEvent.Reasoning -> reasoningFormat = event.format
+                        is AgentEvent.ToolsSelected -> {
+                            android.util.Log.d("BramTools", "offering ${event.names.size} tools: ${event.names.joinToString()}")
+                        }
                         is AgentEvent.ContextPrepared -> mutableState.update {
                             it.copy(
                                 lastContextTokens = event.estimatedInputTokens,

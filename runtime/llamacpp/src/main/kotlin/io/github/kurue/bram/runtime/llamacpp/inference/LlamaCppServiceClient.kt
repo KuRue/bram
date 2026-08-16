@@ -64,7 +64,9 @@ class LlamaCppServiceClient(context: Context) : Closeable {
      * Null lets the memory store fall back to keyword recall rather than failing the turn.
      */
     suspend fun embed(text: String): FloatArray? = withContext(Dispatchers.IO) {
-        runCatching { requireService().embed(text) }.getOrNull()
+        runCatching { requireService().embed(text) }
+            .onFailure { android.util.Log.d("BramEmbed", "embed call failed: ${it::class.simpleName}: ${it.message}") }
+            .getOrNull()
     }
 
     suspend fun unloadEmbedder(): JSONObject = withContext(Dispatchers.IO) {

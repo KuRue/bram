@@ -122,8 +122,18 @@ class AppContainer(application: Application) {
      */
     val embedder: Embedder = object : Embedder {
         override suspend fun embed(text: String): FloatArray? {
-            if (embeddingModelStore.modelId() == null) return null
-            return LlamaCppEmbedder(llamaCppClient).embed(text)
+            if (embeddingModelStore.modelId() == null) {
+                android.util.Log.d("BramEmbed", "no embedding model designated; returning null")
+                return null
+            }
+            return try {
+                LlamaCppEmbedder(llamaCppClient).embed(text).also {
+                    if (it == null) android.util.Log.d("BramEmbed", "embed returned null")
+                }
+            } catch (error: Throwable) {
+                android.util.Log.d("BramEmbed", "embed threw ${error::class.simpleName}: ${error.message}")
+                null
+            }
         }
     }
     val memoryStore = PersistentMemoryStore(application, embedder)
@@ -200,7 +210,14 @@ class AppContainer(application: Application) {
         appScope.launch {
             val path = embeddingModelStore.modelPath()
             if (!path.isNullOrBlank()) {
-                runCatching { llamaCppClient.loadEmbedder(path, EMBEDDER_THREADS) }
+                val result = runCatching { llamaCppClient.loadEmbedder(path, EMBEDDER_THREADS) }
+                android.util.Log.d(
+                    "BramEmbed",
+                    result.fold(
+                        onSuccess = { "loaded embedder from $path => ${(it ?: "<null>")}" },
+                        onFailure = { "loadEmbedder FAILED: ${it::class.simpleName}: ${it.message}" },
+                    ),
+                )
             }
         }
     }

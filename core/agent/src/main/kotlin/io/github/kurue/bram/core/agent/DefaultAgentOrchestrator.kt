@@ -92,6 +92,7 @@ class DefaultAgentOrchestrator(
             contextWindowTokens = runtime.model.contextWindowTokens,
             available = toolRegistry.definitions(),
         )
+        emit(AgentEvent.ToolsSelected(selectedTools.map { it.name }))
 
         repeat(request.maxToolTurns + 1) { turn ->
             var context = contextWindowManager.plan(
