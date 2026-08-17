@@ -515,9 +515,12 @@ void decode_prompt(llama_context * context, const std::vector<llama_token> & tok
     size_t offset = 0;
     while (offset < tokens.size()) {
         if (g_cancelled.load(std::memory_order_relaxed)) throw std::runtime_error("Generation cancelled");
+        // Batch by the context's actual n_batch, which is always >= 1 and never exceeds n_ctx. Using
+        // the raw g_state.batch_tokens here would spin forever if it were ever 0 (it is only kept > 0
+        // by a convention in the Kotlin client) and could exceed the context's batch size.
         const int count = std::min(
             static_cast<int>(tokens.size() - offset),
-            g_state.batch_tokens);
+            static_cast<int>(llama_n_batch(context)));
         llama_batch batch = llama_batch_get_one(
             const_cast<llama_token *>(tokens.data() + offset), count);
         const int result = llama_decode(context, batch);
@@ -1348,7 +1351,13 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
             llama_tokens prompt_tgt = g_state.cached_tokens;
             common_speculative_begin(g_state.speculative.get(), seq_id, prompt_tgt);
 
-            llama_batch batch_tgt = llama_batch_init(llama_n_batch(context), 0, 1);
+            // RAII so the batch's arrays are freed on every exit — including the exceptions the loop
+            // below can throw (token-callback failure, a failed decode) — not just the normal path.
+            struct BatchGuard {
+                llama_batch b;
+                ~BatchGuard() { llama_batch_free(b); }
+            } batch_guard{ llama_batch_init(llama_n_batch(context), 0, 1) };
+            llama_batch & batch_tgt = batch_guard.b;
             llama_tokens draft;
             int n_past = (int) prompt_tgt.size();
             llama_token id_last = prompt_tgt.back();
@@ -1437,7 +1446,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
                 if (finish_reason == "stop" || output_count >= max_output_tokens) break;
                 draft.clear();
             }
-            llama_batch_free(batch_tgt);
+            // batch_tgt is freed by batch_guard's destructor.
         } else {
         for (; output_count < max_output_tokens; ++output_count) {
             if (g_cancelled.load(std::memory_order_relaxed)) {
@@ -1760,8 +1769,6 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_parseRepl
         // own turn header and empty reasoning markers, and a content-only format passes those
         // straight through, so the reply would otherwise read as protocol rather than as an answer.
         auto trim = [](std::string & value) {
-            const char * spaces = " TABNLCR";
-            (void) spaces;
             while (!value.empty() && (value.front() == ' ' || value.front() == '\n' ||
                                       value.front() == '\r' || value.front() == '\t')) {
                 value.erase(0, 1);
