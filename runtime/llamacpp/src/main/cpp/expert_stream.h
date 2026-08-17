@@ -113,16 +113,13 @@ public:
     void set_cache_budget(uint64_t bytes) { cache_budget_ = bytes; }
     uint64_t resident_bytes() const { return resident_bytes_; }
     uint64_t evictions() const { return evictions_; }
-    // Pin the always-used (non-expert) weights in anonymous memory at arm time so the OS cannot
-    // reclaim them mid-generation the way it drops file-backed mmap pages under pressure.
-    void set_dense_anon(bool on) { dense_anon_ = on; }
+    // Bytes of always-hot dense weights pinned in anon RAM this run (0 unless the model was
+    // memory-pressured; see the selective pinning in arm_stream).
     uint64_t dense_bytes() const { return dense_bytes_; }
     size_t dense_count() const { return dense_.size(); }
-    // Overlap expert reads with expert compute: the topk callback enqueues a layer's experts to
-    // background reader lanes (non-blocking) and the kernel's per-expert hook blocks until each
-    // slice is resident. `lanes` reader threads; 0 lanes keeps the serial path. Needs the injected
-    // ggml_cpu_set_expert_ready_hook; falls back to serial (with a log) if the hook is absent.
-    void set_overlap(bool on, int lanes) { overlap_ = on; overlap_lanes_ = lanes > 0 ? lanes : 8; }
+    // Number of background reader lanes for the batch-prefetch path (the boolean is ignored — the
+    // hook-driven path always prefetches; only the lane count is configurable).
+    void set_overlap(bool /*on*/, int lanes) { overlap_lanes_ = lanes > 0 ? lanes : 8; }
     // Dev toggle: skip selective dense pinning even on a pressured model (frees the pin RAM so a
     // lane-count sweep has headroom to isolate read parallelism from the pin's memory pressure).
     void set_no_dense_pin(bool on) { no_dense_pin_ = on; }
@@ -142,10 +139,6 @@ public:
     bool arm_stream(std::string * error);
     // Restore every expert tensor's original ->data and release the buffers. Safe if not armed.
     void disarm_stream();
-    // Debug isolation: after arming, fill EVERY expert's anon buffer from its mmap ->data (memcpy)
-    // and mark it resident, so the experts are anon-backed with correct bytes but static — no
-    // per-token streaming and no cb_eval graph splits. Separates "rebind to anon" from "streaming".
-    void fill_all_from_mmap();
 
     size_t captured_count() const { return captured_.size(); }
     // Captured tensors whose byte location resolved in the offset map (should equal captured_count()).
@@ -166,11 +159,6 @@ private:
     // If `name` is "blk.<il>.<suffix>.weight" for one of the recipe's expert suffixes, fill *il and
     // *suffix_idx and return true.
     bool match_expert(const char * name, int * il, int * suffix_idx) const;
-    // Parse the block index out of a routing node name "ffn_moe_topk-<il>". Returns -1 on mismatch.
-    static int parse_topk_layer(const char * name);
-    // Stream every routed expert for layer `il` that is not already resident, reading each expert's
-    // slice from flash into its slot in the tensor buffer.
-    void stream_layer(int il, const ggml_tensor * topk);
 
     struct Captured {
         ggml_tensor * tensor = nullptr;
@@ -191,7 +179,6 @@ private:
     Mode mode_ = Mode::Off;
     bool armed_ = false;
     bool verify_ = false;
-    bool dense_anon_ = false;
     const ExpertRecipe * recipe_ = nullptr;
     GgufOffsetMap offsets_;
     std::unordered_map<std::string, Captured> captured_;
@@ -210,7 +197,6 @@ private:
     // Expert tensors grouped by block, in recipe-suffix order, for quick lookup from a topk node.
     std::unordered_map<int, std::vector<Captured *>> by_layer_;
     std::vector<Captured *> captured_by_id_;   // id -> Captured, for LRU key decode
-    std::vector<int32_t> id_scratch_;   // reused host buffer for the routing node's expert ids
 
     // LRU cache of resident expert slices. Keys pack (captured id, expert index); the list is MRU
     // at the front, and iterators in the map give O(1) touch/evict. Physical pages for an evicted
@@ -228,7 +214,7 @@ private:
     uint64_t cache_misses_ = 0;         // hook had to wait for / read the expert
     uint64_t verify_mismatches_ = 0;    // resident-vs-streamed byte mismatches (should stay 0)
 
-    // --- Overlap: background reader lanes + the per-expert wait hook -----------------------------
+    // --- Reader lanes + the per-expert wait hook -------------------------------------------------
     // One coarse mutex guards resident/in_flight, the LRU cache, and the byte counters; the slow
     // pread itself happens unlocked, so lanes read concurrently. read_cv_ signals waiters that an
     // expert became resident; queue_cv_ wakes reader lanes when work arrives.
@@ -244,11 +230,9 @@ private:
     // layer siblings (they share expert indices) to the reader lanes, before the compute loop.
     void on_expert_batch(const ggml_tensor * as, const int64_t * counts, int64_t n_as);
 
-    bool overlap_ = false;
-    int overlap_lanes_ = 8;
-    bool no_dense_pin_ = false;               // dev: skip dense pinning (for lane-sweep headroom)
-    bool overlap_active_ = false;             // (legacy) reader-lane prefetch; unused in hook-driven path
-    bool hook_active_ = false;                // true while the ggml_cpu expert-ready hook is registered
+    int overlap_lanes_ = 8;                    // background reader-lane count
+    bool no_dense_pin_ = false;                // dev: skip dense pinning (for lane-sweep headroom)
+    bool hook_active_ = false;                 // true while the ggml_cpu expert-ready hook is registered
     std::unordered_map<const ggml_tensor *, Captured *> by_tensor_;  // for the hook to find a Captured
     std::mutex mu_;
     std::condition_variable read_cv_;         // an expert became resident

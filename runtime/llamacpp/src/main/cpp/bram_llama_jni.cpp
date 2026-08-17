@@ -398,33 +398,19 @@ void capture_experts(llama_context * context) {
         g_state.streamer->captured_count(), g_state.streamer->resolved_count(),
         g_state.streamer->captured_bytes() / (1024.0 * 1024.0 * 1024.0), g_state.streamer->shard_count());
 
-    // Arm the actual streaming only when explicitly enabled (P2 is validated by comparing streamed
-    // vs resident output. The settings come from the load request (a real profile setting); only
-    // the byte-for-byte self-check stays a dev-only property since it pages the resident weights:
-    //   adb shell setprop debug.bram.stream.verify 1
-    // Isolation toggle (dev-only): keep the streaming load settings (use_extra_bufts=false, the
-    // capture warm-up) but DO NOT arm — experts stay on their mmap ->data. Comparing this against a
-    // plain mmap load (streamExperts off) isolates whether the streaming corruption comes from
-    // use_extra_bufts=false (this stays garbage) or from the ->data rebind (this goes coherent):
-    //   adb shell setprop debug.bram.stream.mmap_experts 1
-    char meprop[PROP_VALUE_MAX] = {0};
-    __system_property_get("debug.bram.stream.mmap_experts", meprop);
-    const bool debug_mmap_experts = meprop[0] == '1';
-    if (debug_mmap_experts) {
-        __android_log_print(ANDROID_LOG_WARN, "BramLlama",
-            "bram_stream: DEBUG mmap_experts — experts left on mmap, use_extra_bufts=false, NOT armed");
-    }
-
-    if (g_state.stream_experts && !debug_mmap_experts) {
+    // Arm the streamer when the loaded model is a streamable MoE and the profile asked for it. Two
+    // dev-only properties tune it without a rebuild: the byte-for-byte self-check (pages the resident
+    // weights, so it stays a property), and a reader-lane-count override for profiling.
+    //   adb shell setprop debug.bram.stream.verify 1     # verify streamed bytes == mmap (dev gate)
+    //   adb shell setprop debug.bram.stream.lanes 16      # override reader-lane count
+    //   adb shell setprop debug.bram.stream.nopin 1       # skip dense pinning (profiling headroom)
+    if (g_state.stream_experts) {
         char vprop[PROP_VALUE_MAX] = {0};
         __system_property_get("debug.bram.stream.verify", vprop);
         g_state.streamer->set_verify(vprop[0] == '1');
         if (g_state.stream_cache_mb > 0) {
             g_state.streamer->set_cache_budget(static_cast<uint64_t>(g_state.stream_cache_mb) * 1024 * 1024);
         }
-        g_state.streamer->set_dense_anon(g_state.stream_dense_anon);
-        // Dev knob to sweep reader-lane count (read parallelism) without a rebuild, e.g.:
-        //   adb shell setprop debug.bram.stream.lanes 16
         char lanesprop[PROP_VALUE_MAX] = {0};
         __system_property_get("debug.bram.stream.lanes", lanesprop);
         const int lanes_override = lanesprop[0] ? atoi(lanesprop) : 0;
@@ -433,38 +419,12 @@ void capture_experts(llama_context * context) {
         char nopinprop[PROP_VALUE_MAX] = {0};
         __system_property_get("debug.bram.stream.nopin", nopinprop);
         g_state.streamer->set_no_dense_pin(nopinprop[0] == '1');
-        // Second isolation toggle: arm the anon buffers but fill them all from mmap and keep mode
-        // Off (static anon, no cb_eval splits). Coherent here + garbage when streaming ⇒ the bug is
-        // the cb_eval graph split; garbage here ⇒ the anon ->data rebind itself:
-        //   adb shell setprop debug.bram.stream.static_anon 1
-        char saprop[PROP_VALUE_MAX] = {0};
-        __system_property_get("debug.bram.stream.static_anon", saprop);
-        const bool debug_static_anon = saprop[0] == '1';
-
-        // Third isolation toggle: DON'T arm (experts stay on mmap, no anon, no rebind) but still run
-        // in Stream mode, so cb_eval returns true for each ffn_moe_topk node and the graph is split
-        // exactly as streaming does — stream_layer no-ops (null buffers). Garbage here ⇒ the cb_eval
-        // graph split alone breaks the arch; coherent ⇒ the split is fine and the rebind is the bug:
-        //   adb shell setprop debug.bram.stream.split_probe 1
-        char spprop[PROP_VALUE_MAX] = {0};
-        __system_property_get("debug.bram.stream.split_probe", spprop);
-        if (spprop[0] == '1') {
-            g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Stream);
-            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
-                "bram_stream: DEBUG split_probe — NOT armed, Stream mode forces topk graph splits only");
-            return;
-        }
 
         std::string arm_error;
         if (g_state.streamer->arm_stream(&arm_error)) {
-            if (debug_static_anon) {
-                g_state.streamer->fill_all_from_mmap();
-                g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Off);
-            } else {
             g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Stream);
             __android_log_print(ANDROID_LOG_WARN, "BramLlama",
                 "bram_stream: STREAMING ARMED — experts will be read from flash on demand");
-            }
         } else {
             __android_log_print(ANDROID_LOG_WARN, "BramLlama",
                 "bram_stream: arm failed, staying resident (%s)", arm_error.c_str());

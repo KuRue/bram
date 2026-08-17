@@ -1851,7 +1851,7 @@ private fun ProfileCard(
                                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
-                                listOf(0 to "Unbounded", 1024 to "1 GiB", 2048 to "2 GiB", 4096 to "4 GiB")
+                                listOf(0 to "Auto", 1024 to "1 GiB", 2048 to "2 GiB", 4096 to "4 GiB")
                                     .forEach { (mb, label) ->
                                         FilterChip(
                                             selected = profile.streamCacheMb == mb,
@@ -1861,25 +1861,10 @@ private fun ProfileCard(
                                         )
                                     }
                             }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                SectionLabel("Pin dense weights in RAM", Modifier.weight(1f))
-                                Checkbox(
-                                    checked = profile.streamDenseAnon,
-                                    onCheckedChange = { onUpdateProfile(profile.copy(streamDenseAnon = it)) },
-                                    enabled = !busy,
-                                )
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                SectionLabel("Overlap reads with compute", Modifier.weight(1f))
-                                Checkbox(
-                                    checked = profile.streamOverlap,
-                                    onCheckedChange = { onUpdateProfile(profile.copy(streamOverlap = it)) },
-                                    enabled = !busy,
-                                )
-                            }
                             Text(
-                                "Prefetches each layer's routed experts on background threads while " +
-                                    "the previous layers compute, instead of reading them one at a time.",
+                                "Reads only each token's routed experts from flash. Auto sizes the cache to " +
+                                    "free RAM and pins the hot dense weights; experts are prefetched on " +
+                                    "background threads while the model computes.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
