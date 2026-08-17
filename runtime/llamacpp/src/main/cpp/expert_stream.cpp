@@ -216,111 +216,6 @@ bool ExpertStreamer::on_eval(ggml_tensor * t, bool ask) {
     return false;
 }
 
-int ExpertStreamer::parse_topk_layer(const char * name) {
-    if (name == nullptr) return -1;
-    static const char * kPrefix = "ffn_moe_topk-";
-    const size_t plen = std::strlen(kPrefix);
-    if (std::strncmp(name, kPrefix, plen) != 0) return -1;
-    char * end = nullptr;
-    const long il = std::strtol(name + plen, &end, 10);
-    if (end == name + plen) return -1;
-    return static_cast<int>(il);
-}
-
-void ExpertStreamer::stream_layer(int il, const ggml_tensor * topk) {
-    const auto it = by_layer_.find(il);
-    if (it == by_layer_.end() || topk == nullptr || topk->type != GGML_TYPE_I32) return;
-
-    // The routing node holds the selected expert ids for every token in the batch. Its ->data is a
-    // backend-buffer address, not necessarily host-dereferenceable, so copy the ids out with the
-    // backend accessor rather than reading ->data directly. ne is graph metadata and safe to read.
-    const int64_t n_ids = topk->ne[0] * topk->ne[1] * topk->ne[2] * topk->ne[3];
-    if (n_ids <= 0 || n_ids > (1 << 20)) return;
-    if (id_scratch_.size() < static_cast<size_t>(n_ids)) id_scratch_.resize(static_cast<size_t>(n_ids));
-    ggml_backend_tensor_get(topk, id_scratch_.data(), 0, static_cast<size_t>(n_ids) * sizeof(int32_t));
-    const int32_t * ids = id_scratch_.data();
-
-    // Overlap path: hand this layer's routed experts to the background reader lanes and return.
-    // The per-expert kernel hook blocks each compute thread until its slice is resident, so the
-    // reads run concurrently with the previous layers' compute instead of serially before it.
-    // Eviction runs here (a layer boundary, where no expert is mid-compute) rather than in the
-    // reader lanes, so a slice is never dropped while a matmul is reading it. See docs/overlap.
-    if (overlap_active_) {
-        std::lock_guard<std::mutex> lk(mu_);
-        evict_to_budget();
-        for (Captured * c : it->second) {
-            if (c == nullptr || c->buffer == nullptr) continue;
-            for (int64_t k = 0; k < n_ids; ++k) {
-                const int32_t e = ids[k];
-                if (e < 0 || e >= c->n_expert) continue;
-                if (c->resident[e]) {
-                    const uint64_t key = (static_cast<uint64_t>(c->id) << 24) | static_cast<uint32_t>(e);
-                    const auto pit = lru_pos_.find(key);
-                    if (pit != lru_pos_.end()) lru_.splice(lru_.begin(), lru_, pit->second);
-                    continue;
-                }
-                enqueue_locked(c, static_cast<int>(e));
-            }
-        }
-        return;
-    }
-
-    const uint64_t slices_before = slices_read_;
-    for (Captured * c : it->second) {
-        if (c == nullptr || c->buffer == nullptr) continue;
-        for (int64_t k = 0; k < n_ids; ++k) {
-            const int32_t e = ids[k];
-            if (e < 0 || e >= c->n_expert) continue;
-            const uint64_t key = (static_cast<uint64_t>(c->id) << 24) | static_cast<uint32_t>(e);
-            if (c->resident[e]) {
-                // Already cached: promote to most-recently-used and skip the read.
-                const auto pit = lru_pos_.find(key);
-                if (pit != lru_pos_.end()) lru_.splice(lru_.begin(), lru_, pit->second);
-                continue;
-            }
-            const TensorLoc slice{c->loc.shard, c->loc.file_offset + static_cast<uint64_t>(e) * c->expert_stride,
-                                  c->expert_stride};
-            void * dst = static_cast<uint8_t *>(c->buffer) + static_cast<uint64_t>(e) * c->expert_stride;
-            if (offsets_.read_tensor(slice, dst) == static_cast<int64_t>(c->expert_stride)) {
-                c->resident[e] = 1;
-                bytes_read_ += c->expert_stride;
-                ++slices_read_;
-                resident_bytes_ += c->expert_stride;
-                lru_.push_front(key);
-                lru_pos_[key] = lru_.begin();
-                // Self-check (opt-in): on a resident model the original mmap bytes are still mapped,
-                // so a slice streamed from flash must equal them byte-for-byte. Zero mismatches over
-                // a run proves the streaming path reads exactly what the resident model would use.
-                // Off by default — the memcmp would page a genuinely-larger-than-RAM model's weights.
-                if (verify_ && c->orig_data != nullptr) {
-                    const void * ref = static_cast<const uint8_t *>(c->orig_data) +
-                                       static_cast<uint64_t>(e) * c->expert_stride;
-                    if (memcmp(dst, ref, c->expert_stride) != 0) {
-                        if (verify_mismatches_ < 5) {
-                            __android_log_print(ANDROID_LOG_ERROR, "BramLlama",
-                                "bram_stream: VERIFY MISMATCH il=%d expert=%d stride=%llu", c->il, e,
-                                (unsigned long long) c->expert_stride);
-                        }
-                        ++verify_mismatches_;
-                    }
-                }
-                evict_to_budget();
-            }
-        }
-    }
-    // Live summary so the byte-identity gate is visible without an unload: log the first handful of
-    // streaming events with running totals, then thin out to once per 2000 slices.
-    if (slices_read_ > slices_before) {
-        static int logs = 0;
-        if (logs < 15 || slices_read_ / 2000 != slices_before / 2000) {
-            ++logs;
-            __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-                "bram_stream: %llu slices streamed (%.2f MiB), %llu mismatches so far",
-                (unsigned long long) slices_read_, bytes_read_ / (1024.0 * 1024.0),
-                (unsigned long long) verify_mismatches_);
-        }
-    }
-}
 
 void ExpertStreamer::evict_to_budget() {
     if (cache_budget_ == 0) return; // unbounded: keep every streamed expert
@@ -658,17 +553,6 @@ bool ExpertStreamer::arm_stream(std::string * error) {
 
     armed_ = true;
     return true;
-}
-
-void ExpertStreamer::fill_all_from_mmap() {
-    for (auto & kv : captured_) {
-        Captured & c = kv.second;
-        if (c.buffer == nullptr || c.orig_data == nullptr) continue;
-        memcpy(c.buffer, c.orig_data, c.buffer_size);
-        std::fill(c.resident.begin(), c.resident.end(), static_cast<uint8_t>(1));
-    }
-    __android_log_print(ANDROID_LOG_WARN, "BramLlama",
-        "bram_stream: DEBUG static_anon — all experts memcpy'd from mmap into anon buffers, mode Off");
 }
 
 void ExpertStreamer::disarm_stream() {
