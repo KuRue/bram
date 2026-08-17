@@ -582,7 +582,7 @@ bool ExpertStreamer::arm_stream(std::string * error) {
     if (pressured) {
         const uint64_t headroom = 2ull << 30;   // compute + KV + embedding working set + OS + safety
         const uint64_t committable = avail0 > headroom ? (avail0 - headroom) : 0;
-        const uint64_t pin_budget = committable > cache_floor ? (committable - cache_floor) : 0;
+        const uint64_t pin_budget = (no_dense_pin_ || committable <= cache_floor) ? 0 : (committable - cache_floor);
         // Drop each dense range's file pages as we read it (the anon copy is authoritative) so the
         // pread doesn't transiently double residency and blow the budget mid-pin.
         offsets_.set_drop_after_read(true);

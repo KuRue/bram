@@ -423,7 +423,16 @@ void capture_experts(llama_context * context) {
             g_state.streamer->set_cache_budget(static_cast<uint64_t>(g_state.stream_cache_mb) * 1024 * 1024);
         }
         g_state.streamer->set_dense_anon(g_state.stream_dense_anon);
-        g_state.streamer->set_overlap(g_state.stream_overlap, g_state.stream_overlap_lanes);
+        // Dev knob to sweep reader-lane count (read parallelism) without a rebuild, e.g.:
+        //   adb shell setprop debug.bram.stream.lanes 16
+        char lanesprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream.lanes", lanesprop);
+        const int lanes_override = lanesprop[0] ? atoi(lanesprop) : 0;
+        g_state.streamer->set_overlap(g_state.stream_overlap,
+            lanes_override > 0 ? lanes_override : g_state.stream_overlap_lanes);
+        char nopinprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream.nopin", nopinprop);
+        g_state.streamer->set_no_dense_pin(nopinprop[0] == '1');
         // Second isolation toggle: arm the anon buffers but fill them all from mmap and keep mode
         // Off (static anon, no cb_eval splits). Coherent here + garbage when streaming ⇒ the bug is
         // the cb_eval graph split; garbage here ⇒ the anon ->data rebind itself:
