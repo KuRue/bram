@@ -42,20 +42,31 @@ class LoadIdentityTest {
     }
 
     @Test
-    fun `any field difference breaks the identity`() {
+    fun `effective field differences break the identity`() {
         val baseline = request()
         val other = LoadIdentity.from(request(gpuLayers = 7))
         assertNotEquals(LoadIdentity.from(baseline), other)
         // The fields that gate a reload: backend, offload, attention, KV, batch, threadpool,
-        // load mode, and the hexagon flags — a change in any one must mean a fresh context.
+        // load mode, and the hexagon flags — a change in any effective normalized value must
+        // mean a fresh context.
         assertEquals(
             LoadIdentity.from(request()),
             LoadIdentity.from(request().put("threads", 0)),
         )
-        assertNotEquals(
-            LoadIdentity.from(request(threads = 4)),
-            LoadIdentity.from(request(threads = 6)),
-        )
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        if (cores > 1) {
+            assertNotEquals(
+                LoadIdentity.from(request(threads = 1)),
+                LoadIdentity.from(request(threads = cores)),
+            )
+        } else {
+            // On a single-core runner every positive thread request normalizes to one, so the
+            // effective load configuration is correctly identical.
+            assertEquals(
+                LoadIdentity.from(request(threads = 1)),
+                LoadIdentity.from(request(threads = 2)),
+            )
+        }
         assertNotEquals(
             LoadIdentity.from(request(cpuMask = "3")),
             LoadIdentity.from(request(cpuMask = "")),
