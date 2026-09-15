@@ -205,6 +205,13 @@ fallback and error text.
 Exit: clean working tree; `./gradlew` unit suites green; the endpoint flow (add → discover models →
 chat) works on the emulator.
 
+Result (2026-09-15): landed on `feat/endpoints` (three commits: termux preflight, endpoints + UI,
+this plan). Unit suites green — `:runtime:openai:test` with eight new contract tests,
+`:app:testDebugUnitTest` re-run, androidTest compiles with the smoke-test label fixed. Live on the
+emulator: **add endpoint and model discovery verified** (UI form → mock catalog → chips → context
+auto-fill). The chat leg was not reached: the emulator itself became unstable during the attempt
+(see the findings below) — that leg is now M1's first exit test.
+
 ### M1 — Emulator harness test bed (1–2 days)
 
 1. A scripted OpenAI-compatible mock server (host-side, small Python) with named scenarios: happy
@@ -217,6 +224,27 @@ chat) works on the emulator.
 
 Exit: on the emulator, a scripted tool loop runs deterministically with no model file; the smoke
 test passes in one `am instrument` invocation.
+
+Emulator findings from M0 (2026-09-15) — prerequisites for a trustworthy test bed:
+
+1. **`restoreLastModel()` auto-loads the last-used profile at every launch**
+   (`MainViewModel.kt:4366`). On the QEMU emulator that load crashed the `:inference` process
+   (contained; the UI survives and shows the error card), and a system_server ANR followed;
+   `uiautomator dump` then wedged until reboot. Guard or clear the last-used profile for emulator
+   runs before trusting any test that starts the app.
+2. **The local embedder makes selection cost minutes per turn.** With bge designated, skill
+   ranking and tool selection embed the query plus every offered tool (~20 s per embed under
+   QEMU); a turn sat at "Choosing a profile…" for many minutes. Unsetting the embedding model
+   makes both selectors take their documented instant fallback. Overhaul item (M4): selection
+   must be deadline-bounded and must never block a turn like this.
+3. **Host plumbing.** `adb reverse` is bound to the adb server instance, and this machine's PATH
+   has a PhoenixSuit adb (v31) watchdog that keeps re-binding 5037. Use a private server
+   (`ANDROID_ADB_SERVER_PORT=5038`, then `adb connect 127.0.0.1:5555`) and re-run `reverse` after
+   any server change. The scripted mock server used during M0 lived in a temp directory; it
+   belongs in the repo as part of M1.
+4. **AVD health is a dependency.** `Pixel_9a` crashed twice during cold boot after the ANR. M1
+   should own a known-good AVD (snapshot, or a wipe-and-provision script) instead of inheriting
+   whatever state the last session left.
 
 ### M2 — Harness correctness core (3–5 days)
 
