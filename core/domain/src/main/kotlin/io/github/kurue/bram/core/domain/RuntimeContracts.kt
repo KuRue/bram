@@ -43,6 +43,8 @@ data class GenerationRequest(
     /** How to sample. Carried whole, since the settings only make sense together. */
     val sampler: SamplerSettings = SamplerSettings(),
     val requestId: String,
+    /** Stable across every model/tool round in one conversation, for provider-side prompt caches. */
+    val sessionId: String? = null,
 )
 
 /**

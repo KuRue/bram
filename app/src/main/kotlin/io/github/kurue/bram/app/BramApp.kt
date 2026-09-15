@@ -293,6 +293,7 @@ fun BramApp(viewModel: MainViewModel) {
                 modifier = Modifier.align(Alignment.BottomCenter),
                 onSend = viewModel::send,
                 onStop = viewModel::stopGeneration,
+                onSetPermissionMode = viewModel::updatePermissionMode,
             )
 
             if (drawerOpen) {
@@ -356,6 +357,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onUpdateProfile = viewModel::updateProfile,
                                 onDeleteProfile = viewModel::deleteProfile,
                                 onSaveEndpoint = viewModel::saveEndpoint,
+                                onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onAutoConfigure = viewModel::autoConfigure,
                                 onTuneBatch = viewModel::tuneBatch,
@@ -386,6 +388,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onBack = { panel = AppPanel.CAPABILITIES },
                                 onSaveEndpoint = viewModel::saveEndpoint,
+                                onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                             )
                             AppPanel.TOOLS -> ToolsScreen(
@@ -974,8 +977,10 @@ private fun ChatComposer(
     modifier: Modifier = Modifier,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
+    onSetPermissionMode: (PermissionMode) -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf("") }
+    var confirmBypass by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier
@@ -983,6 +988,31 @@ private fun ChatComposer(
             .navigationBarsPadding()
             .padding(horizontal = 12.dp),
     ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(
+                modifier = Modifier.testTag("approval-mode-button"),
+                onClick = {
+                    if (state.permissionMode == PermissionMode.BYPASS) {
+                        onSetPermissionMode(PermissionMode.AUTO)
+                    } else {
+                        confirmBypass = true
+                    }
+                },
+            ) {
+                Text(
+                    if (state.permissionMode == PermissionMode.BYPASS) "Auto-approve on" else "Ask before tools",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (state.permissionMode == PermissionMode.BYPASS) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
         // What is waiting: the queue exists because the in-flight turn owns the transcript, so
         // the chip is the only on-screen trace of a message until its turn starts.
         if (state.queuedMessages.isNotEmpty()) {
@@ -1045,12 +1075,36 @@ private fun ChatComposer(
             }
         }
     }
+
+    if (confirmBypass) {
+        AlertDialog(
+            onDismissRequest = { confirmBypass = false },
+            title = { Text("Auto-approve tools in this chat?") },
+            text = {
+                Text(
+                    "Bram will run tool calls without asking each time. Android permissions " +
+                        "and protection against tool calls copied from fetched content still apply.",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmBypass = false
+                        onSetPermissionMode(PermissionMode.BYPASS)
+                    },
+                ) { Text("Auto-approve") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmBypass = false }) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 /** Reserves the space the floating chrome occupies so the transcript is not trapped under it. */
 private val TOP_BAR_SPACE = 76.dp
 private val TOP_FADE_HEIGHT = 64.dp
-private val COMPOSER_SPACE = 92.dp
+private val COMPOSER_SPACE = 126.dp
 
 @Composable
 private fun RuntimeOption(
@@ -1091,6 +1145,7 @@ private fun ModelsScreen(
     onUpdateProfile: (ModelProfile) -> Unit,
     onDeleteProfile: (String) -> Unit,
     onSaveEndpoint: (EndpointDraft) -> Unit,
+    onDiscoverRemoteModels: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
     onAutoConfigure: (String) -> Unit,
     onTuneBatch: (String) -> Unit,
@@ -1104,10 +1159,11 @@ private fun ModelsScreen(
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var addingProfile by rememberSaveable { mutableStateOf(false) }
+    var editingEndpointId by rememberSaveable { mutableStateOf<String?>(null) }
     var profileCountAtOpen by rememberSaveable { mutableStateOf(0) }
     var showAdvancedTools by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(state.profiles.size, state.endpoints.size, addingProfile) {
-        if (addingProfile && state.profiles.size + state.endpoints.size > profileCountAtOpen) {
+        if (addingProfile && editingEndpointId == null && state.profiles.size + state.endpoints.size > profileCountAtOpen) {
             addingProfile = false
         }
     }
@@ -1117,6 +1173,8 @@ private fun ModelsScreen(
             onBack = { addingProfile = false },
             onImport = onImport,
             onSaveEndpoint = onSaveEndpoint,
+            onDiscoverRemoteModels = onDiscoverRemoteModels,
+            initialEndpoint = state.endpoints.firstOrNull { it.id == editingEndpointId },
         )
         return
     }
@@ -1142,6 +1200,7 @@ private fun ModelsScreen(
                 SectionHeader("Profiles", modifier = Modifier.weight(1f))
                 IconButton(
                     onClick = {
+                        editingEndpointId = null
                         profileCountAtOpen = state.profiles.size + state.endpoints.size
                         addingProfile = true
                     },
@@ -1208,7 +1267,14 @@ private fun ModelsScreen(
             }
         }
         items(state.endpoints, key = { "remote:${it.id}" }) { endpoint ->
-            EndpointCard(endpoint, onRemoveEndpoint)
+            EndpointCard(
+                endpoint = endpoint,
+                onEdit = {
+                    editingEndpointId = endpoint.id
+                    addingProfile = true
+                },
+                onRemove = onRemoveEndpoint,
+            )
         }
         item {
             GlassSurface(
@@ -1265,15 +1331,27 @@ private fun AddProfileScreen(
     onBack: () -> Unit,
     onImport: () -> Unit,
     onSaveEndpoint: (EndpointDraft) -> Unit,
+    onDiscoverRemoteModels: (EndpointDraft) -> Unit,
+    initialEndpoint: RemoteEndpoint? = null,
 ) {
-    var addingServer by rememberSaveable { mutableStateOf(false) }
-    var name by rememberSaveable { mutableStateOf("") }
-    var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
-    var modelName by rememberSaveable { mutableStateOf("") }
-    var context by rememberSaveable { mutableStateOf("32768") }
+    var addingServer by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint != null) }
+    var name by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.displayName.orEmpty()) }
+    var baseUrl by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.baseUrl ?: "http://127.0.0.1:11434/v1") }
+    var modelName by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.modelName.orEmpty()) }
+    var context by rememberSaveable(initialEndpoint?.id) { mutableStateOf((initialEndpoint?.contextWindowTokens ?: 32768).toString()) }
     var apiKey by rememberSaveable { mutableStateOf("") }
-    var allowHttp by rememberSaveable { mutableStateOf(false) }
-    var apiKind by rememberSaveable { mutableStateOf(RemoteApiKind.CHAT_COMPLETIONS) }
+    var allowHttp by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.allowInsecureHttp ?: false) }
+    var apiKind by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.apiKind ?: RemoteApiKind.CHAT_COMPLETIONS) }
+    var reasoningEffort by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.reasoningEffort) }
+    var customHeaders by rememberSaveable(initialEndpoint?.id) {
+        mutableStateOf(initialEndpoint?.customHeaders?.entries?.joinToString("\n") { "${it.key}: ${it.value}" }.orEmpty())
+    }
+    var bodyOptions by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.bodyOptionsJson ?: "{}") }
+    var advanced by rememberSaveable(initialEndpoint?.id) { mutableStateOf(false) }
+    LaunchedEffect(modelName, state.remoteModelDiscovery.models) {
+        state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
+            ?.contextWindowTokens?.let { context = it.toString() }
+    }
 
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
@@ -1318,6 +1396,41 @@ private fun AddProfileScreen(
                     OutlinedTextField(name, { name = it }, label = { Text("Profile name") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("Base URL") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(modelName, { modelName = it }, label = { Text("Model ID") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedButton(
+                        onClick = {
+                            onDiscoverRemoteModels(
+                                EndpointDraft(initialEndpoint?.id, name, baseUrl, modelName, context.toIntOrNull() ?: 32768, apiKey, allowHttp, apiKind),
+                            )
+                        },
+                        enabled = !state.remoteModelDiscovery.loading,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (state.remoteModelDiscovery.loading) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else Text("Get available models")
+                    }
+                    state.remoteModelDiscovery.error?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (state.remoteModelDiscovery.models.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            state.remoteModelDiscovery.models.forEach { model ->
+                                FilterChip(
+                                    selected = modelName == model.id,
+                                    onClick = {
+                                        modelName = model.id
+                                        model.contextWindowTokens?.let { context = it.toString() }
+                                        apiKind = discoveredApiKind(baseUrl, model.id, apiKind)
+                                        if (reasoningEffort !in model.reasoningEfforts) reasoningEffort = null
+                                    },
+                                    label = { Text(model.id) },
+                                )
+                            }
+                        }
+                    }
                     OutlinedTextField(
                         context,
                         { context = it.filter(Char::isDigit) },
@@ -1341,6 +1454,16 @@ private fun AddProfileScreen(
                             )
                         }
                     }
+                    val selectedModel = state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
+                    if (!selectedModel?.reasoningEfforts.isNullOrEmpty()) {
+                        SectionLabel("Thinking")
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(selected = reasoningEffort == null, onClick = { reasoningEffort = null }, label = { Text("Default") })
+                            selectedModel!!.reasoningEfforts.forEach { effort ->
+                                FilterChip(selected = reasoningEffort == effort, onClick = { reasoningEffort = effort }, label = { Text(effort) })
+                            }
+                        }
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(allowHttp, { allowHttp = it })
                         Column {
@@ -1352,14 +1475,36 @@ private fun AddProfileScreen(
                             )
                         }
                     }
+                    TextButton(onClick = { advanced = !advanced }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (advanced) "Hide advanced" else "Advanced")
+                    }
+                    if (advanced) {
+                        OutlinedTextField(
+                            customHeaders,
+                            { customHeaders = it },
+                            label = { Text("Custom headers") },
+                            supportingText = { Text("One Name: value per line. {session_id} is replaced per conversation.") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            bodyOptions,
+                            { bodyOptions = it },
+                            label = { Text("Request options (JSON)") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (baseUrl.contains("opencode.ai/zen/go", ignoreCase = true)) {
+                            Text("Bram adds x-opencode-session automatically for each conversation.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                     Button(
                         onClick = {
                             onSaveEndpoint(
-                                EndpointDraft(name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind),
+                                EndpointDraft(initialEndpoint?.id, name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind, reasoningEffort, customHeaders, bodyOptions),
                             )
+                            onBack()
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Create profile") }
+                    ) { Text(if (initialEndpoint == null) "Create profile" else "Save changes") }
                     TextButton(onClick = { addingServer = false }, modifier = Modifier.fillMaxWidth()) {
                         Text("Choose another source")
                     }
@@ -2747,7 +2892,7 @@ private fun SessionScreen(
 private fun permissionModeUiLabel(mode: PermissionMode): String = when (mode) {
     PermissionMode.AUTO -> "Ask when needed"
     PermissionMode.MANUAL -> "Always ask"
-    PermissionMode.BYPASS -> "Don't ask"
+    PermissionMode.BYPASS -> "Auto-approve"
 }
 
 private fun privacyClassUiLabel(privacyClass: PrivacyClass): String = when (privacyClass) {
@@ -2933,9 +3078,11 @@ private fun ProvidersScreen(
     state: AppUiState,
     onBack: () -> Unit,
     onSaveEndpoint: (EndpointDraft) -> Unit,
+    onDiscoverRemoteModels: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
 ) {
     var adding by rememberSaveable { mutableStateOf(false) }
+    var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var name by rememberSaveable { mutableStateOf("") }
     var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
     var modelName by rememberSaveable { mutableStateOf("") }
@@ -2943,6 +3090,13 @@ private fun ProvidersScreen(
     var apiKey by rememberSaveable { mutableStateOf("") }
     var allowHttp by rememberSaveable { mutableStateOf(false) }
     var apiKind by rememberSaveable { mutableStateOf(RemoteApiKind.CHAT_COMPLETIONS) }
+    var reasoningEffort by rememberSaveable { mutableStateOf<String?>(null) }
+    var customHeaders by rememberSaveable { mutableStateOf("") }
+    var bodyOptions by rememberSaveable { mutableStateOf("{}") }
+    LaunchedEffect(modelName, state.remoteModelDiscovery.models) {
+        state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
+            ?.contextWindowTokens?.let { context = it.toString() }
+    }
 
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
@@ -2959,7 +3113,26 @@ private fun ProvidersScreen(
         if (state.endpoints.isEmpty()) {
             EmptyDestination("No providers yet", "Add one when you want to use a model hosted on a server.")
         } else {
-            state.endpoints.forEach { EndpointCard(it, onRemoveEndpoint) }
+            state.endpoints.forEach { endpoint ->
+                EndpointCard(
+                    endpoint = endpoint,
+                    onEdit = {
+                        editingId = endpoint.id
+                        name = endpoint.displayName
+                        baseUrl = endpoint.baseUrl
+                        modelName = endpoint.modelName
+                        context = endpoint.contextWindowTokens.toString()
+                        apiKey = ""
+                        allowHttp = endpoint.allowInsecureHttp
+                        apiKind = endpoint.apiKind
+                        reasoningEffort = endpoint.reasoningEffort
+                        customHeaders = endpoint.customHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" }
+                        bodyOptions = endpoint.bodyOptionsJson
+                        adding = true
+                    },
+                    onRemove = onRemoveEndpoint,
+                )
+            }
         }
         if (!adding) {
             Button(onClick = { adding = true }, modifier = Modifier.fillMaxWidth()) { Text("Add provider") }
@@ -2970,6 +3143,37 @@ private fun ProvidersScreen(
                     OutlinedTextField(name, { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("Base URL") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(modelName, { modelName = it }, label = { Text("Model ID") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedButton(
+                        onClick = {
+                            onDiscoverRemoteModels(
+                                EndpointDraft(editingId, name, baseUrl, modelName, context.toIntOrNull() ?: 32768, apiKey, allowHttp, apiKind),
+                            )
+                        },
+                        enabled = !state.remoteModelDiscovery.loading,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(if (state.remoteModelDiscovery.loading) "Checking…" else "Get available models") }
+                    state.remoteModelDiscovery.error?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (state.remoteModelDiscovery.models.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            state.remoteModelDiscovery.models.forEach { model ->
+                                FilterChip(
+                                    selected = modelName == model.id,
+                                    onClick = {
+                                        modelName = model.id
+                                        model.contextWindowTokens?.let { context = it.toString() }
+                                        apiKind = discoveredApiKind(baseUrl, model.id, apiKind)
+                                        if (reasoningEffort !in model.reasoningEfforts) reasoningEffort = null
+                                    },
+                                    label = { Text(model.id) },
+                                )
+                            }
+                        }
+                    }
                     OutlinedTextField(
                         context,
                         { context = it.filter(Char::isDigit) },
@@ -2993,6 +3197,16 @@ private fun ProvidersScreen(
                             )
                         }
                     }
+                    val selectedModel = state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
+                    if (!selectedModel?.reasoningEfforts.isNullOrEmpty()) {
+                        SectionLabel("Thinking")
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(selected = reasoningEffort == null, onClick = { reasoningEffort = null }, label = { Text("Default") })
+                            selectedModel!!.reasoningEfforts.forEach { effort ->
+                                FilterChip(selected = reasoningEffort == effort, onClick = { reasoningEffort = effort }, label = { Text(effort) })
+                            }
+                        }
+                    }
                     Text(
                         if (apiKind == RemoteApiKind.CHAT_COMPLETIONS) {
                             "Works with Ollama, LM Studio, vLLM, llama.cpp server, and most compatible hosts."
@@ -3013,14 +3227,17 @@ private fun ProvidersScreen(
                             )
                         }
                     }
+                    OutlinedTextField(customHeaders, { customHeaders = it }, label = { Text("Custom headers") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(bodyOptions, { bodyOptions = it }, label = { Text("Request options (JSON)") }, modifier = Modifier.fillMaxWidth())
                     Button(
                         onClick = {
                             onSaveEndpoint(
-                                EndpointDraft(name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind),
+                                EndpointDraft(editingId, name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind, reasoningEffort, customHeaders, bodyOptions),
                             )
+                            adding = false
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Save provider") }
+                    ) { Text(if (editingId == null) "Save provider" else "Save changes") }
                     TextButton(onClick = { adding = false }, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
                 }
             }
@@ -3447,14 +3664,14 @@ private fun ChatBubble(
                 blur = false,
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    MessageBody(message, editing, draft, { draft = it }) {
+                    MessageBody(message, editing, draft, { draft = it }, onCopy) {
                         editing = false
                         onEdit(draft)
                     }
                 }
             }
         } else {
-            MessageBody(message, editing, draft, { draft = it }) {
+            MessageBody(message, editing, draft, { draft = it }, onCopy) {
                 editing = false
                 onEdit(draft)
             }
@@ -3495,6 +3712,7 @@ private fun MessageBody(
     editing: Boolean,
     draft: String,
     onDraftChange: (String) -> Unit,
+    onCopy: (String) -> Unit,
     onSubmit: () -> Unit,
 ) {
     ActivityList(message.id.value, message.activity)
@@ -3512,9 +3730,89 @@ private fun MessageBody(
     } else if (message.content.isNotBlank() || message.activity.isEmpty()) {
         // Models answer in Markdown whether or not anyone asked them to, so rendering it is closer
         // to showing the reply than showing the raw characters is.
+        MarkdownMessage(message.content.ifBlank { "…" }, onCopy)
+    }
+}
+
+@Composable
+private fun MarkdownMessage(source: String, onCopy: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        parseMarkdownBlocks(source).forEachIndexed { index, block ->
+            when (block) {
+                is MarkdownBlock.Prose -> if (block.source.isNotEmpty()) {
+                    Text(renderMarkdown(block.source), style = MaterialTheme.typography.bodyLarge)
+                }
+                is MarkdownBlock.Code -> CodeBlock(
+                    code = block.code,
+                    language = block.language,
+                    onCopy = onCopy,
+                    modifier = Modifier.testTag("code-block-$index"),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CodeBlock(
+    code: String,
+    language: String?,
+    onCopy: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.82f)),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                language?.lowercase(Locale.ROOT) ?: "code",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            IconButton(
+                onClick = { onCopy(code) },
+                modifier = Modifier.size(40.dp).testTag("copy-code"),
+            ) {
+                CopyIcon(MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(18.dp))
+            }
+        }
         Text(
-            renderMarkdown(message.content.ifBlank { "…" }),
-            style = MaterialTheme.typography.bodyLarge,
+            code,
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            softWrap = false,
+        )
+    }
+}
+
+@Composable
+private fun CopyIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.09f
+        val inset = size.minDimension * 0.12f
+        drawRoundRect(
+            color = tint.copy(alpha = 0.65f),
+            topLeft = Offset(inset, inset),
+            size = androidx.compose.ui.geometry.Size(size.width * 0.62f, size.height * 0.62f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(inset),
+            style = Stroke(stroke),
+        )
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(size.width * 0.28f, size.height * 0.28f),
+            size = androidx.compose.ui.geometry.Size(size.width * 0.62f, size.height * 0.62f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(inset),
+            style = Stroke(stroke),
         )
     }
 }
@@ -3715,7 +4013,7 @@ private fun AcceleratorRow(capability: AcceleratorCapability) {
 }
 
 @Composable
-private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
+private fun EndpointCard(endpoint: RemoteEndpoint, onEdit: () -> Unit, onRemove: (String) -> Unit) {
     var expanded by rememberSaveable(endpoint.id) { mutableStateOf(false) }
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3745,11 +4043,20 @@ private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    TextButton(onClick = onEdit) { Text("Edit profile") }
                     TextButton(onClick = { onRemove(endpoint.id) }) { Text("Remove profile") }
                 }
             }
         }
     }
+}
+
+/** OpenCode Go's catalog uses ordinary OpenAI model rows even when a model uses Responses. */
+private fun discoveredApiKind(baseUrl: String, modelId: String, fallback: RemoteApiKind): RemoteApiKind {
+    if (!baseUrl.contains("opencode.ai/zen/go", ignoreCase = true)) return fallback
+    return if (
+        modelId.startsWith("muse-spark-") || modelId == "gpt-5.6-luna" || modelId == "grok-4.6"
+    ) RemoteApiKind.RESPONSES else RemoteApiKind.CHAT_COMPLETIONS
 }
 
 @Composable

@@ -61,6 +61,8 @@ import io.github.kurue.bram.core.agent.RuleBasedModelRouter
 import io.github.kurue.bram.platform.android.CpuTopology
 import io.github.kurue.bram.platform.android.RoutingSettingsStore
 import io.github.kurue.bram.runtime.llamacpp.ModelImportProgress
+import io.github.kurue.bram.runtime.openai.RemoteModelCatalog
+import io.github.kurue.bram.runtime.openai.RemoteModelInfo
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -385,6 +387,8 @@ data class AppUiState(
     /** The profile a load uses. Every model has at least a default one. */
     val activeProfileId: String? = null,
     val endpoints: List<RemoteEndpoint> = emptyList(),
+    /** Result of the most recent OpenAI-compatible /models lookup in the profile editor. */
+    val remoteModelDiscovery: RemoteModelDiscovery = RemoteModelDiscovery(),
     val selectedRuntimeId: String? = null,
     val loadedModelId: String? = null,
     val cpuValidated: Boolean = false,
@@ -536,6 +540,7 @@ data class AppUiState(
 }
 
 data class EndpointDraft(
+    val id: String? = null,
     val displayName: String,
     val baseUrl: String,
     val modelName: String,
@@ -543,6 +548,16 @@ data class EndpointDraft(
     val apiKey: String,
     val allowInsecureHttp: Boolean,
     val apiKind: RemoteApiKind = RemoteApiKind.CHAT_COMPLETIONS,
+    val reasoningEffort: String? = null,
+    val customHeadersText: String = "",
+    val bodyOptionsJson: String = "{}",
+)
+
+data class RemoteModelDiscovery(
+    val endpointId: String? = null,
+    val loading: Boolean = false,
+    val models: List<RemoteModelInfo> = emptyList(),
+    val error: String? = null,
 )
 
 /** One configured MCP server as the settings screen shows it after a refresh. */
@@ -3365,7 +3380,7 @@ class MainViewModel(
                 return@launch
             }
             val endpoint = RemoteEndpoint(
-                id = UUID.randomUUID().toString(),
+                id = draft.id ?: UUID.randomUUID().toString(),
                 displayName = draft.displayName.trim(),
                 baseUrl = draft.baseUrl.trim().trimEnd('/'),
                 modelName = draft.modelName.trim(),
@@ -3373,9 +3388,69 @@ class MainViewModel(
                 contextWindowTokens = draft.contextWindowTokens,
                 supportsToolCalling = true,
                 allowInsecureHttp = draft.allowInsecureHttp,
+                reasoningEffort = draft.reasoningEffort,
+                customHeaders = parseHeaders(draft.customHeadersText),
+                bodyOptionsJson = draft.bodyOptionsJson.trim().ifBlank { "{}" },
             )
-            container.endpointStore.upsert(endpoint, draft.apiKey)
+            // A blank key while editing means "leave the stored secret alone"; new profiles still
+            // treat blank as no credential.
+            val credential = if (draft.id != null && draft.apiKey.isBlank()) null else draft.apiKey
+            container.endpointStore.upsert(endpoint, credential)
             reloadEndpoints(selectId = endpoint.id)
+        }
+    }
+
+    fun discoverRemoteModels(draft: EndpointDraft) {
+        if (draft.baseUrl.isBlank()) {
+            mutableState.update {
+                it.copy(remoteModelDiscovery = RemoteModelDiscovery(error = "Enter a server URL first."))
+            }
+            return
+        }
+        val uri = runCatching { URI(draft.baseUrl.trim()) }.getOrNull()
+        if (uri?.scheme == "http" && !draft.allowInsecureHttp) {
+            mutableState.update {
+                it.copy(remoteModelDiscovery = RemoteModelDiscovery(error = "Allow HTTP for this trusted local server first."))
+            }
+            return
+        }
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(remoteModelDiscovery = RemoteModelDiscovery(endpointId = draft.id, loading = true))
+            }
+            val credential = draft.apiKey.takeIf(String::isNotBlank)
+                ?: draft.id?.let { id ->
+                    val endpoint = mutableState.value.endpoints.firstOrNull { it.id == id }
+                    endpoint?.let { container.endpointStore.resolveCredential(id, it.credentialAlias) }
+                }.orEmpty()
+            runCatching { RemoteModelCatalog().list(draft.baseUrl, credential) }
+                .onSuccess { models ->
+                    // OpenCode Go also advertises Anthropic Messages-only Qwen models. Bram's
+                    // remote runtime currently speaks Chat Completions and Responses, so do not
+                    // offer choices that cannot work with either selectable API.
+                    val compatibleModels = if (draft.baseUrl.contains("opencode.ai/zen/go", ignoreCase = true)) {
+                        models.filterNot { it.id.startsWith("qwen", ignoreCase = true) }
+                    } else models
+                    mutableState.update {
+                        it.copy(
+                            remoteModelDiscovery = RemoteModelDiscovery(
+                                endpointId = draft.id,
+                                models = compatibleModels,
+                                error = if (compatibleModels.isEmpty()) "The server returned no compatible models." else null,
+                            ),
+                        )
+                    }
+                }
+                .onFailure { failure ->
+                    mutableState.update {
+                        it.copy(
+                            remoteModelDiscovery = RemoteModelDiscovery(
+                                endpointId = draft.id,
+                                error = failure.message ?: "Could not list models.",
+                            ),
+                        )
+                    }
+                }
         }
     }
 
@@ -4522,8 +4597,24 @@ class MainViewModel(
         if (uri.scheme == "http" && !draft.allowInsecureHttp) {
             return "Enable insecure HTTP for this local endpoint or use HTTPS."
         }
+        if (runCatching { JSONObject(draft.bodyOptionsJson.ifBlank { "{}" }) }.isFailure) {
+            return "Advanced request options must be a JSON object."
+        }
+        val invalidHeader = draft.customHeadersText.lineSequence()
+            .map(String::trim).filter(String::isNotEmpty).firstOrNull { ':' !in it }
+        if (invalidHeader != null) return "Custom headers must use Name: value, one per line."
         return null
     }
+
+    private fun parseHeaders(text: String): Map<String, String> = text.lineSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .mapNotNull { line ->
+            val separator = line.indexOf(':')
+            if (separator <= 0) null else line.substring(0, separator).trim() to line.substring(separator + 1).trim()
+        }
+        .filterNot { (name, _) -> name.equals("Authorization", ignoreCase = true) }
+        .toMap()
 
     override fun onCleared() {
         // Deliberately does not cancel an in-flight run or close the inference connection: the run

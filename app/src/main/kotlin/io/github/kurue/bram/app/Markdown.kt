@@ -8,6 +8,53 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 
+sealed interface MarkdownBlock {
+    data class Prose(val source: String) : MarkdownBlock
+    data class Code(val code: String, val language: String?) : MarkdownBlock
+}
+
+/** Splits fenced code from prose so chat can give code its own scrollable, copyable surface. */
+fun parseMarkdownBlocks(source: String): List<MarkdownBlock> {
+    if (source.isEmpty()) return listOf(MarkdownBlock.Prose(""))
+    val blocks = mutableListOf<MarkdownBlock>()
+    val prose = mutableListOf<String>()
+    val code = mutableListOf<String>()
+    var language: String? = null
+    var inFence = false
+
+    fun flushProse() {
+        if (prose.isNotEmpty()) {
+            blocks += MarkdownBlock.Prose(prose.joinToString("\n").trimEnd('\n'))
+            prose.clear()
+        }
+    }
+    fun flushCode() {
+        blocks += MarkdownBlock.Code(code.joinToString("\n"), language)
+        code.clear()
+        language = null
+    }
+
+    source.lines().forEach { line ->
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith("```")) {
+            if (inFence) {
+                flushCode()
+                inFence = false
+            } else {
+                flushProse()
+                language = trimmed.removePrefix("```").trim().ifEmpty { null }
+                inFence = true
+            }
+        } else if (inFence) {
+            code += line
+        } else {
+            prose += line
+        }
+    }
+    if (inFence) flushCode() else flushProse()
+    return blocks.ifEmpty { listOf(MarkdownBlock.Prose("")) }
+}
+
 /**
  * Renders the small subset of Markdown that language models actually emit in chat.
  *

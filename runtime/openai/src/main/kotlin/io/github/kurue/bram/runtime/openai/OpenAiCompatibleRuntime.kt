@@ -84,6 +84,14 @@ class OpenAiCompatibleRuntime(
             setRequestProperty("Accept", "application/json")
             setRequestProperty("User-Agent", "Bram-Android/0.1")
             if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
+            endpoint.customHeaders.forEach { (name, value) ->
+                if (!name.equals("authorization", ignoreCase = true)) {
+                    setRequestProperty(name, value.replace("{session_id}", request.sessionId.orEmpty()))
+                }
+            }
+            if (endpoint.baseUrl.contains("opencode.ai/zen/go", ignoreCase = true)) {
+                request.sessionId?.let { setRequestProperty("x-opencode-session", it) }
+            }
         }
         activeConnections[request.requestId] = connection
 
@@ -134,7 +142,7 @@ class OpenAiCompatibleRuntime(
             RemoteApiKind.RESPONSES -> parseResponsesResponse(root)
         }
 
-    private fun GenerationRequest.toChatJson(): JSONObject = JSONObject()
+    private fun GenerationRequest.toChatJson(): JSONObject = bodyOptions()
         .put("model", endpoint.modelName)
         .put("messages", JSONArray().also { array -> messages.forEach { array.put(it.toChatJson()) } })
         // max_tokens remains the broadest common denominator across Ollama, LM Studio, vLLM,
@@ -147,6 +155,7 @@ class OpenAiCompatibleRuntime(
         .put("top_p", sampler.topP)
         .put("stream", false)
         .also { root ->
+            endpoint.reasoningEffort?.let { root.put("reasoning_effort", it) }
             if (tools.isNotEmpty()) {
                 root.put(
                     "tools",
@@ -181,7 +190,7 @@ class OpenAiCompatibleRuntime(
         val system = messages
             .filter { it.role == MessageRole.SYSTEM }
             .joinToString("\n\n") { it.content }
-        val root = JSONObject()
+        val root = bodyOptions()
             .put("model", endpoint.modelName)
             .put(
                 "input",
@@ -195,6 +204,9 @@ class OpenAiCompatibleRuntime(
             .put("temperature", sampler.temperature)
             .put("top_p", sampler.topP)
             .put("stream", false)
+        endpoint.reasoningEffort?.let { effort ->
+            root.put("reasoning", JSONObject().put("effort", effort))
+        }
         if (system.isNotBlank()) root.put("instructions", system)
         if (tools.isNotEmpty()) {
             root.put(
@@ -227,7 +239,7 @@ class OpenAiCompatibleRuntime(
                 .put("output", content),
         )
         else -> buildList {
-            add(
+            if (content.isNotBlank()) add(
                 JSONObject()
                     .put("type", "message")
                     .put("role", role.name.lowercase())
@@ -258,6 +270,9 @@ class OpenAiCompatibleRuntime(
             }
         }
     }
+
+    private fun bodyOptions(): JSONObject = runCatching { JSONObject(endpoint.bodyOptionsJson) }
+        .getOrElse { JSONObject() }
 
     private fun ConversationMessage.toChatJson(): JSONObject {
         val root = JSONObject().put("role", role.name.lowercase())

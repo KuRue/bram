@@ -59,6 +59,6 @@ class ChatScreenSmokeTest {
         composeRule.onNodeWithText("Tool approvals").assertIsDisplayed()
         composeRule.onNodeWithText("Ask when needed").assertIsDisplayed()
         composeRule.onNodeWithText("Always ask").assertIsDisplayed()
-        composeRule.onNodeWithText("Don't ask").assertIsDisplayed()
+        composeRule.onNodeWithText("Auto-approve").assertIsDisplayed()
     }
 }

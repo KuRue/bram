@@ -79,6 +79,28 @@ class MarkdownTest {
     }
 
     @Test
+    fun `fenced code is split from prose with its language`() {
+        val blocks = parseMarkdownBlocks("before\n```kotlin\nval x = 1\n```\nafter")
+
+        assertEquals(
+            listOf(
+                MarkdownBlock.Prose("before"),
+                MarkdownBlock.Code("val x = 1", "kotlin"),
+                MarkdownBlock.Prose("after"),
+            ),
+            blocks,
+        )
+    }
+
+    @Test
+    fun `unterminated streaming fence remains a code block`() {
+        assertEquals(
+            listOf(MarkdownBlock.Code("echo hello", "bash")),
+            parseMarkdownBlocks("```bash\necho hello"),
+        )
+    }
+
+    @Test
     fun `an unterminated bold marker is shown rather than swallowed`() {
         // A streamed reply is regularly incomplete; text must never vanish mid-generation.
         assertEquals("a **partial", renderMarkdown("a **partial").text)

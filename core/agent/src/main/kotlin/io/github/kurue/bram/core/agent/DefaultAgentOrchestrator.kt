@@ -159,6 +159,7 @@ class DefaultAgentOrchestrator(
                     maxOutputTokens = request.maxOutputTokens,
                     sampler = request.sampler,
                     requestId = UUID.randomUUID().toString(),
+                    sessionId = request.conversationId.value,
                 ),
             ).collect { event ->
                 when (event) {

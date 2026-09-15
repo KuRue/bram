@@ -143,6 +143,12 @@ data class RemoteEndpoint(
     val supportsToolCalling: Boolean = true,
     val allowInsecureHttp: Boolean = false,
     val credentialAlias: String = "endpoint-api-key",
+    /** Provider-specific reasoning effort; null lets the server choose its default. */
+    val reasoningEffort: String? = null,
+    /** Non-secret HTTP headers. API credentials remain in the encrypted credential store. */
+    val customHeaders: Map<String, String> = emptyMap(),
+    /** Provider-specific request fields merged into the request body. */
+    val bodyOptionsJson: String = "{}",
 ) {
     fun asModelDescriptor(): ModelDescriptor = ModelDescriptor(
         id = ModelId("remote:$id:$modelName"),

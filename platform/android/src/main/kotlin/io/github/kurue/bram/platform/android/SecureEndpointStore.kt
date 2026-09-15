@@ -113,6 +113,9 @@ class SecureEndpointStore(
         .put("supportsToolCalling", supportsToolCalling)
         .put("allowInsecureHttp", allowInsecureHttp)
         .put("credentialAlias", credentialAlias)
+        .put("reasoningEffort", reasoningEffort)
+        .put("customHeaders", JSONObject(customHeaders))
+        .put("bodyOptionsJson", bodyOptionsJson)
 
     private fun JSONObject.toEndpoint(): RemoteEndpoint = RemoteEndpoint(
         id = getString("id"),
@@ -124,6 +127,11 @@ class SecureEndpointStore(
         supportsToolCalling = optBoolean("supportsToolCalling", true),
         allowInsecureHttp = optBoolean("allowInsecureHttp", false),
         credentialAlias = optString("credentialAlias", "endpoint-api-key"),
+        reasoningEffort = optString("reasoningEffort").takeIf(String::isNotBlank),
+        customHeaders = optJSONObject("customHeaders")?.let { headers ->
+            headers.keys().asSequence().associateWith { headers.optString(it) }
+        }.orEmpty(),
+        bodyOptionsJson = optString("bodyOptionsJson", "{}"),
     )
 
     private fun secretKey(endpointId: String, alias: String) = "secret.$endpointId.$alias"

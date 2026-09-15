@@ -34,6 +34,7 @@ class OpenAiCompatibleRuntimeTest {
     private var capturedPath: String? = null
     private var capturedBody: JSONObject? = null
     private var capturedAuth: String? = null
+    private var capturedHeaders: Map<String, String> = emptyMap()
     private var responseStatus = 200
     private var responseBody = "{}"
 
@@ -43,6 +44,8 @@ class OpenAiCompatibleRuntimeTest {
         server.createContext("/") { exchange ->
             capturedPath = exchange.requestURI.path
             capturedAuth = exchange.requestHeaders.getFirst("Authorization")
+            capturedHeaders = exchange.requestHeaders.entries
+                .associate { it.key to it.value.firstOrNull().orEmpty() }
             val body = exchange.requestBody.bufferedReader().use { it.readText() }
             capturedBody = runCatching { JSONObject(body) }.getOrNull()
             respond(exchange, responseStatus, responseBody)
@@ -122,18 +125,18 @@ class OpenAiCompatibleRuntimeTest {
         assertEquals("/v1/responses", capturedPath)
         assertEquals("chat-model", capturedBody!!.getString("model"))
         assertEquals("You are Bram.", capturedBody!!.getString("instructions"))
-        assertEquals(4, capturedBody!!.getJSONArray("input").length())
+        assertEquals(3, capturedBody!!.getJSONArray("input").length())
         assertEquals("message", capturedBody!!.getJSONArray("input").getJSONObject(0).getString("type"))
         assertEquals("user", capturedBody!!.getJSONArray("input").getJSONObject(0).getString("role"))
         assertEquals(
             "function_call",
-            capturedBody!!.getJSONArray("input").getJSONObject(2).getString("type"),
+            capturedBody!!.getJSONArray("input").getJSONObject(1).getString("type"),
         )
         assertEquals(
             "function_call_output",
-            capturedBody!!.getJSONArray("input").getJSONObject(3).getString("type"),
+            capturedBody!!.getJSONArray("input").getJSONObject(2).getString("type"),
         )
-        assertEquals("call-1", capturedBody!!.getJSONArray("input").getJSONObject(3).getString("call_id"))
+        assertEquals("call-1", capturedBody!!.getJSONArray("input").getJSONObject(2).getString("call_id"))
         assertEquals(1, capturedBody!!.getJSONArray("tools").length())
         assertEquals("lookup", capturedBody!!.getJSONArray("tools").getJSONObject(0).getString("name"))
         assertEquals("auto", capturedBody!!.getString("tool_choice"))
@@ -246,32 +249,139 @@ class OpenAiCompatibleRuntimeTest {
         assertTrue(responses.summary.contains("Responses"))
     }
 
+    @Test
+    fun `custom headers are sent, session id substituted, and authorization protected`() = runBlocking {
+        responseBody = chatResponse("ok")
+
+        generate(
+            apiKind = RemoteApiKind.CHAT_COMPLETIONS,
+            sessionId = "conv-42",
+            customHeaders = mapOf(
+                "X-Session" to "{session_id}",
+                "X-Static" to "on",
+                "Authorization" to "Bearer hijack",
+            ),
+        )
+
+        assertEquals("conv-42", header("X-Session"))
+        assertEquals("on", header("X-Static"))
+        assertEquals("Bearer test-key", capturedAuth)
+        assertNull(header("x-opencode-session"))
+    }
+
+    @Test
+    fun `opencode zen base urls gain the session header`() = runBlocking {
+        responseBody = chatResponse("ok")
+
+        generate(
+            apiKind = RemoteApiKind.CHAT_COMPLETIONS,
+            sessionId = "conv-7",
+            url = "$baseUrl/opencode.ai/zen/go",
+        )
+
+        assertEquals("conv-7", header("x-opencode-session"))
+    }
+
+    @Test
+    fun `body options merge with the reserved fields winning`() = runBlocking {
+        responseBody = chatResponse("ok")
+
+        generate(
+            apiKind = RemoteApiKind.CHAT_COMPLETIONS,
+            bodyOptionsJson = """{"top_k":40,"model":"hijack","stream":true}""",
+        )
+
+        assertEquals(40, capturedBody!!.getInt("top_k"))
+        assertEquals("chat-model", capturedBody!!.getString("model"))
+        assertEquals(false, capturedBody!!.getBoolean("stream"))
+    }
+
+    @Test
+    fun `malformed body options are ignored rather than failing the request`() = runBlocking {
+        responseBody = chatResponse("ok")
+
+        val events = generate(apiKind = RemoteApiKind.CHAT_COMPLETIONS, bodyOptionsJson = "not json")
+
+        assertTrue(events.any { it is GenerationEvent.Finished })
+        assertEquals("chat-model", capturedBody!!.getString("model"))
+    }
+
+    @Test
+    fun `reasoning effort is spelled per api kind`() = runBlocking {
+        responseBody = chatResponse("ok")
+        generate(apiKind = RemoteApiKind.CHAT_COMPLETIONS, reasoningEffort = "high")
+        assertEquals("high", capturedBody!!.getString("reasoning_effort"))
+        assertTrue(!capturedBody!!.has("reasoning"))
+
+        responseBody = responsesText("ok")
+        generate(apiKind = RemoteApiKind.RESPONSES, reasoningEffort = "high")
+        assertEquals("high", capturedBody!!.getJSONObject("reasoning").getString("effort"))
+    }
+
     private suspend fun generate(
         apiKind: RemoteApiKind,
         messages: List<ConversationMessage> = listOf(
             ConversationMessage(role = MessageRole.USER, content = "hi"),
         ),
         tools: List<ToolDefinition> = emptyList(),
-    ) = runtime(apiKind).generate(
+        sessionId: String? = null,
+        customHeaders: Map<String, String> = emptyMap(),
+        bodyOptionsJson: String = "{}",
+        reasoningEffort: String? = null,
+        url: String = baseUrl,
+    ) = runtime(apiKind, url, customHeaders, bodyOptionsJson, reasoningEffort).generate(
         GenerationRequest(
             messages = messages,
             tools = tools,
             maxOutputTokens = 8,
             requestId = "req-1",
+            sessionId = sessionId,
         ),
     ).toList()
 
-    private fun runtime(apiKind: RemoteApiKind) = OpenAiCompatibleRuntime(
+    private fun runtime(
+        apiKind: RemoteApiKind,
+        url: String = baseUrl,
+        customHeaders: Map<String, String> = emptyMap(),
+        bodyOptionsJson: String = "{}",
+        reasoningEffort: String? = null,
+    ) = OpenAiCompatibleRuntime(
         endpoint = RemoteEndpoint(
             id = "e1",
             displayName = "Provider",
-            baseUrl = baseUrl,
+            baseUrl = url,
             modelName = "chat-model",
             apiKind = apiKind,
             allowInsecureHttp = true,
+            customHeaders = customHeaders,
+            bodyOptionsJson = bodyOptionsJson,
+            reasoningEffort = reasoningEffort,
         ),
         credentialResolver = EndpointCredentialResolver { _, _ -> "test-key" },
     )
+
+    private fun chatResponse(text: String): String = JSONObject()
+        .put("choices", JSONArray().put(JSONObject().put("message", JSONObject().put("content", text))))
+        .toString()
+
+    private fun responsesText(text: String): String = JSONObject()
+        .put(
+            "output",
+            JSONArray().put(
+                JSONObject()
+                    .put("type", "message")
+                    .put("role", "assistant")
+                    .put(
+                        "content",
+                        JSONArray().put(JSONObject().put("type", "output_text").put("text", text)),
+                    ),
+            ),
+        )
+        .put("status", "completed")
+        .toString()
+
+    private fun header(name: String): String? =
+        capturedHeaders.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
 
     private fun respond(exchange: HttpExchange, status: Int, body: String) {
         val bytes = body.toByteArray(Charsets.UTF_8)
