@@ -36,7 +36,10 @@ object RuntimePermissions {
         TOKEN_NOTIFICATIONS to Manifest.permission.POST_NOTIFICATIONS,
         TOKEN_CONTACTS to Manifest.permission.READ_CONTACTS,
         TOKEN_CALENDAR to Manifest.permission.READ_CALENDAR,
-        TOKEN_TERMUX to TERMUX_RUN_COMMAND_PERMISSION,
+        // Termux's RUN_COMMAND permission is supplied by compatible Termux builds, not Android.
+        // Do not send it through RequestPermission: the Play build does not declare it at all,
+        // and Android reports that failed request exactly like a user denial. The tool performs a
+        // provider-aware preflight and can give the user the real installation/configuration fix.
     )
 
     /** The permission Termux declares for third-party apps that run commands in its context. */

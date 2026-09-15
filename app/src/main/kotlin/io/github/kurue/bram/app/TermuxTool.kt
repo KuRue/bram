@@ -108,6 +108,15 @@ class TermuxCommandTool(context: Context) : ToolHandler {
                     "and set allow-external-apps=true in ~/.termux/termux.properties.",
             )
         }
+        if (!termuxDeclaresRunCommandPermission()) {
+            return@withContext toolError(
+                "termux_incompatible_build",
+                "This Termux build does not provide external command integration. The Google " +
+                    "Play build is not compatible with Bram's termux_exec tool; install Termux " +
+                    "from F-Droid or the official GitHub releases, then enable " +
+                    "allow-external-apps=true in ~/.termux/termux.properties.",
+            )
+        }
         if (appContext.checkSelfPermission(RuntimePermissions.TERMUX_RUN_COMMAND_PERMISSION)
             != PackageManager.PERMISSION_GRANTED
         ) {
@@ -196,6 +205,14 @@ class TermuxCommandTool(context: Context) : ToolHandler {
     private fun isTermuxInstalled(): Boolean = runCatching {
         appContext.packageManager.getPackageInfo(TERMUX_PACKAGE, 0)
         true
+    }.getOrDefault(false)
+
+    private fun termuxDeclaresRunCommandPermission(): Boolean = runCatching {
+        val permission = appContext.packageManager.getPermissionInfo(
+            RuntimePermissions.TERMUX_RUN_COMMAND_PERMISSION,
+            0,
+        )
+        permission.packageName == TERMUX_PACKAGE
     }.getOrDefault(false)
 
     /**
