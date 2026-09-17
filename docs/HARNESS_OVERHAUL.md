@@ -10,7 +10,7 @@ than a personal re-read, the cited line is still the authority; re-check before 
 
 ## Why now
 
-The harness has been limited by its test models, not just its code: `docs/HANDOFF.md` records that
+The harness has been limited by its test models, not just its code: the session notes record that
 LFM2.5-2.6B "is too small for reliable tool use" and Qwen3.5 cannot call tools at all (its template
 fails under minja and the built-in fallback carries no tools). Every hard tool-loop bug so far was
 found by borrowing a friend's model, a laptop server, or luck.
@@ -23,7 +23,7 @@ harness's own structural gaps become the bottleneck; three of them (tool history
 approval semantics) can make an otherwise good model look broken.
 
 One hygiene item first: that endpoint work is uncommitted on a branch owned by another workstream
-(`feat/expert-streaming`; `docs/HANDOFF.md` warns about coordination). It is also the test vehicle
+(`feat/expert-streaming`; the session notes warn about coordination). It is also the test vehicle
 for everything below, so it lands first (M0).
 
 ## The harness today
@@ -76,7 +76,7 @@ anything. `read_skill` returns the full body, up to the 100,000-char instruction
 (`Skill.kt:119-122`; `SkillTools.kt:107-112`). The only backstop is `ContextWindowManager`'s
 last-resort middle truncation (`ContextWindowManager.kt:105-115`), and the recorded Paris run
 already aborted on `6226 + 2048 > 8192` with a skill body + 17 tool schemas in flight
-(`docs/HANDOFF.md:54-60`). Every result needs a stated budget before it enters the transcript.
+(recorded in the session notes). Every result needs a stated budget before it enters the transcript.
 
 **H3. Tool-call IDs collide.** Local and LiteRT paths mint `call_$index` per generation
 (`LlamaCppServiceClient.kt:276`, `LiteRtEngineManager.kt:160`); recovered calls use
@@ -120,7 +120,7 @@ id (`McpClient.kt:172-184`), and the generated `mcp_<slug>_<name>` can exceed pr
 limits (`McpToolHandler.kt:28, 67-70`).
 
 **T4. Known pending items.** The description diet (trim the offered tool descriptions) is still
-open from the tools session (`docs/HANDOFF.md:33-35`), and the Android tool surface has no
+open from the tools session (recorded in the session notes), and the Android tool surface has no
 screenshot/accessibility, no SAF access outside `files/agent-files`, and no per-automation
 pre-authorized tool sets.
 
@@ -131,7 +131,7 @@ pre-authorized tool sets.
 `SkillDocument` parses only name/version/description/instructions and silently drops unknown keys
 (`Skill.kt:97-130`). A skill cannot guarantee its tool survives `RankingToolSelector`, and
 activation cannot scope grants. This is already the top item on the skills session's own remaining
-list (`docs/HANDOFF.md:35-37`).
+list (recorded in the session notes).
 
 **S2. Rollback can activate an unreviewed draft.** `versions.firstOrNull { it.version != activeVersion }`
 (`Skill.kt:239`) picks the newest non-active version. After import 1.0.0 → draft 1.1.0 → activate →
@@ -187,7 +187,7 @@ is no scripted OpenAI-compatible server, and no on-device test exercises the rem
 **X3. Emulator housekeeping.** The local `emulator-testing` branch is 127 commits stale and its one
 commit is already on the mainline as `498ca0d` (verified with `git cherry`) — it can be deleted.
 `BRAM_EMULATOR_ABI` is absent from `docs/BUILDING.md`, and the QEMU auto-configure hang caveat lives
-only in `docs/HANDOFF.md:108-110` / `docs/DEVICE_ADAPTATION.md:429-436`.
+only in the session notes / `docs/DEVICE_ADAPTATION.md`.
 
 ## The overhaul
 
@@ -229,7 +229,7 @@ Result (2026-09-17): **M1 done.** `tools/harness-mock/mock_server.py` serves the
 kinds, named scenarios, runtime arming (`POST /__scenario/<name>`), and request inspection
 (`GET /__log`); 20 unit tests. The known-good AVD is `bram_api35` (API 35 google_apis, 6 GB RAM,
 headless) — the API 36.1 image crash-loops surfaceflinger in `mapper.ranchu.so` on this host
-regardless of emulator version or GPU mode, see HANDOFF for the full matrix. On `bram_api35` the
+regardless of emulator version or GPU mode, see the known-good AVD notes in docs/BUILDING.md. On `bram_api35` the
 mock endpoint was injected via `shared_prefs/bram.remote_endpoints.xml` and routing prefs, and the
 tool loop ran deterministically: AUTO ran one silent `device_status` call and the scripted final
 reply; MANUAL showed the approval card, Allow once ran the tool, and the scripted final arrived.
