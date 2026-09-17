@@ -186,6 +186,7 @@ class DefaultAgentOrchestrator(
                         responseText.append(event.text)
                         emit(AgentEvent.TextDelta(event.text))
                     }
+                    is GenerationEvent.ReasoningDelta -> emit(AgentEvent.ReasoningDelta(event.text))
                     is GenerationEvent.ToolCallReady -> toolCalls += event.call
                     is GenerationEvent.Usage -> {
                         event.usage.inputTokens?.let { inputTokensTotal += it }

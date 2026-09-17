@@ -19,6 +19,7 @@ OVERSIZED_TEXT_CHARS = 200_000
 SLOW_SECONDS = 10.0
 SCENARIOS = (
     "text",
+    "stream_chat",
     "happy_tool_call",
     "history_check",
     "read_file_oversized",
@@ -114,6 +115,20 @@ def should_call_tool(offered, tool_name, already_answered):
     if already_answered:
         return False
     return True
+
+
+def stream_chat_frames():
+    def chunk(delta):
+        return "data: " + json.dumps(
+            {"choices": [{"index": 0, "delta": delta}]}
+        )
+
+    return [
+        chunk({"role": "assistant", "reasoning_content": "Checking the device"}),
+        chunk({"content": "The "}),
+        chunk({"content": "weather is fine."}),
+        "data: [DONE]",
+    ]
 
 
 def new_call_id():
@@ -319,6 +334,7 @@ def describe_request(path, payload):
                     if isinstance(call, dict)
                 ],
                 "toolCallId": message.get("tool_call_id"),
+                "stream": payload.get("stream") is True,
             }
             for message in payload.get("messages") or []
             if isinstance(message, dict)
@@ -406,11 +422,25 @@ class MockRequestHandler(BaseHTTPRequestHandler):
                 **describe_request(path, payload),
             },
         )
+        if path == "/v1/chat/completions" and self._scenario() == "stream_chat":
+            self._send_sse(stream_chat_frames())
+            return
         status, body = respond(path, payload, self._scenario())
         self._send_json(status, body)
 
     def _scenario(self):
         return getattr(self.server, "scenario", DEFAULT_SCENARIO)
+
+    def _send_sse(self, frames):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        for frame in frames:
+            self.wfile.write((frame + "\n\n").encode("utf-8"))
+            self.wfile.flush()
+        self.close_connection = True
 
     def _send_json(self, status, body):
         data = json.dumps(body).encode("utf-8")

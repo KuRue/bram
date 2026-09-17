@@ -170,6 +170,23 @@ class RemoteToolLoopSmokeTest {
         assertTrue("every call needs its own result: $callIds vs $answered", answered.containsAll(callIds))
     }
 
+    @Test
+    fun streamedTurnShowsReasoningAndTheAnswer() {
+        assumeTrue("could not arm the stream_chat scenario", postScenario("stream_chat"))
+        composeRule.onNodeWithTag("new-chat").performClick()
+        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Mock endpoint") }
+        send("check the device")
+        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("The weather is fine.") }
+        // Reasoning arrived on its own channel rather than inside the text; it must be a Thinking
+        // row, not prose in the answer.
+        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Thought") }
+
+        val request = lastChatCompletionRequest()
+        assertNotNull("no chat completion reached the mock", request)
+        val firstItem = request!!.optJSONArray("items")?.optJSONObject(0)
+        assertTrue("the request must ask the server for a stream", firstItem?.optBoolean("stream") == true)
+    }
+
     private fun send(text: String) {
         composeRule.onNodeWithTag("composer-field").performTextInput(text)
         composeRule.onNodeWithTag("send-button").performClick()

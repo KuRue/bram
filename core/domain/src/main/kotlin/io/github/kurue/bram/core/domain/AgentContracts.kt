@@ -237,6 +237,8 @@ sealed interface AgentEvent {
      * reply can be split with the loaded format's own tags rather than an assumed `<think>`.
      */
     data class Reasoning(val format: ReasoningFormat) : AgentEvent
+    /** Streamed reasoning text; the transcript shows it as the Thinking activity as it arrives. */
+    data class ReasoningDelta(val text: String) : AgentEvent
     data class TextDelta(val text: String) : AgentEvent
     data class ToolStarted(val call: ToolCall) : AgentEvent
     data class ToolFinished(val call: ToolCall, val result: String) : AgentEvent

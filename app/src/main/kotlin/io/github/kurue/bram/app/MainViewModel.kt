@@ -32,6 +32,7 @@ import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryPrompt
 import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.ModelId
+import io.github.kurue.bram.core.domain.ProviderProfile
 import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.RunJournalEntry
@@ -753,6 +754,7 @@ class MainViewModel(
                             android.util.Log.d("BramTools", "offering ${event.names.size} tools: ${event.names.joinToString()}")
                         }
                         is AgentEvent.Reasoning -> Unit
+                        is AgentEvent.ReasoningDelta -> Unit
                         is AgentEvent.ContextPrepared -> attemptActivity += "Context prepared (${event.estimatedInputTokens} tokens)"
                         is AgentEvent.ToolStarted -> attemptActivity += "Called ${event.call.name}"
                         is AgentEvent.ToolFinished -> {
@@ -3435,12 +3437,11 @@ class MainViewModel(
                 }.orEmpty()
             runCatching { RemoteModelCatalog().list(draft.baseUrl, credential) }
                 .onSuccess { models ->
-                    // OpenCode Go also advertises Anthropic Messages-only Qwen models. Bram's
-                    // remote runtime currently speaks Chat Completions and Responses, so do not
-                    // offer choices that cannot work with either selectable API.
-                    val compatibleModels = if (draft.baseUrl.contains("opencode.ai/zen/go", ignoreCase = true)) {
-                        models.filterNot { it.id.startsWith("qwen", ignoreCase = true) }
-                    } else models
+                    // A provider may advertise models in a protocol Bram cannot speak; the profile
+                    // hides those rather than offering a choice that cannot work with either
+                    // selectable API.
+                    val profile = ProviderProfile.forBaseUrl(draft.baseUrl)
+                    val compatibleModels = models.filter { profile.supportsModel(it.id) }
                     mutableState.update {
                         it.copy(
                             remoteModelDiscovery = RemoteModelDiscovery(
@@ -4068,6 +4069,9 @@ class MainViewModel(
         val activity = mutableListOf<AgentActivity>()
         var thinkingStartedAt = 0L
         var thinkingMillisTotal = 0L
+        // Remote providers stream reasoning beside the text rather than inside it, so it is
+        // accumulated here and closed into a Thinking row when the round ends.
+        val remoteReasoning = StringBuilder()
         // Parsing is per round, not per turn. A format that reports no opening marker — LFM2.5
         // among them — has the prompt open the reasoning block, and the prompt does that again for
         // every segment after a tool result. Reading the whole turn as one string therefore treated
@@ -4107,6 +4111,27 @@ class MainViewModel(
                             pushModelStatus(if (preparing) ModelPhase.PREPARING else ModelPhase.GENERATING)
                         }
                         is AgentEvent.Reasoning -> reasoningFormat = event.format
+                        is AgentEvent.ReasoningDelta -> {
+                            val now = System.currentTimeMillis()
+                            if (remoteReasoning.isEmpty()) {
+                                thinkingStartedAt = now
+                                thinking = true
+                                pushModelStatus(ModelPhase.THINKING)
+                            }
+                            remoteReasoning.append(event.text)
+                            mutableState.update {
+                                it.copy(
+                                    messages = requestMessages + inFlightMessage(
+                                        assistantText,
+                                        activity + AgentActivity.Thinking(
+                                            text = remoteReasoning.toString(),
+                                            durationMillis = now - thinkingStartedAt,
+                                            inProgress = true,
+                                        ),
+                                    ),
+                                )
+                            }
+                        }
                         is AgentEvent.ToolsSelected -> {
                             android.util.Log.d("BramTools", "offering ${event.names.size} tools: ${event.names.joinToString()}")
                         }
@@ -4201,6 +4226,16 @@ class MainViewModel(
                                 ?.let { visibleParts += it }
                             roundText = ""
                             roundReasoningRecorded = 0
+                            // Remote reasoning for this round closes here, so the rows read in the
+                            // order the model did things: thought, called, thought again.
+                            if (remoteReasoning.isNotBlank()) {
+                                val took = if (thinkingStartedAt > 0) System.currentTimeMillis() - thinkingStartedAt else 0L
+                                activity += AgentActivity.Thinking(text = remoteReasoning.toString(), durationMillis = took)
+                                thinkingMillisTotal += took
+                                remoteReasoning.clear()
+                                thinkingStartedAt = 0L
+                                thinking = false
+                            }
                             activity += AgentActivity.ToolInvocation(
                                 id = event.call.id,
                                 name = event.call.name,
@@ -4263,11 +4298,22 @@ class MainViewModel(
                         is AgentEvent.Failed -> failure = event.message
                     }
                 }
-            when {
+            val outcome = when {
                 completedMessage != null -> TurnOutcome.Completed
                 failure != null -> TurnOutcome.Failed(failure, selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
                 else -> TurnOutcome.Failed("The run ended without producing a reply.", selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
             }
+            // Feed the reachability signal routing consults: a failed remote turn marks the
+            // endpoint down briefly, a completed one clears it. A stopped run says nothing about
+            // reachability either way.
+            selection.endpointId?.let { endpointId ->
+                when (outcome) {
+                    is TurnOutcome.Completed -> EndpointHealth.markSuccess(endpointId)
+                    is TurnOutcome.Failed -> EndpointHealth.markFailure(endpointId)
+                    is TurnOutcome.Cancelled -> Unit
+                }
+            }
+            outcome
         } catch (_: CancellationException) {
             TurnOutcome.Cancelled
         } catch (error: Throwable) {
@@ -4303,6 +4349,11 @@ class MainViewModel(
                     0L
                 }
                 val finalActivity = buildList {
+                    // Reasoning a remote provider streamed beside the text, unless a tool round
+                    // already closed it into the activity list.
+                    if (remoteReasoning.isNotBlank()) {
+                        add(AgentActivity.Thinking(remoteReasoning.toString(), durationMillis = thinkingMillis))
+                    }
                     reply.second.takeIf(String::isNotBlank)?.let {
                         add(AgentActivity.Thinking(it, durationMillis = thinkingMillis))
                     }
@@ -4570,11 +4621,21 @@ class MainViewModel(
                         runtime = container.runtime(endpoint),
                         localModel = null,
                         routingLabel = endpoint.displayName,
-                    ) to RoutingEstimates.remoteCandidate(endpoint),
+                        endpointId = endpoint.id,
+                    ) to RoutingEstimates.remoteCandidate(endpoint, available = EndpointHealth.isReachable(endpoint.id)),
                 )
             }
         }
         if (pairs.isEmpty()) return emptyList()
+
+        // A model picked in the pill is the user's decision, not a hint: if it is a runnable
+        // candidate at all, it runs and routing has no say. Privacy still hard-gates it — picking
+        // a remote endpoint in a phone-only conversation fails with the reason rather than
+        // silently running somewhere the user did not choose.
+        val forced = snapshot.selectedRuntimeId?.let { id ->
+            pairs.firstOrNull { (selection, _) -> selection.matchesRuntimeId(id) }
+        }
+        val candidates = forced?.let { listOf(it) } ?: pairs
 
         val decision = router.route(
             request = RoutingRequest(
@@ -4587,14 +4648,16 @@ class MainViewModel(
                 preferQuality = preferQuality,
                 localBias = if (privacyClass == PrivacyClass.PRIVATE_REMOTE_ALLOWED) 2.0 else 1.0,
             ),
-            candidates = pairs.map { it.second },
+            candidates = candidates.map { it.second },
         )
         val ordered = buildList {
             decision.selected?.let { selected ->
-                pairs.firstOrNull { it.second.model.id == selected.model.id }?.let { add(it.first) }
+                candidates.firstOrNull { it.second.model.id == selected.model.id }?.let { add(it.first) }
             }
-            decision.fallbacks.forEach { fallback ->
-                pairs.firstOrNull { it.second.model.id == fallback.model.id }?.let { add(it.first) }
+            if (forced == null) {
+                decision.fallbacks.forEach { fallback ->
+                    candidates.firstOrNull { it.second.model.id == fallback.model.id }?.let { add(it.first) }
+                }
             }
         }
         val label = ordered.firstOrNull()?.routingLabel
@@ -4679,7 +4742,15 @@ class MainViewModel(
         val litertlmModel: LiteRtModelRecord? = null,
         /** User-facing profile/provider name, which can differ for two profiles of one GGUF. */
         val routingLabel: String,
+        /** Set for a remote endpoint, so its turn outcome can feed [EndpointHealth]. */
+        val endpointId: String? = null,
     ) {
+        /** Whether this candidate is the runtime the user picked in the model pill. */
+        fun matchesRuntimeId(id: String): Boolean =
+            localModel?.id?.value == id ||
+                litertlmModel?.id?.value == id ||
+                endpointId?.let { remoteRuntimeId(it) } == id
+
         /** Whether this candidate runs on-device, which changes how a failure is treated. */
         val isLocal: Boolean
             get() = localModel != null || litertlmModel != null

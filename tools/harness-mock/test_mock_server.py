@@ -220,6 +220,28 @@ class MockServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("call_lost", body["error"]["message"])
 
+    def test_stream_chat_answers_with_sse_frames(self):
+        self.arm("stream_chat")
+        request = urllib.request.Request(
+            self.base + CHAT_PATH,
+            data=json.dumps(
+                {"model": MODEL_ID, "stream": True, "messages": [{"role": "user", "content": "hi"}]}
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual("text/event-stream", response.headers["Content-Type"])
+            body = response.read().decode("utf-8")
+
+        self.assertIn("reasoning_content", body)
+        self.assertIn("The ", body)
+        self.assertIn("weather is fine.", body)
+        self.assertTrue(body.rstrip().endswith("data: [DONE]"))
+
+        status, log = self.get("/__log")
+        self.assertTrue(log["requests"][-1]["items"][0]["stream"])
+
     def test_chat_parallel_calls_have_distinct_ids(self):
         self.arm("parallel_calls")
         status, body = self.chat([{"role": "user", "content": USER_MESSAGE}])

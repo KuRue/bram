@@ -378,6 +378,19 @@ behind a provider profile; encrypt or explicitly restrict secret-bearing custom 
 Exit: a remote turn streams tokens and shows reasoning; an unreachable endpoint is not chosen; the
 OpenCode behavior lives in one place.
 
+Result (2026-09-17, **M6 complete — the M0–M6 overhaul is done**): both wire kinds stream SSE
+(`stream: true`; a plain JSON body is still accepted, which doubles as the fallback), with chat
+tool-call fragments reassembled and Responses tool calls taken from the final completed payload;
+reasoning channels (`reasoning_content`/`reasoning`, Responses reasoning deltas, and non-streaming
+reasoning fields) surface as Thinking rows through a new `ReasoningDelta` event. The error taxonomy
+is real: 408/429/5xx and connection failures retry before any token (3 attempts, backoff), other 4xx
+are `EndpointConfigurationException` — unrecoverable, not retried, not silently replaced.
+`EndpointHealth` marks a failed endpoint down for 60 s and the router skips it; picking a model in
+the pill now forces it (privacy still hard-gates). `ProviderProfile` is the single home for the
+OpenCode quirks, and custom headers are encrypted at rest with the legacy field still read. Evidence:
+24 runtime contract cases, 27 mock cases, 11/11 instrumented tests including a device-verified
+streamed turn with reasoning.
+
 ## Emulator test strategy
 
 - **Deterministic (M1, the backbone):** the scripted mock server plus adb scenario runs. Every

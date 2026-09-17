@@ -37,10 +37,10 @@ object RoutingEstimates {
         )
     }
 
-    /** A remote endpoint's candidate; configuration is checked by availability(), not routing. */
-    fun remoteCandidate(endpoint: RemoteEndpoint): RoutingCandidate = RoutingCandidate(
+    /** A remote endpoint's candidate; [available] tracks whether it answered recently. */
+    fun remoteCandidate(endpoint: RemoteEndpoint, available: Boolean = true): RoutingCandidate = RoutingCandidate(
         model = endpoint.asModelDescriptor(),
-        available = true,
+        available = available,
         estimatedQuality = 0.9,
         estimatedLatencyMillis = 2_000,
         estimatedBatteryCost = 0.25,

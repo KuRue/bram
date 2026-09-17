@@ -114,6 +114,13 @@ sealed interface GenerationEvent {
         val reasoningFormat: ReasoningFormat? = null,
     ) : GenerationEvent
     data class TextDelta(val text: String) : GenerationEvent
+    /**
+     * Reasoning the runtime separated from the answer, streamed as it is written.
+     *
+     * Remote providers that emit a reasoning channel put it beside the text, not inside it; without
+     * this the app could only ever show reasoning it managed to parse back out of the reply.
+     */
+    data class ReasoningDelta(val text: String) : GenerationEvent
     data class ToolCallReady(val call: ToolCall) : GenerationEvent
     data class Usage(val usage: TokenUsage) : GenerationEvent
     data class Metrics(val metrics: GenerationMetrics) : GenerationEvent

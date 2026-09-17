@@ -1,5 +1,6 @@
 package io.github.kurue.bram.runtime.openai
 
+import io.github.kurue.bram.core.domain.ProviderProfile
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -21,9 +22,8 @@ class RemoteModelCatalog {
         for (candidate in modelUrls(baseUrl)) {
             runCatching { fetch(candidate, apiKey) }
                 .onSuccess { models ->
-                    return@withContext if (baseUrl.contains("opencode.ai/zen/go", ignoreCase = true)) {
-                        enrichOpenCodeGo(models)
-                    } else models
+                    val profile = ProviderProfile.forBaseUrl(baseUrl)
+                    return@withContext if (profile.needsCatalogEnrichment) enrichOpenCodeGo(models) else models
                 }
                 .onFailure { lastFailure = it }
         }

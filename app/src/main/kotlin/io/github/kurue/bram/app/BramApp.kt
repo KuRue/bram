@@ -151,6 +151,7 @@ import io.github.kurue.bram.core.domain.TuneCandidateResult
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
+import io.github.kurue.bram.core.domain.ProviderProfile
 import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.PrivacyClass
 import io.github.kurue.bram.core.domain.RemoteApiKind
@@ -1510,8 +1511,12 @@ private fun AddProfileScreen(
                             label = { Text("Request options (JSON)") },
                             modifier = Modifier.fillMaxWidth(),
                         )
-                        if (baseUrl.contains("opencode.ai/zen/go", ignoreCase = true)) {
-                            Text("Bram adds x-opencode-session automatically for each conversation.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        ProviderProfile.forBaseUrl(baseUrl).sessionHeader?.let { header ->
+                            Text(
+                                "Bram adds $header automatically for each conversation.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                     Button(
@@ -4133,12 +4138,8 @@ private fun EndpointCard(endpoint: RemoteEndpoint, onEdit: () -> Unit, onRemove:
 }
 
 /** OpenCode Go's catalog uses ordinary OpenAI model rows even when a model uses Responses. */
-private fun discoveredApiKind(baseUrl: String, modelId: String, fallback: RemoteApiKind): RemoteApiKind {
-    if (!baseUrl.contains("opencode.ai/zen/go", ignoreCase = true)) return fallback
-    return if (
-        modelId.startsWith("muse-spark-") || modelId == "gpt-5.6-luna" || modelId == "grok-4.6"
-    ) RemoteApiKind.RESPONSES else RemoteApiKind.CHAT_COMPLETIONS
-}
+private fun discoveredApiKind(baseUrl: String, modelId: String, fallback: RemoteApiKind): RemoteApiKind =
+    ProviderProfile.forBaseUrl(baseUrl).apiKindFor(modelId, fallback)
 
 @Composable
 private fun McpServerCard(ui: McpServerUi, onRemove: (String) -> Unit) {

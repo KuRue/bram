@@ -125,6 +125,19 @@ class RuleBasedModelRouterTest {
         assertEquals(remote.model.id, decision.selected?.model?.id)
     }
 
+    @Test
+    fun `an unreachable endpoint is not chosen`() {
+        // The app marks a remote endpoint unavailable after a failed turn (EndpointHealth); the
+        // router must then prefer anything else rather than paying the round trip again.
+        val local = candidate("local", ModelLocation.LOCAL, quality = 0.4)
+        val remote = candidate("remote", ModelLocation.REMOTE, quality = 0.9, available = false)
+
+        val decision = RuleBasedModelRouter().route(request(PrivacyClass.STANDARD), listOf(remote, local))
+
+        assertEquals(local.model.id, decision.selected?.model?.id)
+        assertEquals("Runtime is unavailable", decision.rejectedReasons[remote.model.id])
+    }
+
     private fun request(privacyClass: PrivacyClass) = RoutingRequest(
         mode = RoutingMode.AUTO,
         privacyClass = privacyClass,
@@ -140,6 +153,7 @@ class RuleBasedModelRouterTest {
         location: ModelLocation,
         quality: Double? = null,
         latency: Long? = null,
+        available: Boolean = true,
     ) = RoutingCandidate(
         model = ModelDescriptor(
             id = ModelId(id),
@@ -149,7 +163,7 @@ class RuleBasedModelRouterTest {
             location = location,
             contextWindowTokens = 8_192,
         ),
-        available = true,
+        available = available,
         estimatedQuality = quality,
         estimatedLatencyMillis = latency,
     )
