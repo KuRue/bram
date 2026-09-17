@@ -11,6 +11,8 @@ MAX_BODY_BYTES = 1024 * 1024
 CONTEXT_WINDOW_TOKENS = 8192
 TOOL_NAME = "device_status"
 TOOL_ARGUMENTS = "{}"
+READ_FILE_TOOL = "read_file"
+READ_FILE_ARGUMENTS = '{"path":"oversized.txt"}'
 MALFORMED_ARGUMENTS = "{not json"
 FINAL_TEXT = "Mock endpoint: tool result received."
 OVERSIZED_TEXT_CHARS = 200_000
@@ -19,6 +21,7 @@ SCENARIOS = (
     "text",
     "happy_tool_call",
     "history_check",
+    "read_file_oversized",
     "parallel_calls",
     "malformed_args",
     "http_500",
@@ -27,7 +30,14 @@ SCENARIOS = (
     "status_failed",
 )
 DEFAULT_SCENARIO = "happy_tool_call"
-TOOL_SCENARIOS = ("happy_tool_call", "history_check", "parallel_calls", "malformed_args", "oversized_result")
+TOOL_SCENARIOS = ("happy_tool_call", "history_check", "read_file_oversized", "parallel_calls", "malformed_args", "oversized_result")
+SCENARIO_TOOLS = {
+    "read_file_oversized": (READ_FILE_TOOL, READ_FILE_ARGUMENTS),
+}
+
+
+def tool_for(scenario):
+    return SCENARIO_TOOLS.get(scenario, (TOOL_NAME, TOOL_ARGUMENTS))
 MODELS = [
     {
         "id": "mock-small",
@@ -98,8 +108,8 @@ def responses_output_after_latest_user(items):
     )
 
 
-def should_call_tool(payload, offered, already_answered):
-    if TOOL_NAME not in offered:
+def should_call_tool(offered, tool_name, already_answered):
+    if tool_name not in offered:
         return False
     if already_answered:
         return False
@@ -111,7 +121,9 @@ def new_call_id():
 
 
 def tool_arguments(scenario):
-    return MALFORMED_ARGUMENTS if scenario == "malformed_args" else TOOL_ARGUMENTS
+    if scenario == "malformed_args":
+        return MALFORMED_ARGUMENTS
+    return tool_for(scenario)[1]
 
 
 def call_count(scenario):
@@ -181,13 +193,13 @@ def chat_reply(payload, scenario=DEFAULT_SCENARIO):
     model = payload.get("model") or MODELS[0]["id"]
     calls = None
     if scenario in TOOL_SCENARIOS and should_call_tool(
-        payload, tool_names(payload), chat_output_after_latest_user(messages)
+        tool_names(payload), tool_for(scenario)[0], chat_output_after_latest_user(messages)
     ):
         calls = [
             {
                 "id": new_call_id(),
                 "type": "function",
-                "function": {"name": TOOL_NAME, "arguments": tool_arguments(scenario)},
+                "function": {"name": tool_for(scenario)[0], "arguments": tool_arguments(scenario)},
             }
             for _ in range(call_count(scenario))
         ]
@@ -239,13 +251,13 @@ def responses_reply(payload, scenario=DEFAULT_SCENARIO):
         )
     calls = None
     if scenario in TOOL_SCENARIOS and should_call_tool(
-        payload, tool_names(payload), responses_output_after_latest_user(input_items)
+        tool_names(payload), tool_for(scenario)[0], responses_output_after_latest_user(input_items)
     ):
         calls = [
             {
                 "type": "function_call",
                 "call_id": new_call_id(),
-                "name": TOOL_NAME,
+                "name": tool_for(scenario)[0],
                 "arguments": tool_arguments(scenario),
             }
             for _ in range(call_count(scenario))
@@ -299,6 +311,7 @@ def describe_request(path, payload):
         roles = [
             {
                 "role": message.get("role"),
+                "contentLength": len(message["content"]) if isinstance(message.get("content"), str) else None,
                 "toolCalls": len(message.get("tool_calls") or []),
                 "toolCallIds": [
                     call.get("id")

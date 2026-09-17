@@ -21,6 +21,7 @@ import io.github.kurue.bram.core.domain.ToolApprovalGate
 import io.github.kurue.bram.core.domain.ToolCall
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
+import io.github.kurue.bram.core.domain.ToolResultBudget
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
@@ -182,6 +183,41 @@ class DefaultAgentOrchestratorTest {
         assertTrue(result.contains("Do not call it again"))
     }
 
+    @Test
+    fun `an oversized tool result reaches the transcript bounded and marked`() = runBlocking {
+        val runtime = ToolResultCapturingRuntime(contextWindowTokens = 8_192)
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(ResultHandler("asked_about", "z".repeat(200_000)))),
+            approvalGate = ReadOnlyApprovalGate(),
+        )
+
+        orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("bounded"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = runtime,
+        ).toList()
+
+        val toolMessage = runtime.secondRequest?.messages?.lastOrNull { it.role == MessageRole.TOOL }
+        assertTrue("the run must have replayed a tool result", toolMessage != null)
+        val content = toolMessage!!.content
+        assertTrue(
+            "bounded length ${content.length} exceeds cap ${ToolResultBudget.capChars(8_192)}",
+            content.length <= ToolResultBudget.capChars(8_192) + 64,
+        )
+        assertTrue(content.contains("tool result truncated: 200000 characters total"))
+        assertEquals("call_1", toolMessage.toolCallId)
+    }
+
     /** One run whose model calls a tool once, with the gate answering [decision]. */
     private suspend fun runWithToolCall(decision: () -> ToolApprovalDecision): List<AgentEvent> {
         val orchestrator = DefaultAgentOrchestrator(
@@ -246,6 +282,43 @@ private class ToolCallingRuntime : ModelRuntime {
 private class NoopHandler(name: String) : ToolHandler {
     override val definition = ToolDefinition(name = name, description = name, inputSchemaJson = "{}")
     override suspend fun execute(argumentsJson: String): String = "{}"
+}
+
+private class ResultHandler(name: String, private val result: String) : ToolHandler {
+    override val definition = ToolDefinition(name = name, description = name, inputSchemaJson = "{}")
+    override suspend fun execute(argumentsJson: String): String = result
+}
+
+/**
+ * Calls one tool on the first generation and captures the follow-up request — the one carrying the
+ * tool result — before answering plainly.
+ */
+private class ToolResultCapturingRuntime(contextWindowTokens: Int) : ModelRuntime {
+    override val model = ModelDescriptor(
+        id = ModelId("test"),
+        displayName = "Test",
+        providerName = "Test",
+        modelName = "test",
+        location = ModelLocation.LOCAL,
+        contextWindowTokens = contextWindowTokens,
+    )
+
+    private var generations = 0
+    var secondRequest: GenerationRequest? = null
+
+    override suspend fun availability() = RuntimeAvailability(available = true, summary = "Ready")
+
+    override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+        emit(GenerationEvent.Started("Test"))
+        if (generations == 0) {
+            emit(GenerationEvent.ToolCallReady(ToolCall(id = "call_1", name = "asked_about", argumentsJson = "{}")))
+        } else {
+            secondRequest = request
+            emit(GenerationEvent.TextDelta("Done"))
+        }
+        generations++
+        emit(GenerationEvent.Finished("stop"))
+    }
 }
 
 private class StubMemoryExtractor(

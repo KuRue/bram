@@ -23,6 +23,7 @@ import io.github.kurue.bram.core.domain.ToolCall
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import io.github.kurue.bram.core.domain.ToolRegistry
+import io.github.kurue.bram.core.domain.ToolResultBudget
 import io.github.kurue.bram.core.domain.ToolSelector
 import io.github.kurue.bram.core.domain.AllToolsSelector
 import io.github.kurue.bram.core.domain.toRecord
@@ -232,7 +233,7 @@ class DefaultAgentOrchestrator(
                 val result = executeTool(call, allowedForRun, untrustedContext)
                 workingMessages += ConversationMessage(
                     role = MessageRole.TOOL,
-                    content = result,
+                    content = ToolResultBudget.apply(result, runtime.model.contextWindowTokens),
                     toolCallId = call.id,
                 )
                 // Once outside content is in the conversation it stays in it, so this only ever

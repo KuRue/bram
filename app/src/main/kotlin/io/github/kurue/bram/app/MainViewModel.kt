@@ -42,6 +42,7 @@ import io.github.kurue.bram.core.domain.SkillImportOutcome
 import io.github.kurue.bram.core.domain.SkillPackage
 import io.github.kurue.bram.core.domain.SkillPrompt
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
+import io.github.kurue.bram.core.domain.ToolResultBudget
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.ModelCapability
 import io.github.kurue.bram.core.domain.PrivacyClass
@@ -3785,15 +3786,19 @@ class MainViewModel(
     /**
      * Turns this turn's completed tool steps into TOOL messages so the next run replays what was
      * already called and answered. The transcript on screen keeps showing them as activity rows on
-     * the assistant bubble; these messages exist for the model's history.
+     * the assistant bubble; these messages exist for the model's history, bounded like the live run
+     * bounded them so a replay cannot carry more than the model already saw.
      */
-    private fun toolResultMessages(activity: List<AgentActivity>): List<ConversationMessage> =
+    private fun toolResultMessages(
+        activity: List<AgentActivity>,
+        contextWindowTokens: Int,
+    ): List<ConversationMessage> =
         activity.filterIsInstance<AgentActivity.ToolInvocation>()
             .mapNotNull { invocation ->
                 invocation.result?.let { result ->
                     ConversationMessage(
                         role = MessageRole.TOOL,
-                        content = result,
+                        content = ToolResultBudget.apply(result, contextWindowTokens),
                         toolCallId = invocation.id,
                     )
                 }
@@ -4285,7 +4290,7 @@ class MainViewModel(
                                 role = MessageRole.ASSISTANT,
                                 content = reply.first,
                             )).copy(content = reply.first, activity = finalActivity) +
-                            toolResultMessages(finalActivity)
+                            toolResultMessages(finalActivity, selection.runtime.model.contextWindowTokens)
                     else -> requestMessages
                 }
                 mutableState.update {

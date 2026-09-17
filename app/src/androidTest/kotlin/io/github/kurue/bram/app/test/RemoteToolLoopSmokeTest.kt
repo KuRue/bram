@@ -9,7 +9,10 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.kurue.bram.app.FilesTool
 import io.github.kurue.bram.app.MainActivity
+import io.github.kurue.bram.core.domain.ToolResultBudget
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONArray
@@ -106,6 +109,38 @@ class RemoteToolLoopSmokeTest {
         assertTrue("a replayed tool call had no matching result: $callIds vs $answered", answered.containsAll(callIds))
     }
 
+    @Test
+    fun oversizedToolResultIsBoundedBeforeItReplays() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val filesRoot = File(context.filesDir, FilesTool.AGENT_FILES_DIR)
+        filesRoot.mkdirs()
+        val seeded = File(filesRoot, "oversized.txt")
+        seeded.writeText("x".repeat(120_000))
+        try {
+            assumeTrue("could not arm the read_file_oversized scenario", postScenario("read_file_oversized"))
+            composeRule.onNodeWithTag("new-chat").performClick()
+            composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Mock endpoint") }
+            send("read the oversized file")
+            composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(FINAL_TEXT) }
+
+            // The request that carried the tool result must hold the bounded copy, not the 64 KB
+            // read_file returned: the endpoint's window is 8K tokens, so the cap is a quarter of it.
+            val request = lastChatCompletionRequest()
+            assertNotNull("no chat completion reached the mock", request)
+            val items = request!!.optJSONArray("items")
+            var toolContentLength = -1
+            for (index in 0 until (items?.length() ?: 0)) {
+                val item = items!!.optJSONObject(index) ?: continue
+                if (item.optString("role") == "tool") toolContentLength = item.optInt("contentLength", -1)
+            }
+            val cap = ToolResultBudget.capChars(ENDPOINT_CONTEXT_TOKENS)
+            assertTrue("expected a tool result in the replayed request", toolContentLength >= 0)
+            assertTrue("tool result of $toolContentLength chars exceeds the $cap-char cap", toolContentLength <= cap)
+        } finally {
+            seeded.delete()
+        }
+    }
+
     private fun send(text: String) {
         composeRule.onNodeWithTag("composer-field").performTextInput(text)
         composeRule.onNodeWithTag("send-button").performClick()
@@ -120,6 +155,7 @@ class RemoteToolLoopSmokeTest {
     companion object {
         private const val TIMEOUT_MILLIS = 120_000L
         private const val FINAL_TEXT = "Mock endpoint: tool result received."
+        private const val ENDPOINT_CONTEXT_TOKENS = 8_192
         private const val ENDPOINTS_PREFS = "bram.remote_endpoints"
         private const val ENDPOINTS_KEY = "endpoints.v1"
         private const val ROUTING_PREFS = "bram-routing-v1"

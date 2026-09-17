@@ -75,12 +75,14 @@ class ReadSkillTool(
 ) : ToolHandler {
     override val definition = ToolDefinition(
         name = "read_skill",
-        description = "Read one active skill's full instructions. Call this before following a " +
-            "skill or proposing an improved version of it.",
+        description = "Read one active skill's instructions. Long bodies come in chunks; pass the " +
+            "returned nextOffset to continue. Call this before following a skill or proposing an " +
+            "improved version of it.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{
-               "name":{"type":"string","description":"Skill name, as list_skills reports it."}},
+               "name":{"type":"string","description":"Skill name, as list_skills reports it."},
+               "offset":{"type":"integer","description":"Character offset to resume at; omit for the start."}},
              "required":["name"],
              "additionalProperties":false}
         """.trimIndent(),
@@ -104,11 +106,23 @@ class ReadSkillTool(
                 "\"${pkg.name}\" has a draft but no active version; the user must activate it in " +
                     "Skills before it can be read or followed.",
             )
+        val instructions = activeVersion.instructions
+        val start = arguments.optInt("offset", 0).coerceIn(0, instructions.length)
+        val end = (start + CHUNK_CHARS).coerceAtMost(instructions.length)
         return JSONObject()
             .put("name", pkg.name)
             .put("version", activeVersion.version)
             .put("description", activeVersion.description)
-            .put("instructions", activeVersion.instructions)
+            .put("instructions", instructions.substring(start, end))
+            .put("offset", start)
+            .put("totalChars", instructions.length)
+            .also { root ->
+                if (end < instructions.length) root.put("nextOffset", end)
+            }
             .toString()
+    }
+
+    private companion object {
+        const val CHUNK_CHARS = 20_000
     }
 }

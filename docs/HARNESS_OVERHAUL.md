@@ -273,16 +273,20 @@ Emulator findings from M0 (2026-09-15) — prerequisites for a trustworthy test 
 Exit: on the scripted server, a three-turn conversation sees its own earlier tool calls and results
 and does not repeat them; no single tool result can push an 8K-context model over budget.
 
-Result (2026-09-17, partial — H1 done): conversation files now persist assistant `toolCalls` and
-TOOL messages with matching `toolCallId`s, and the settled transcript appends the turn's tool
-results, so the next `AgentRunRequest` replays the earlier call/result pair (no change needed in
-`runTurn` paths — they already pass the stored list). The transcript UI filters TOOL messages, which
-stay visible as activity rows, and the context manager's user-turn grouping already keeps
-call/result pairs in one trimming unit. Two device tests cover it: `ConversationHistoryOnDeviceTest`
-(store round-trip, including the recovered flag) and
-`RemoteToolLoopSmokeTest.toolHistorySurvivesAcrossTurns`, which runs two turns under a new
-`history_check` mock scenario that answers 400 if any assistant tool call lacks a matching result,
-then asserts the mock's request log carries the replayed ids. Remaining: H2 result budgets, H3
+Result (2026-09-17, H1 and H2 done): conversation files persist assistant `toolCalls` and TOOL
+messages with matching `toolCallId`s, and the settled transcript appends the turn's tool results, so
+the next `AgentRunRequest` replays the earlier call/result pair (no change needed in `runTurn` paths
+— they already pass the stored list). The transcript UI filters TOOL messages, which stay visible as
+activity rows, and the context manager's user-turn grouping already keeps call/result pairs in one
+trimming unit. `ToolResultBudget` (core/domain) then bounds every result entering the transcript at
+roughly a quarter of the runtime's context window (2–64 KB), head-and-tail with a marker naming the
+original size, applied both to the live run's TOOL message and to the persisted one that replays;
+`read_skill` gained real chunking (`offset`/`nextOffset`) instead of relying on that backstop.
+Device coverage: `ConversationHistoryOnDeviceTest` (store round-trip, including the recovered flag),
+`RemoteToolLoopSmokeTest.toolHistorySurvivesAcrossTurns` (two turns under a new `history_check` mock
+scenario that answers 400 if any assistant tool call lacks a matching result, plus a `/__log`
+assertion on the replayed ids), and `oversizedToolResultIsBoundedBeforeItReplays` (a 120 KB
+`read_file` result arrives at the mock capped at 6 144 chars for the 8K endpoint). Remaining: H3
 unique/stable call ids for the Responses API, H4 validation/timeout/parallelism.
 
 ### M3 — Gate polish (1–2 days)

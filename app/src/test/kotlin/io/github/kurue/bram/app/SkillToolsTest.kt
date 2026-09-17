@@ -10,6 +10,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -44,13 +45,18 @@ class SkillToolsTest {
         private fun persist() = Unit
     }
 
-    private fun skillDocument(name: String, version: String, description: String = "when to follow") = """
+    private fun skillDocument(
+        name: String,
+        version: String,
+        description: String = "when to follow",
+        body: String = "Step one. Step two.",
+    ) = """
         ---
         name: $name
         version: $version
         description: $description
         ---
-        Step one. Step two.
+        $body
     """.trimIndent()
 
     private fun activeNames(json: String): List<String> {
@@ -85,6 +91,21 @@ class SkillToolsTest {
         val read = JSONObject(ReadSkillTool(store).execute("""{"name":"Weather-Scout"}"""))
         assertEquals("1.0.0", read.getString("version"))
         assertTrue(read.getString("instructions").contains("Step one"))
+    }
+
+    @Test
+    fun `read_skill chunks a long body and reports where to continue`() = runBlocking {
+        val store = LibrarySkillStore()
+        store.importDocument(skillDocument("long-skill", "1.0.0", body = "a".repeat(25_000)))
+
+        val first = JSONObject(ReadSkillTool(store).execute("""{"name":"long-skill"}"""))
+        assertEquals(20_000, first.getString("instructions").length)
+        val nextOffset = first.getInt("nextOffset")
+        assertEquals(20_000, nextOffset)
+
+        val second = JSONObject(ReadSkillTool(store).execute("""{"name":"long-skill","offset":$nextOffset}"""))
+        assertEquals(first.getInt("totalChars") - nextOffset, second.getString("instructions").length)
+        assertFalse(second.has("nextOffset"))
     }
 
     @Test

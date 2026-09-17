@@ -33,7 +33,13 @@ RESPONSES_TOOLS = [
         "name": TOOL_NAME,
         "description": "report device status",
         "parameters": {},
-    },
+    }
+]
+READ_FILE_TOOLS = [
+    {
+        "type": "function",
+        "function": {"name": "read_file", "description": "read a file", "parameters": {}},
+    }
 ]
 
 
@@ -222,6 +228,22 @@ class MockServerTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertNotEqual(calls[0]["id"], calls[1]["id"])
 
+    def test_read_file_oversized_calls_read_file_with_the_seeded_path(self):
+        self.arm("read_file_oversized")
+        status, body = self.chat(
+            [{"role": "user", "content": "read the oversized file"}], tools=READ_FILE_TOOLS
+        )
+        self.assertEqual(status, 200)
+        call = body["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(call["function"]["name"], "read_file")
+        self.assertEqual(call["function"]["arguments"], '{"path":"oversized.txt"}')
+
+    def test_read_file_oversized_is_not_called_when_not_offered(self):
+        self.arm("read_file_oversized")
+        status, body = self.chat([{"role": "user", "content": USER_MESSAGE}], tools=[])
+        self.assertEqual(status, 200)
+        self.assertNotIn("tool_calls", body["choices"][0]["message"])
+
     def test_chat_malformed_arguments(self):
         self.arm("malformed_args")
         status, body = self.chat([{"role": "user", "content": USER_MESSAGE}])
@@ -354,6 +376,7 @@ class MockServerTest(unittest.TestCase):
         self.assertEqual([item["role"] for item in entries[1]["items"]], ["user", "assistant", "tool"])
         self.assertEqual(entries[1]["items"][1]["toolCallIds"], ["call_1"])
         self.assertEqual(entries[1]["items"][2]["toolCallId"], "call_1")
+        self.assertEqual(entries[1]["items"][2]["contentLength"], len(TOOL_OUTPUT))
 
 
 if __name__ == "__main__":
