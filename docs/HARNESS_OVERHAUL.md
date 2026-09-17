@@ -286,8 +286,11 @@ Device coverage: `ConversationHistoryOnDeviceTest` (store round-trip, including 
 `RemoteToolLoopSmokeTest.toolHistorySurvivesAcrossTurns` (two turns under a new `history_check` mock
 scenario that answers 400 if any assistant tool call lacks a matching result, plus a `/__log`
 assertion on the replayed ids), and `oversizedToolResultIsBoundedBeforeItReplays` (a 120 KB
-`read_file` result arrives at the mock capped at 6 144 chars for the 8K endpoint). Remaining: H3
-unique/stable call ids for the Responses API, H4 validation/timeout/parallelism.
+`read_file` result arrives at the mock capped at 6 144 chars for the 8K endpoint). H3 then removed
+the last id collisions: no runtime mints from a reply index any more — `ToolCall.newId()` serves the
+llama.cpp event mapping and LiteRT, recovered calls are UUID-id'd too, and parser-provided ids are
+kept — and since ids are minted once and persisted, replays reuse them unchanged. Remaining: H4
+argument-schema validation, per-tool timeout, parallel read-only calls.
 
 ### M3 — Gate polish (1–2 days)
 

@@ -1,5 +1,6 @@
 package io.github.kurue.bram.runtime.llamacpp.inference
 
+import java.util.UUID
 import org.json.JSONObject
 
 /**
@@ -40,7 +41,7 @@ internal object BareToolCall {
         return JSONObject()
             .put("name", name)
             .put("arguments", arguments.toString())
-            .put("id", "recovered_$name")
+            .put("id", "recovered_" + UUID.randomUUID())
     }
 
     /**

@@ -34,7 +34,18 @@ data class ToolCall(
      * remembered allowance and never rides on one granted earlier in the run.
      */
     val recovered: Boolean = false,
-)
+) {
+    companion object {
+        /**
+         * A fresh id for a call a runtime could not name itself.
+         *
+         * Histories are replayed, so ids must not repeat across turns of one conversation: an
+         * index minted per generation (`call_0`) collides with the previous turn's first call, and
+         * the Responses API requires every `function_call` id to be distinct.
+         */
+        fun newId(): String = "call_" + UUID.randomUUID().toString().replace("-", "")
+    }
+}
 
 /**
  * Work an agent did on the way to an answer.

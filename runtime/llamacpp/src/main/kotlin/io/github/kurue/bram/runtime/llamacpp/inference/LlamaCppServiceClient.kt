@@ -263,25 +263,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                         ),
                     )
                     "textDelta" -> trySend(GenerationEvent.TextDelta(event.optString("text")))
-                    "toolCalls" -> {
-                        val calls = event.optJSONArray("calls")
-                        for (index in 0 until (calls?.length() ?: 0)) {
-                            val call = calls?.optJSONObject(index) ?: continue
-                            trySend(
-                                GenerationEvent.ToolCallReady(
-                                    ToolCall(
-                                        // llama.cpp leaves the id empty for formats that have no
-                                        // notion of one, and the loop needs it to match a result
-                                        // back to its call.
-                                        id = call.optString("id").ifBlank { "call_$index" },
-                                        name = call.optString("name"),
-                                        argumentsJson = call.optString("arguments").ifBlank { "{}" },
-                                        recovered = call.optBoolean("recovered"),
-                                    ),
-                                ),
-                            )
-                        }
-                    }
+                    "toolCalls" -> parseToolCallEvents(event).forEach { trySend(it) }
                     "usage" -> trySend(
                         GenerationEvent.Usage(
                             TokenUsage(
@@ -484,4 +466,28 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             }
         },
     )
+}
+
+/**
+ * Maps one `toolCalls` event to generation events, minting an id for any call the chat format did
+ * not name (llama.cpp leaves it empty) — minted per call, never per index, because a replayed
+ * history must not collide with the ids a previous turn already used.
+ */
+internal fun parseToolCallEvents(event: JSONObject): List<GenerationEvent.ToolCallReady> {
+    val calls = event.optJSONArray("calls")
+    return buildList {
+        for (index in 0 until (calls?.length() ?: 0)) {
+            val call = calls?.optJSONObject(index) ?: continue
+            add(
+                GenerationEvent.ToolCallReady(
+                    ToolCall(
+                        id = call.optString("id").ifBlank { ToolCall.newId() },
+                        name = call.optString("name"),
+                        argumentsJson = call.optString("arguments").ifBlank { "{}" },
+                        recovered = call.optBoolean("recovered"),
+                    ),
+                ),
+            )
+        }
+    }
 }
