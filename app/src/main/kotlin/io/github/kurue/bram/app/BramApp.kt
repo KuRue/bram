@@ -894,6 +894,9 @@ private fun ChatTranscript(
 ) {
     val listState = rememberLazyListState()
     val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
+    // Tool results live in the history for the model to replay, but the transcript shows them as
+    // activity rows on the assistant bubble rather than as messages of their own.
+    val visibleMessages = state.messages.filterNot { it.role == MessageRole.TOOL }
 
     // Follow the reply as it streams, keyed on the last message's length so each delta scrolls and
     // not merely each new message. The large offset scrolls past the item rather than aligning its
@@ -904,10 +907,10 @@ private fun ChatTranscript(
             // The approval card sits just past the last message, so a long thread leaves it hidden
             // under the composer or off the bottom. Bring it into view the moment it appears,
             // otherwise the run blocks on a prompt the user cannot see.
-            state.pendingApproval != null && state.messages.isNotEmpty() ->
-                runCatching { listState.animateScrollToItem(state.messages.size, LARGE_SCROLL_OFFSET) }
-            state.messages.isNotEmpty() ->
-                runCatching { listState.animateScrollToItem(state.messages.lastIndex, LARGE_SCROLL_OFFSET) }
+            state.pendingApproval != null && visibleMessages.isNotEmpty() ->
+                runCatching { listState.animateScrollToItem(visibleMessages.size, LARGE_SCROLL_OFFSET) }
+            visibleMessages.isNotEmpty() ->
+                runCatching { listState.animateScrollToItem(visibleMessages.lastIndex, LARGE_SCROLL_OFFSET) }
         }
     }
 
@@ -942,7 +945,7 @@ private fun ChatTranscript(
                 )
             }
         }
-        items(state.messages, key = { it.id.value }) { message ->
+        items(visibleMessages, key = { it.id.value }) { message ->
             ChatBubble(
                 message = message,
                 canAct = !state.isGenerating,
@@ -2831,6 +2834,7 @@ private fun SessionScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        val displayCount = state.messages.count { it.role != MessageRole.TOOL }
         val userCount = state.messages.count { it.role == MessageRole.USER }
         val assistantCount = state.messages.count { it.role == MessageRole.ASSISTANT }
         val contextWindow = state.selectedLocalModel?.preferredContextTokens
@@ -2841,7 +2845,7 @@ private fun SessionScreen(
                     Column(Modifier.weight(1f)) {
                         Text("Usage", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "${state.messages.size} messages · ${formatTokenCount(state.sessionOutputTokens)} generated",
+                            "$displayCount messages · ${formatTokenCount(state.sessionOutputTokens)} generated",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -2855,7 +2859,7 @@ private fun SessionScreen(
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         HorizontalDivider()
-                        StatRow("Messages", "${state.messages.size}" + if (state.messages.isNotEmpty()) " · $userCount you, $assistantCount Bram" else "")
+                        StatRow("Messages", "$displayCount" + if (displayCount > 0) " · $userCount you, $assistantCount Bram" else "")
                         StatRow("Tokens read", formatTokenCount(state.sessionInputTokens))
                         StatRow(
                             "Context",

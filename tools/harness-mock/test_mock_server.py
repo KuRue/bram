@@ -172,6 +172,48 @@ class MockServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotIn("tool_calls", body["choices"][0]["message"])
 
+    def test_history_check_rejects_dangling_tool_call(self):
+        self.arm("history_check")
+        status, body = self.chat(
+            [
+                {"role": "user", "content": USER_MESSAGE},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "call_lost"}]},
+                {"role": "user", "content": "again"},
+            ]
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("call_lost", body["error"]["message"])
+
+    def test_history_check_accepts_matched_call_and_result(self):
+        self.arm("history_check")
+        status, body = self.chat(
+            [
+                {"role": "user", "content": USER_MESSAGE},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "call_kept"}]},
+                {"role": "tool", "tool_call_id": "call_kept", "content": TOOL_OUTPUT},
+            ]
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["choices"][0]["message"]["content"], FINAL_TEXT)
+
+    def test_history_check_accepts_a_fresh_conversation(self):
+        self.arm("history_check")
+        status, body = self.chat([{"role": "user", "content": USER_MESSAGE}])
+        self.assertEqual(status, 200)
+        self.assertIn("tool_calls", body["choices"][0]["message"])
+
+    def test_history_check_responses_rejects_dangling_call(self):
+        self.arm("history_check")
+        status, body = self.responses(
+            [
+                {"type": "message", "role": "user", "content": USER_MESSAGE},
+                {"type": "function_call", "call_id": "call_lost", "name": TOOL_NAME, "arguments": "{}"},
+                {"type": "message", "role": "user", "content": "again"},
+            ]
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("call_lost", body["error"]["message"])
+
     def test_chat_parallel_calls_have_distinct_ids(self):
         self.arm("parallel_calls")
         status, body = self.chat([{"role": "user", "content": USER_MESSAGE}])
@@ -310,6 +352,7 @@ class MockServerTest(unittest.TestCase):
         self.assertEqual(entries[0]["model"], MODEL_ID)
         self.assertEqual(entries[0]["tools"], 1)
         self.assertEqual([item["role"] for item in entries[1]["items"]], ["user", "assistant", "tool"])
+        self.assertEqual(entries[1]["items"][1]["toolCallIds"], ["call_1"])
         self.assertEqual(entries[1]["items"][2]["toolCallId"], "call_1")
 
 

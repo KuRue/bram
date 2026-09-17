@@ -3782,6 +3782,23 @@ class MainViewModel(
         activity = activity.toList(),
     )
 
+    /**
+     * Turns this turn's completed tool steps into TOOL messages so the next run replays what was
+     * already called and answered. The transcript on screen keeps showing them as activity rows on
+     * the assistant bubble; these messages exist for the model's history.
+     */
+    private fun toolResultMessages(activity: List<AgentActivity>): List<ConversationMessage> =
+        activity.filterIsInstance<AgentActivity.ToolInvocation>()
+            .mapNotNull { invocation ->
+                invocation.result?.let { result ->
+                    ConversationMessage(
+                        role = MessageRole.TOOL,
+                        content = result,
+                        toolCallId = invocation.id,
+                    )
+                }
+            }
+
     /** Starts a new thread rather than erasing the current one, which is now kept on disk. */
     fun clearChat() = startNewConversation()
 
@@ -4263,10 +4280,12 @@ class MainViewModel(
                 }
                 val settled = when {
                     reply.first.isNotBlank() || finalActivity.isNotEmpty() ->
-                        requestMessages + (completedMessage ?: ConversationMessage(
-                            role = MessageRole.ASSISTANT,
-                            content = reply.first,
-                        )).copy(content = reply.first, activity = finalActivity)
+                        requestMessages +
+                            (completedMessage ?: ConversationMessage(
+                                role = MessageRole.ASSISTANT,
+                                content = reply.first,
+                            )).copy(content = reply.first, activity = finalActivity) +
+                            toolResultMessages(finalActivity)
                     else -> requestMessages
                 }
                 mutableState.update {

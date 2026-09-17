@@ -15,6 +15,8 @@ import java.net.URL
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.AfterClass
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.BeforeClass
@@ -74,8 +76,46 @@ class RemoteToolLoopSmokeTest {
         composeRule.onNodeWithText(FINAL_TEXT).assertIsDisplayed()
     }
 
+    @Test
+    fun toolHistorySurvivesAcrossTurns() {
+        assumeTrue("could not arm the history_check scenario", postScenario("history_check"))
+        composeRule.onNodeWithTag("new-chat").performClick()
+        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Mock endpoint") }
+        send("check device")
+        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(FINAL_TEXT) }
+        // Sending while the first turn is still wrapping up is safe: it queues and starts its own
+        // turn when the reply settles.
+        send("check again")
+        composeRule.waitUntil(TIMEOUT_MILLIS) { countText(FINAL_TEXT) >= 2 }
+
+        // The scenario answers 400 when an assistant tool call has no matching result, so the
+        // second turn completing at all already means the history replayed. This makes it explicit.
+        val request = lastChatCompletionRequest()
+        assertNotNull("no chat completion reached the mock", request)
+        val items = request!!.optJSONArray("items")
+        val callIds = mutableSetOf<String>()
+        val answered = mutableSetOf<String>()
+        for (index in 0 until (items?.length() ?: 0)) {
+            val item = items!!.optJSONObject(index) ?: continue
+            item.optJSONArray("toolCallIds")?.let { ids ->
+                for (idIndex in 0 until ids.length()) callIds += ids.optString(idIndex)
+            }
+            item.optString("toolCallId").takeIf(String::isNotBlank)?.let(answered::add)
+        }
+        assertTrue("the replayed request carried no earlier tool call", callIds.isNotEmpty())
+        assertTrue("a replayed tool call had no matching result: $callIds vs $answered", answered.containsAll(callIds))
+    }
+
+    private fun send(text: String) {
+        composeRule.onNodeWithTag("composer-field").performTextInput(text)
+        composeRule.onNodeWithTag("send-button").performClick()
+    }
+
     private fun hasText(text: String): Boolean =
         composeRule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
+
+    private fun countText(text: String): Int =
+        composeRule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().size
 
     companion object {
         private const val TIMEOUT_MILLIS = 120_000L
@@ -133,6 +173,26 @@ class RemoteToolLoopSmokeTest {
         }
 
         private fun targetContext(): Context = InstrumentationRegistry.getInstrumentation().targetContext
+
+        /** The latest completion the app sent with tools offered, as the mock logged it. */
+        private fun lastChatCompletionRequest(): JSONObject? = runCatching {
+            val connection = URL("http://127.0.0.1:8099/__log").openConnection() as HttpURLConnection
+            connection.connectTimeout = 2_000
+            connection.readTimeout = 2_000
+            try {
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                val requests = JSONObject(body).optJSONArray("requests") ?: return null
+                for (index in requests.length() - 1 downTo 0) {
+                    val entry = requests.optJSONObject(index) ?: continue
+                    if (entry.optString("path") != "/v1/chat/completions") continue
+                    if (entry.optInt("tools") <= 0) continue
+                    return entry
+                }
+                null
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
 
         private fun mockServerReachable(): Boolean = runCatching {
             val connection = URL("http://127.0.0.1:8099/__health").openConnection() as HttpURLConnection

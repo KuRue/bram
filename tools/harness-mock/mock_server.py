@@ -18,6 +18,7 @@ SLOW_SECONDS = 10.0
 SCENARIOS = (
     "text",
     "happy_tool_call",
+    "history_check",
     "parallel_calls",
     "malformed_args",
     "http_500",
@@ -26,7 +27,7 @@ SCENARIOS = (
     "status_failed",
 )
 DEFAULT_SCENARIO = "happy_tool_call"
-TOOL_SCENARIOS = ("happy_tool_call", "parallel_calls", "malformed_args", "oversized_result")
+TOOL_SCENARIOS = ("happy_tool_call", "history_check", "parallel_calls", "malformed_args", "oversized_result")
 MODELS = [
     {
         "id": "mock-small",
@@ -127,6 +128,50 @@ def usage_chat():
 
 def usage_responses():
     return {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+
+
+def unfinished_chat_call(messages):
+    expected = []
+    answered = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if isinstance(call, dict) and call.get("id"):
+                    expected.append(call["id"])
+        if message.get("role") == "tool":
+            answered.add(message.get("tool_call_id"))
+    return next((call_id for call_id in expected if call_id not in answered), None)
+
+
+def unfinished_responses_call(items):
+    expected = []
+    answered = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call" and item.get("call_id"):
+            expected.append(item["call_id"])
+        if item.get("type") == "function_call_output":
+            answered.add(item.get("call_id"))
+    return next((call_id for call_id in expected if call_id not in answered), None)
+
+
+def history_error(path, payload):
+    if path == "/v1/chat/completions":
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            missing = unfinished_chat_call(messages)
+            if missing:
+                return f"history incomplete: assistant tool call {missing} has no matching tool result"
+    else:
+        items = payload.get("input")
+        if isinstance(items, list):
+            missing = unfinished_responses_call(items)
+            if missing:
+                return f"history incomplete: function call {missing} has no matching function_call_output"
+    return None
 
 
 def chat_reply(payload, scenario=DEFAULT_SCENARIO):
@@ -234,6 +279,10 @@ def respond(path, payload, scenario):
         return 500, SCRIPTED_SERVER_ERROR
     if scenario == "slow_response":
         time.sleep(SLOW_SECONDS)
+    if scenario == "history_check":
+        missing = history_error(path, payload)
+        if missing:
+            return 400, {"error": {"message": missing, "type": "invalid_request_error"}}
     if path == "/v1/chat/completions":
         if scenario == "status_failed":
             return 500, SCRIPTED_SERVER_ERROR
@@ -251,6 +300,11 @@ def describe_request(path, payload):
             {
                 "role": message.get("role"),
                 "toolCalls": len(message.get("tool_calls") or []),
+                "toolCallIds": [
+                    call.get("id")
+                    for call in message.get("tool_calls") or []
+                    if isinstance(call, dict)
+                ],
                 "toolCallId": message.get("tool_call_id"),
             }
             for message in payload.get("messages") or []
