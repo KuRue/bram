@@ -106,16 +106,16 @@ class OpenAiCompatibleRuntime(
                     out.emit(GenerationEvent.Usage(parseChatUsage(usage)))
                 }
                 val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: return@readSseLines true
-                choice.optString("finish_reason").takeIf(String::isNotBlank)?.let { finishReason = it }
+                choice.stringOrNull("finish_reason")?.let { finishReason = it }
                 val delta = choice.optJSONObject("delta") ?: return@readSseLines true
                 // Reasoning arrives on a separate field, per provider: reasoning_content
                 // (DeepSeek-style) or reasoning (OpenRouter-style).
-                val reasoningDelta = delta.optString("reasoning_content").ifBlank { delta.optString("reasoning") }
-                if (reasoningDelta.isNotEmpty()) {
+                val reasoningDelta = delta.stringOrNull("reasoning_content") ?: delta.stringOrNull("reasoning")
+                if (reasoningDelta != null) {
                     reasoning.append(reasoningDelta)
                     out.emit(GenerationEvent.ReasoningDelta(reasoningDelta))
                 }
-                delta.optString("content").takeIf(String::isNotEmpty)?.let { piece ->
+                delta.stringOrNull("content")?.let { piece ->
                     text.append(piece)
                     out.emit(GenerationEvent.TextDelta(piece))
                 }
@@ -124,10 +124,10 @@ class OpenAiCompatibleRuntime(
                     val toolDelta = toolDeltas?.optJSONObject(index) ?: continue
                     val slot = toolDelta.optInt("index", index)
                     val builder = calls.getOrPut(slot) { ChatToolCallBuilder() }
-                    toolDelta.optString("id").takeIf(String::isNotBlank)?.let { builder.id = it }
+                    toolDelta.stringOrNull("id")?.let { builder.id = it }
                     val function = toolDelta.optJSONObject("function") ?: continue
-                    function.optString("name").takeIf(String::isNotBlank)?.let { builder.name = it }
-                    function.optString("arguments").takeIf(String::isNotEmpty)?.let { builder.arguments.append(it) }
+                    function.stringOrNull("name")?.let { builder.name = it }
+                    function.stringOrNull("arguments")?.let { builder.arguments.append(it) }
                 }
                 true
             }
@@ -170,15 +170,16 @@ class OpenAiCompatibleRuntime(
                 val event = runCatching { JSONObject(data) }.getOrNull() ?: return@readSseLines true
                 when (event.optString("type")) {
                     "response.output_text.delta" -> {
-                        val piece = event.optString("delta")
-                        if (piece.isNotEmpty()) {
+                        val piece = event.stringOrNull("delta")
+                        if (piece != null) {
                             streamedText = true
                             out.emit(GenerationEvent.TextDelta(piece))
                         }
                     }
                     "response.reasoning_summary_text.delta", "response.reasoning_text.delta" -> {
-                        val piece = event.optString("delta")
-                        if (piece.isNotEmpty()) out.emit(GenerationEvent.ReasoningDelta(piece))
+                        event.stringOrNull("delta")?.let { piece ->
+                            out.emit(GenerationEvent.ReasoningDelta(piece))
+                        }
                     }
                     "response.completed", "response.incomplete" -> {
                         completed = event.optJSONObject("response")
@@ -590,9 +591,9 @@ class OpenAiCompatibleRuntime(
                 val function = raw.getJSONObject("function")
                 add(
                     ToolCall(
-                        id = raw.optString("id", "tool-call-$index"),
-                        name = function.getString("name"),
-                        argumentsJson = function.optString("arguments", "{}"),
+                        id = raw.stringOrNull("id") ?: "tool-call-$index",
+                        name = function.optString("name"),
+                        argumentsJson = function.stringOrNull("arguments") ?: "{}",
                     ),
                 )
             }
@@ -607,11 +608,11 @@ class OpenAiCompatibleRuntime(
         }
 
         return ParsedResponse(
-            text = message.optString("content", "").takeUnless { it == "null" }.orEmpty(),
-            reasoning = message.optString("reasoning_content").ifBlank { message.optString("reasoning") },
+            text = message.stringOrNull("content").orEmpty(),
+            reasoning = message.stringOrNull("reasoning_content") ?: message.stringOrNull("reasoning").orEmpty(),
             toolCalls = calls,
             usage = usage,
-            finishReason = choice.optString("finish_reason", null),
+            finishReason = choice.stringOrNull("finish_reason"),
         )
     }
 
@@ -653,9 +654,9 @@ class OpenAiCompatibleRuntime(
                 if (item.optString("type") != "function_call") continue
                 add(
                     ToolCall(
-                        id = item.optString("call_id", "call-$index"),
-                        name = item.optString("name").takeIf(String::isNotBlank) ?: "unknown",
-                        argumentsJson = item.optString("arguments", "{}"),
+                        id = item.stringOrNull("call_id") ?: "call-$index",
+                        name = item.stringOrNull("name") ?: "unknown",
+                        argumentsJson = item.stringOrNull("arguments") ?: "{}",
                     ),
                 )
             }
@@ -703,6 +704,16 @@ class OpenAiCompatibleRuntime(
 
     private fun JSONObject.optionalInt(name: String): Int? =
         if (has(name) && !isNull(name)) getInt(name) else null
+
+    /**
+     * The string value of [name], or null when it is absent or JSON null.
+     *
+     * `optString` renders a JSON null as the literal text `"null"`, which servers that spell an
+     * empty field as null (`"content": null` on a reasoning-only chunk, `"finish_reason": null`
+     * beside it) would otherwise inject into the answer as words.
+     */
+    private fun JSONObject.stringOrNull(name: String): String? =
+        if (isNull(name)) null else optString(name).takeIf(String::isNotEmpty)
 }
 
 private data class ParsedResponse(

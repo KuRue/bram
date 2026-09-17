@@ -486,6 +486,72 @@ class OpenAiCompatibleRuntimeTest {
         )
     }
 
+    @Test
+    fun `json null fields never surface as the word null`() = runBlocking {
+        // llama-server spells an empty field as null (`"content": null` on a reasoning-only chunk),
+        // and optString renders that as the literal text "null" — which a real run then showed in
+        // the transcript.
+        sseFrames = listOf(
+            chatChunk(
+                JSONObject()
+                    .put("role", "assistant")
+                    .put("content", JSONObject.NULL)
+                    .put("reasoning_content", "thinking"),
+            ),
+            chatChunk(JSONObject().put("content", "answer")),
+            "data: [DONE]",
+        )
+
+        val events = generate(apiKind = RemoteApiKind.CHAT_COMPLETIONS).toList()
+
+        assertEquals(
+            "thinking",
+            events.filterIsInstance<GenerationEvent.ReasoningDelta>().joinToString("") { it.text },
+        )
+        assertEquals("answer", events.filterIsInstance<GenerationEvent.TextDelta>().joinToString("") { it.text })
+    }
+
+    @Test
+    fun `a null finish reason and null tool fields are absent, not the word null`() = runBlocking {
+        responseBody = JSONObject()
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject()
+                        .put(
+                            "message",
+                            JSONObject()
+                                .put("content", JSONObject.NULL)
+                                .put("reasoning_content", JSONObject.NULL)
+                                .put(
+                                    "tool_calls",
+                                    JSONArray().put(
+                                        JSONObject()
+                                            .put("id", JSONObject.NULL)
+                                            .put(
+                                                "function",
+                                                JSONObject()
+                                                    .put("name", "look")
+                                                    .put("arguments", JSONObject.NULL),
+                                            ),
+                                    ),
+                                ),
+                        )
+                        .put("finish_reason", JSONObject.NULL),
+                ),
+            )
+            .toString()
+
+        val events = generate(apiKind = RemoteApiKind.CHAT_COMPLETIONS).toList()
+
+        assertTrue(events.filterIsInstance<GenerationEvent.TextDelta>().isEmpty())
+        val call = events.filterIsInstance<GenerationEvent.ToolCallReady>().single().call
+        assertEquals("look", call.name)
+        assertEquals("{}", call.argumentsJson)
+        assertTrue("a null id must not become the text 'null'", call.id != "null")
+        assertNull(events.filterIsInstance<GenerationEvent.Finished>().single().finishReason)
+    }
+
     private suspend fun generate(
         apiKind: RemoteApiKind,
         messages: List<ConversationMessage> = listOf(
