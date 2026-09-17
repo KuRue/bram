@@ -121,7 +121,7 @@ data class LocalModelRecord(
         modelName = fileName,
         location = ModelLocation.LOCAL,
         contextWindowTokens = preferredContextTokens,
-        capabilities = setOf(ModelCapability.TEXT),
+        capabilities = setOf(ModelCapability.TEXT, ModelCapability.TOOL_CALLING),
     )
 }
 

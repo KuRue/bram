@@ -2,6 +2,7 @@ package io.github.kurue.bram.core.domain
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ToolSelectionTest {
@@ -83,13 +84,58 @@ class ToolSelectionTest {
                 "c: orthogonal" to floatArrayOf(0f, 1f),
             ),
         )
-        val selector = RankingToolSelector(embedder, coreToolNames = emptySet(), budgetChars = 10_000)
+        // No floor here: this pins the budget and the ordering, not relevance.
+        val selector = RankingToolSelector(embedder, coreToolNames = emptySet(), budgetChars = 10_000, minSimilarity = 0f)
         val available = listOf(
             tool("c", description = "orthogonal"),
             tool("b", description = "mid"),
             tool("a", description = "near"),
         )
         assertEquals(listOf("a", "b", "c"), selector.select("fix my code", 4_096, available).map { it.name })
+    }
+
+    @Test
+    fun `tools below the floor are not offered however much budget remains`() = runBlocking {
+        val query = floatArrayOf(1f, 0f)
+        // A nearly-orthogonal direction: about 0.2 cosine, below the 0.35 default floor.
+        val faint = floatArrayOf(0.2f, 0.98f)
+        val embedder = FakeEmbedder(
+            mapOf(
+                "check the weather" to query,
+                "get_weather: weather" to floatArrayOf(1f, 0f),
+                "send_email: mail" to faint,
+            ),
+        )
+        val selector = RankingToolSelector(embedder, coreToolNames = emptySet(), budgetChars = 10_000)
+        val available = listOf(tool("get_weather", description = "weather"), tool("send_email", description = "mail"))
+        assertEquals(listOf("get_weather"), selector.select("check the weather", 4_096, available).map { it.name })
+    }
+
+    @Test
+    fun `a small context gets a proportionally small tool budget`() = runBlocking {
+        val query = floatArrayOf(1f, 0f)
+        val vectors = buildMap {
+            put("search", query)
+            (1..12).forEach { index -> put("t$index: search tool", floatArrayOf(1f, 0f)) }
+        }
+        val embedder = FakeEmbedder(vectors)
+        val available = (1..12).map { index -> tool("t$index", description = "search tool", schemaChars = 200) }
+        val selector = RankingToolSelector(embedder, coreToolNames = emptySet())
+
+        val small = selector.select("search", 4_096, available)
+        val large = selector.select("search", 16_384, available)
+        val smallCost = small.sumOf { it.description.length + it.inputSchemaJson.length }
+        val largeCost = large.sumOf { it.description.length + it.inputSchemaJson.length }
+
+        assertTrue(
+            "4K offered $smallCost chars, budget ${RankingToolSelector.budgetFor(4_096)}",
+            smallCost <= RankingToolSelector.budgetFor(4_096),
+        )
+        assertTrue("16K should offer more than 4K did", largeCost > smallCost)
+        assertTrue(
+            "16K offered $largeCost chars, budget ${RankingToolSelector.budgetFor(16_384)}",
+            largeCost <= RankingToolSelector.budgetFor(16_384),
+        )
     }
 
     @Test

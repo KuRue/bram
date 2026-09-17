@@ -64,7 +64,12 @@ class ToolSelectionEval {
         })
     }
 
-    private fun selector() = RankingToolSelector(KeywordEmbedder())
+    /**
+     * No similarity floor here: the bag-of-words stand-in spreads mass over every letter, so its
+     * cosines sit far below a real embedding model's scale. The floor has its own test; this eval
+     * pins the budget, the core set, and ordering.
+     */
+    private fun selector() = RankingToolSelector(KeywordEmbedder(), minSimilarity = 0f)
 
     @Test
     fun `a weather ask keeps the weather tool and the core set under a full registry`() = runBlocking {
@@ -72,9 +77,12 @@ class ToolSelectionEval {
         val names = selected.map { it.name }
         assertTrue("the weather tool must survive", weatherTool.name in names)
         assertTrue("every core tool must survive", RankingToolSelector.DEFAULT_CORE_TOOLS.all { it in names })
-        // The budget holds: the whole selection costs less than the configured cap.
+        // The budget holds at the context-proportional cap for this window.
         val spent = selected.sumOf { it.description.length + it.inputSchemaJson.length }
-        assertTrue("selection cost $spent chars exceeds the budget", spent <= 6_000 + 200)
+        assertTrue(
+            "selection cost $spent chars exceeds the ${RankingToolSelector.budgetFor(4_096)}-char budget",
+            spent <= RankingToolSelector.budgetFor(4_096),
+        )
         // And triage actually happened: two dozen irrelevant tools did not all fit.
         assertTrue("expected the 24 noisy tools to be trimmed", selected.size < registry.size)
     }

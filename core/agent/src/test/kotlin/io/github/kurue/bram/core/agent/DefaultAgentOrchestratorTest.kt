@@ -11,6 +11,7 @@ import io.github.kurue.bram.core.domain.GenerationRequest
 import io.github.kurue.bram.core.domain.MemoryExtractor
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.ModelCapability
 import io.github.kurue.bram.core.domain.ModelDescriptor
 import io.github.kurue.bram.core.domain.ModelId
 import io.github.kurue.bram.core.domain.ModelLocation
@@ -34,6 +35,9 @@ import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+
+/** Every test runtime here speaks tool calls; the capability gate must not starve them. */
+private val TOOL_CAPABLE = setOf(ModelCapability.TEXT, ModelCapability.TOOL_CALLING)
 
 class DefaultAgentOrchestratorTest {
     @Test
@@ -131,6 +135,35 @@ class DefaultAgentOrchestratorTest {
 
         assertTrue("the turn must still complete", events.any { it is AgentEvent.Completed })
         assertTrue(memory.searchAll("anything", 10).isEmpty())
+    }
+
+    @Test
+    fun `a runtime without tool calling is offered no tools`() = runBlocking {
+        // Sending definitions to an engine that cannot use them costs context and can error on
+        // strict hosts; the capability flag is what keeps that from happening.
+        val runtime = CapturingRuntime(capabilities = setOf(ModelCapability.TEXT))
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(NoopHandler("asked_about"))),
+            approvalGate = ReadOnlyApprovalGate(),
+        )
+
+        orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("no-tools"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Hello")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = runtime,
+        ).toList()
+
+        assertTrue("no tools may reach a runtime that cannot call them", runtime.lastRequest?.tools?.isEmpty() == true)
     }
 
     @Test
@@ -419,6 +452,7 @@ private class ToolCallingRuntime(
         modelName = "test",
         location = ModelLocation.LOCAL,
         contextWindowTokens = 4_096,
+        capabilities = TOOL_CAPABLE,
     )
 
     private var generations = 0
@@ -446,6 +480,7 @@ private class TwoCallRuntime(private vararg val toolNames: String) : ModelRuntim
         modelName = "test",
         location = ModelLocation.LOCAL,
         contextWindowTokens = 4_096,
+        capabilities = TOOL_CAPABLE,
     )
 
     private var generations = 0
@@ -479,6 +514,7 @@ private class RepeatingToolRuntime(private val toolName: String, private val tim
         modelName = "test",
         location = ModelLocation.LOCAL,
         contextWindowTokens = 4_096,
+        capabilities = TOOL_CAPABLE,
     )
 
     private var generations = 0
@@ -562,6 +598,7 @@ private class ToolResultCapturingRuntime(contextWindowTokens: Int) : ModelRuntim
         modelName = "test",
         location = ModelLocation.LOCAL,
         contextWindowTokens = contextWindowTokens,
+        capabilities = TOOL_CAPABLE,
     )
 
     private var generations = 0
@@ -599,7 +636,9 @@ private class StubMemoryExtractor(
     }
 }
 
-private class CapturingRuntime : ModelRuntime {
+private class CapturingRuntime(
+    capabilities: Set<ModelCapability> = TOOL_CAPABLE,
+) : ModelRuntime {
     override val model = ModelDescriptor(
         id = ModelId("test"),
         displayName = "Test",
@@ -607,6 +646,7 @@ private class CapturingRuntime : ModelRuntime {
         modelName = "test",
         location = ModelLocation.LOCAL,
         contextWindowTokens = 4_096,
+        capabilities = capabilities,
     )
 
     var lastRequest: GenerationRequest? = null

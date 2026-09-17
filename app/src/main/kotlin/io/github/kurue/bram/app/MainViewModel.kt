@@ -552,6 +552,8 @@ data class EndpointDraft(
     val reasoningEffort: String? = null,
     val customHeadersText: String = "",
     val bodyOptionsJson: String = "{}",
+    /** Whether the server accepts tool definitions; false keeps tools out of its requests. */
+    val supportsToolCalling: Boolean = true,
 )
 
 data class RemoteModelDiscovery(
@@ -3387,7 +3389,7 @@ class MainViewModel(
                 modelName = draft.modelName.trim(),
                 apiKind = draft.apiKind,
                 contextWindowTokens = draft.contextWindowTokens,
-                supportsToolCalling = true,
+                supportsToolCalling = draft.supportsToolCalling,
                 allowInsecureHttp = draft.allowInsecureHttp,
                 reasoningEffort = draft.reasoningEffort,
                 customHeaders = parseHeaders(draft.customHeadersText),

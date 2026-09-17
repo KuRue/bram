@@ -1351,6 +1351,7 @@ private fun AddProfileScreen(
         mutableStateOf(initialEndpoint?.customHeaders?.entries?.joinToString("\n") { "${it.key}: ${it.value}" }.orEmpty())
     }
     var bodyOptions by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.bodyOptionsJson ?: "{}") }
+    var supportsTools by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.supportsToolCalling ?: true) }
     var advanced by rememberSaveable(initialEndpoint?.id) { mutableStateOf(false) }
     LaunchedEffect(modelName, state.remoteModelDiscovery.models) {
         state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
@@ -1403,7 +1404,7 @@ private fun AddProfileScreen(
                     OutlinedButton(
                         onClick = {
                             onDiscoverRemoteModels(
-                                EndpointDraft(initialEndpoint?.id, name, baseUrl, modelName, context.toIntOrNull() ?: 32768, apiKey, allowHttp, apiKind),
+                                EndpointDraft(initialEndpoint?.id, name, baseUrl, modelName, context.toIntOrNull() ?: 32768, apiKey, allowHttp, apiKind, supportsToolCalling = supportsTools),
                             )
                         },
                         enabled = !state.remoteModelDiscovery.loading,
@@ -1479,6 +1480,17 @@ private fun AddProfileScreen(
                             )
                         }
                     }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(supportsTools, { supportsTools = it })
+                        Column {
+                            Text("Supports tool calling")
+                            Text(
+                                "Turn off for models or hosts that reject tool definitions.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     TextButton(onClick = { advanced = !advanced }, modifier = Modifier.fillMaxWidth()) {
                         Text(if (advanced) "Hide advanced" else "Advanced")
                     }
@@ -1503,7 +1515,7 @@ private fun AddProfileScreen(
                     Button(
                         onClick = {
                             onSaveEndpoint(
-                                EndpointDraft(initialEndpoint?.id, name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind, reasoningEffort, customHeaders, bodyOptions),
+                                EndpointDraft(initialEndpoint?.id, name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind, reasoningEffort, customHeaders, bodyOptions, supportsTools),
                             )
                             onBack()
                         },
@@ -3098,6 +3110,7 @@ private fun ProvidersScreen(
     var reasoningEffort by rememberSaveable { mutableStateOf<String?>(null) }
     var customHeaders by rememberSaveable { mutableStateOf("") }
     var bodyOptions by rememberSaveable { mutableStateOf("{}") }
+    var supportsTools by rememberSaveable { mutableStateOf(true) }
     LaunchedEffect(modelName, state.remoteModelDiscovery.models) {
         state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
             ?.contextWindowTokens?.let { context = it.toString() }
@@ -3151,7 +3164,7 @@ private fun ProvidersScreen(
                     OutlinedButton(
                         onClick = {
                             onDiscoverRemoteModels(
-                                EndpointDraft(editingId, name, baseUrl, modelName, context.toIntOrNull() ?: 32768, apiKey, allowHttp, apiKind),
+                                EndpointDraft(editingId, name, baseUrl, modelName, context.toIntOrNull() ?: 32768, apiKey, allowHttp, apiKind, supportsToolCalling = supportsTools),
                             )
                         },
                         enabled = !state.remoteModelDiscovery.loading,
@@ -3232,12 +3245,23 @@ private fun ProvidersScreen(
                             )
                         }
                     }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(supportsTools, { supportsTools = it })
+                        Column {
+                            Text("Supports tool calling")
+                            Text(
+                                "Turn off for models or hosts that reject tool definitions.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     OutlinedTextField(customHeaders, { customHeaders = it }, label = { Text("Custom headers") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(bodyOptions, { bodyOptions = it }, label = { Text("Request options (JSON)") }, modifier = Modifier.fillMaxWidth())
                     Button(
                         onClick = {
                             onSaveEndpoint(
-                                EndpointDraft(editingId, name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind, reasoningEffort, customHeaders, bodyOptions),
+                                EndpointDraft(editingId, name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind, reasoningEffort, customHeaders, bodyOptions, supportsTools),
                             )
                             adding = false
                         },

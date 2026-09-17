@@ -34,8 +34,13 @@ class RankingToolSelector(
     private val embedder: Embedder,
     /** Tools offered on every run regardless of the ask, in registry order. */
     private val coreToolNames: Set<String> = DEFAULT_CORE_TOOLS,
-    /** Characters of description + schema the whole selection may cost on a small-context model. */
-    private val budgetChars: Int = DEFAULT_BUDGET_CHARS,
+    /**
+     * A fixed character budget, overriding the context-proportional one; tests pin this to make
+     * the arithmetic visible.
+     */
+    private val budgetChars: Int? = null,
+    /** Below this cosine a non-core tool is left out however much budget remains. */
+    private val minSimilarity: Float = DEFAULT_MIN_SIMILARITY,
     private val cacheLimit: Int = DEFAULT_CACHE_LIMIT,
 ) : ToolSelector {
 
@@ -59,11 +64,13 @@ class RankingToolSelector(
             scored += tool to VectorSearch.cosine(queryVector, vector)
         }
 
+        val budget = budgetChars ?: budgetFor(contextWindowTokens)
         val selected = core.toMutableList()
         var spent = core.sumOf { it.costChars() }
-        for ((tool, _) in scored.sortedByDescending { it.second }) {
+        for ((tool, score) in scored.sortedByDescending { it.second }) {
+            if (score < minSimilarity) continue
             val cost = tool.costChars()
-            if (spent + cost > budgetChars) continue
+            if (spent + cost > budget) continue
             selected += tool
             spent += cost
         }
@@ -114,10 +121,30 @@ class RankingToolSelector(
         )
 
         /**
-         * ~1,500 tokens of tool text: enough for the core set plus the few tools the ask actually
-         * needs, small enough that a 4K-context local model still has room for the conversation.
+         * How much tool text a context may spend, in characters.
+         *
+         * A fifth of the window in approximate characters: a 4K-context model is offered a couple
+         * of dozen lines of tool prose, not a fixed 6,000 characters that would be a third of its
+         * whole budget. Bigger contexts get more, up to the ceiling where the core set plus a few
+         * relevant tools is all a run ever needs.
          */
-        const val DEFAULT_BUDGET_CHARS = 6_000
+        fun budgetFor(contextWindowTokens: Int): Int =
+            (contextWindowTokens * CHARS_PER_TOKEN / 5).coerceIn(MIN_BUDGET_CHARS, MAX_BUDGET_CHARS)
+
+        private const val CHARS_PER_TOKEN = 3
+
+        /** Enough for the core set on the smallest supported context. */
+        private const val MIN_BUDGET_CHARS = 1_500
+
+        /** ~2,000 tokens of tool text; past this the list is longer than it is useful. */
+        private const val MAX_BUDGET_CHARS = 6_000
+
+        /**
+         * The relevance bar for a non-core tool. Below it the tool is not obviously about the ask,
+         * and a long tail of barely-related tools measurably degrades choice; the core set carries
+         * the always-useful capabilities instead.
+         */
+        private const val DEFAULT_MIN_SIMILARITY = 0.35f
 
         /** Beyond this, every definition fits comfortably and triage is skipped. */
         const val LARGE_CONTEXT_TOKENS = 32_000

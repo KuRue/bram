@@ -11,6 +11,7 @@ import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.MemoryStore
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.ModelCapability
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.NoopMemoryExtractor
 import io.github.kurue.bram.core.domain.NoopRunJournal
@@ -94,11 +95,18 @@ class DefaultAgentOrchestrator(
         // Tools are chosen once per run, from the ask that started it. Mid-run re-selection would
         // let the set change under the model's feet (a tool it planned to chain vanishing after a
         // tool result), and the query the run started with stays the best statement of its intent.
-        val selectedTools = toolSelector.select(
-            query = request.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
-            contextWindowTokens = runtime.model.contextWindowTokens,
-            available = toolRegistry.definitions(),
-        )
+        //
+        // A runtime that does not support tool calling is offered none: sending definitions to a
+        // server or engine that cannot use them costs context and can error on strict hosts.
+        val selectedTools = if (ModelCapability.TOOL_CALLING in runtime.model.capabilities) {
+            toolSelector.select(
+                query = request.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
+                contextWindowTokens = runtime.model.contextWindowTokens,
+                available = toolRegistry.definitions(),
+            )
+        } else {
+            emptyList()
+        }
         emit(AgentEvent.ToolsSelected(selectedTools.map { it.name }))
 
         repeat(request.maxToolTurns + 1) { turn ->
