@@ -118,6 +118,7 @@ class RankingToolSelector(
             "propose_skill",
             "get_weather",
             "read_skill",
+            "tool_search",
         )
 
         /**

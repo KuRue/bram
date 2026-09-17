@@ -3483,10 +3483,8 @@ class MainViewModel(
             val servers = runCatching { container.mcpServerStore.list() }.getOrDefault(emptyList())
             val results = servers.map { server ->
                 val token = container.mcpServerStore.resolveToken(server.id)
-                val client = McpClient(server, token)
                 runCatching {
-                    client.connect()
-                    client.listTools()
+                    McpSessions.withClient(server, token) { client -> client.listTools() }
                 }.fold(
                     onSuccess = { tools ->
                         container.toolRegistry.setServerTools(
@@ -3540,6 +3538,7 @@ class MainViewModel(
         viewModelScope.launch {
             container.mcpServerStore.remove(serverId)
             container.toolRegistry.removeServerTools(serverId)
+            McpSessions.drop(serverId)
             refreshMcpServers()
         }
     }

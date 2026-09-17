@@ -16,6 +16,7 @@ import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.SkillSelection
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
+import io.github.kurue.bram.core.domain.ToolRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -156,7 +157,7 @@ class AppContainer(application: Application) {
      * Built-ins plus whatever MCP servers contribute. Mutable so a server's tools can be swapped in
      * on refresh and dropped when it fails or is removed; the agent reads it per run.
      */
-    val toolRegistry = MutableToolRegistry(
+    val toolRegistry: MutableToolRegistry = MutableToolRegistry(
         StaticToolRegistry(
             listOf(
                 DeviceStatusTool(deviceProfiler),
@@ -179,6 +180,7 @@ class AppContainer(application: Application) {
                 ProposeSkillTool(skillStore),
                 ListSkillsTool(skillStore),
                 ReadSkillTool(skillStore),
+                ToolSearchTool(registry = { toolRegistry }),
             ),
         ),
     )

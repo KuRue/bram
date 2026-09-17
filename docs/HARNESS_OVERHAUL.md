@@ -328,6 +328,22 @@ read-only annotation support; decide on screenshot/accessibility and SAF tools.
 Exit: a 4K-context run and a 32K-context run offer appropriately-sized tool sets; a non-tool
 endpoint is never sent tools; MCP servers with >100 tools work.
 
+Result (2026-09-17, **M4 complete**): the capability flag is honored end to end — the orchestrator
+offers nothing to a runtime without `TOOL_CALLING`, the local GGUF descriptor now declares it (it
+does parse calls; the descriptor was simply incomplete), and the endpoint form carries a
+"Supports tool calling" toggle that `saveEndpoint` no longer overrides. Selection spends a fifth of
+the context window in approximate characters (1,500–6,000) instead of a flat 6,000 at any size, and
+drops non-core tools below a 0.35 cosine; unit tests pin a 4K vs 16K offer and the floor.
+`tool_search` (core) exposes the whole registry by keyword so tools the selector did not offer are
+still reachable by name. MCP: `tools/list` paginates with a 500-tool/20-page ceiling, SSE answers
+match by JSON-RPC id, `readOnlyHint` is parsed as a classification only (never a gate bypass),
+sessions are cached per server with a token-aware idle expiry, and generated names are capped at 64
+chars with a digest suffix. Device: a non-tool endpoint is sent `tools: 0` and still answers
+(`NonToolEndpointSmokeTest`); 7/7 instrumented tests pass. Deferred with rationale: the description
+diet (needs an on-model eval; the proportional budget already bounds the cost) and
+screenshot/accessibility + SAF tools (each needs its own consent/permission flow — a milestone, not
+a line item).
+
 ### M5 — Skills v2 (2–3 days)
 
 Front matter v2: `tools:`, `permissions:`, `author:`, and a monotonic version check; `disable` /

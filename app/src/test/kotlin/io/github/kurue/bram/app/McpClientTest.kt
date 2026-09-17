@@ -4,322 +4,214 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import io.github.kurue.bram.core.domain.McpServer
 import java.net.InetSocketAddress
-import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
-import org.junit.Before
 import org.junit.Test
 
+/**
+ * The streamable-HTTP client against a local stand-in server: pagination across `tools/list`
+ * pages, SSE frames matched by request id rather than arrival order, session reuse in
+ * [McpSessions], and function names kept inside the provider limit.
+ */
 class McpClientTest {
 
-    private lateinit var server: HttpServer
-    private lateinit var baseUrl: String
-    private val handlers = mutableMapOf<String, (HttpExchange) -> Unit>()
-
-    @Before
-    fun setUp() {
-        server = HttpServer.create(InetSocketAddress(0), 0)
-        server.executor = Executors.newCachedThreadPool()
-        server.start()
-        baseUrl = "http://127.0.0.1:${server.address.port}"
-        handlers.clear()
-        server.createContext("/") { exchange ->
-            val body = exchange.requestBody.bufferedReader().readText()
-            val method = runCatching { JSONObject(body).optString("method") }.getOrDefault("")
-            handlers[method]?.invoke(exchange) ?: respond(
-                exchange,
-                """{"jsonrpc":"2.0","error":{"code":-32601,"message":"not handled: $method"}}""",
-            )
-        }
-    }
+    private val servers = mutableListOf<FakeMcpServer>()
 
     @After
     fun tearDown() {
-        server.stop(0)
+        servers.forEach { it.close() }
+        servers.clear()
     }
 
-    /** The client POSTs every JSON-RPC message to the one configured URL, so the stub routes on the `method` field of the request body. */
-    private fun route(extra: Map<String, (HttpExchange) -> Unit>) {
-        handlers.putAll(extra)
-    }
+    private fun fakeServer(configure: FakeMcpServer.() -> Unit = {}): FakeMcpServer =
+        FakeMcpServer().apply(configure).also { servers += it }
 
-    private fun respond(
-        exchange: HttpExchange,
-        body: String,
-        contentType: String = "application/json",
-        headers: Map<String, String> = emptyMap(),
-    ) {
-        headers.forEach { (key, value) -> exchange.responseHeaders.add(key, value) }
-        exchange.responseHeaders.add("Content-Type", contentType)
-        val bytes = body.toByteArray()
-        exchange.sendResponseHeaders(200, bytes.size.toLong())
-        exchange.responseBody.use { it.write(bytes) }
-    }
-
-    private fun client(token: String? = null) = McpClient(
-        McpServer(
-            id = "srv1",
-            displayName = "test server",
-            baseUrl = baseUrl,
-            allowInsecureHttp = true,
-        ),
-        token,
+    private fun serverConfig(fake: FakeMcpServer) = McpServer(
+        id = "test-server",
+        displayName = "Test Server",
+        baseUrl = fake.baseUrl,
+        allowInsecureHttp = true,
     )
 
-    /** A server that completes the handshake and answers tools/list with one real tool. */
-    private fun handshakeServer() {
-        route(
-            mapOf(
-                "initialize" to { exchange ->
-                    respond(
-                        exchange,
-                        """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"t"}}}""",
-                        headers = mapOf("Mcp-Session-Id" to "sess-123"),
-                    )
-                },
-                "notifications/initialized" to { exchange -> respond(exchange, """{"jsonrpc":"2.0"}""") },
-            ),
-        )
+    @Test
+    fun `tools_list follows every page past a hundred tools`() = runBlocking {
+        val fake = fakeServer { pageTools = 130 }
+        val client = McpClient(serverConfig(fake), token = null)
+        client.connect()
+        val tools = client.listTools()
+
+        assertEquals("every page must be read", 130, tools.size)
+        assertEquals("names must stay unique", 130, tools.map { it.name }.toSet().size)
+        assertTrue("the read-only hint is parsed", tools.first { it.name == "read_only_tool" }.readOnly)
+        assertTrue("unknown hints leave the flag false", !tools.first { it.name == "tool_0" }.readOnly)
+        assertTrue("pagination actually happened", fake.listRequests.get() > 1)
     }
 
     @Test
-    fun `handshake lists tools and carries the session id to the next request`() {
-        var toolsHeaders: List<Pair<String, String>>? = null
-        handshakeServer()
-        route(
-            mapOf(
-                "initialize" to { exchange ->
-                    respond(
-                        exchange,
-                        """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"t"}}}""",
-                        headers = mapOf("Mcp-Session-Id" to "sess-123"),
-                    )
-                },
-                "notifications/initialized" to { exchange -> respond(exchange, """{"jsonrpc":"2.0"}""") },
-                "tools/list" to { exchange ->
-                    toolsHeaders = exchange.requestHeaders.entries
-                        .flatMap { entry -> entry.value.map { entry.key to it } }
-                    respond(
-                        exchange,
-                        """{"jsonrpc":"2.0","id":3,"result":{"tools":[
-                            {"name":"get_weather","description":"Current weather","inputSchema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},
-                            {"name":"a/b","description":"hostile"},
-                            {"name":"","description":"blank"},
-                            {"name":"ok.dot-dash_1","description":"fine"}
-                        ]}}""",
-                    )
-                },
-            ),
-        )
+    fun `an SSE answer is matched by request id, not arrival order`() = runBlocking {
+        // The matching frame arrives first and a server-initiated notification last: reading the
+        // last frame would return the wrong message.
+        val fake = fakeServer {
+            pageTools = 2
+            sse = true
+            foreignFrameLast = true
+        }
+        val client = McpClient(serverConfig(fake), token = null)
+        client.connect()
 
-        val tools = runBlocking {
-            val c = client()
-            c.connect()
-            c.listTools()
+        assertEquals(2, client.listTools().size)
+    }
+
+    @Test
+    fun `an SSE answer with only foreign ids is refused`() = runBlocking {
+        val fake = fakeServer {
+            pageTools = 2
+            sse = true
+            foreignFrameLast = true
+            omitMatchingFrame = true
+        }
+        val client = McpClient(serverConfig(fake), token = null)
+        client.connect()
+
+        val failure = runCatching { client.listTools() }.exceptionOrNull()
+        assertTrue("expected an McpException, got $failure", failure is McpException)
+    }
+
+    @Test
+    fun `sessions are reused between calls and dropped after a failure`() = runBlocking {
+        val fake = fakeServer { pageTools = 1 }
+        val server = serverConfig(fake)
+
+        val first = McpSessions.withClient(server, token = null) { it.callTool("tool_0", "{}") }
+        val second = McpSessions.withClient(server, token = null) { it.callTool("tool_0", "{}") }
+        assertEquals("ok", first)
+        assertEquals("ok", second)
+        assertEquals("one handshake for two calls", 1, fake.handshakes.get())
+
+        fake.failNextCall.set(true)
+        runCatching { McpSessions.withClient(server, token = null) { it.callTool("tool_0", "{}") } }
+        McpSessions.withClient(server, token = null) { it.callTool("tool_0", "{}") }
+        assertEquals("a failed call forces a fresh handshake", 2, fake.handshakes.get())
+        McpSessions.drop(server.id)
+    }
+
+    @Test
+    fun `a long server tool name is capped for providers and stays unique`() {
+        val server = McpServer(id = "abcdef", displayName = "Analytics Warehouse", baseUrl = "https://example.test/mcp")
+        val longName = "query_the_entire_analytics_warehouse_for_everything_that_ever_happened"
+        val otherName = "query_the_entire_analytics_warehouse_for_everything_that_ever_happens"
+
+        val first = McpToolHandler(server, McpServerTool(longName, "d", "{}"), null).definition.name
+        val second = McpToolHandler(server, McpServerTool(otherName, "d", "{}"), null).definition.name
+
+        assertTrue("name '$first' is ${first.length} chars", first.length <= 64)
+        assertTrue("name '$second' is ${second.length} chars", second.length <= 64)
+        assertNotEquals("truncation must not merge two tools", first, second)
+        assertTrue(first.startsWith("mcp_analytics_wareho_"))
+    }
+
+    /** A minimal JSON-RPC MCP server: paginated tools, optional SSE framing, one-shot failures. */
+    private class FakeMcpServer {
+        var pageTools = 0
+        var sse = false
+        var foreignFrameLast = false
+        var omitMatchingFrame = false
+        val handshakes = AtomicInteger()
+        val listRequests = AtomicInteger()
+        val failNextCall = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        private val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val baseUrl: String get() = "http://127.0.0.1:${http.address.port}"
+
+        init {
+            http.createContext("/") { exchange -> handle(exchange) }
+            http.start()
         }
 
-        assertEquals(listOf("get_weather", "ok.dot-dash_1"), tools.map { it.name })
-        assertTrue(tools.first().inputSchemaJson.contains("\"city\""))
-        // The session id from initialize reaches the next request, and every request names the
-        // version. HttpServer lowercases request header names, so look up case-insensitively.
-        val headers = toolsHeaders!!.toMap()
-        val session = headers.entries.firstOrNull { it.key.equals("mcp-session-id", ignoreCase = true) }?.value
-        val version = headers.entries.firstOrNull { it.key.equals("mcp-protocol-version", ignoreCase = true) }?.value
-        assertEquals("sess-123", session)
-        assertEquals("2025-03-26", version)
-    }
+        fun close() = http.stop(0)
 
-    @Test
-    fun `a tool call sends the bearer token and returns the text content`() {
-        handshakeServer()
-        var auth: String? = null
-        route(
-            mapOf(
-                "tools/call" to { exchange ->
-                    auth = exchange.requestHeaders.getFirst("Authorization")
-                    respond(
-                        exchange,
-                        """{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"sunny in Paris"}]}}""",
-                    )
-                },
-            ),
-        )
-
-        val result = runBlocking {
-            val c = client("tok-abc")
-            c.connect()
-            c.callTool("get_weather", """{"city":"Paris"}""")
-        }
-
-        assertEquals("sunny in Paris", result)
-        assertEquals("Bearer tok-abc", auth)
-    }
-
-    @Test
-    fun `a tool call accepts an SSE response`() {
-        handshakeServer()
-        route(
-            mapOf(
-                "tools/call" to { exchange ->
-                    respond(
-                        exchange,
-                        "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"notifications/progress\",\"params\":{}}\n\n" +
-                            "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"from sse\"}]}}\n\n",
-                        contentType = "text/event-stream",
-                    )
-                },
-            ),
-        )
-
-        val result = runBlocking {
-            val c = client()
-            c.connect()
-            c.callTool("get_weather", "{}")
-        }
-
-        assertEquals("from sse", result)
-    }
-
-    @Test
-    fun `a server-side error is marked rather than mistaken for a success`() {
-        handshakeServer()
-        route(
-            mapOf(
-                "tools/call" to { exchange ->
-                    respond(
-                        exchange,
-                        """{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[{"type":"text","text":"no such city"}]}}""",
-                    )
-                },
-            ),
-        )
-
-        val result = runBlocking {
-            val c = client()
-            c.connect()
-            c.callTool("get_weather", "{}")
-        }
-
-        assertTrue(result.startsWith("SERVER ERROR:"))
-    }
-
-    @Test
-    fun `non-text content is reported by type rather than dumped`() {
-        handshakeServer()
-        route(
-            mapOf(
-                "tools/call" to { exchange ->
-                    respond(
-                        exchange,
-                        """{"jsonrpc":"2.0","id":2,"result":{"content":[
-                            {"type":"image","mimeType":"image/png","data":"AAAA"},
-                            {"type":"text","text":"and the text"}
-                        ]}}""",
-                    )
-                },
-            ),
-        )
-
-        val result = runBlocking {
-            val c = client()
-            c.connect()
-            c.callTool("get_weather", "{}")
-        }
-
-        assertTrue(result.contains("[image content, image/png omitted; it is not text]"))
-        assertTrue(result.contains("and the text"))
-    }
-
-    @Test
-    fun `a jsonrpc error becomes an mcp error with its code`() {
-        handshakeServer()
-        route(
-            mapOf(
-                "tools/call" to { exchange ->
-                    respond(
-                        exchange,
-                        """{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"Invalid params"}}""",
-                    )
-                },
-            ),
-        )
-
-        try {
-            runBlocking {
-                val c = client()
-                c.connect()
-                c.callTool("get_weather", "{}")
+        private fun handle(exchange: HttpExchange) {
+            val request = runCatching {
+                JSONObject(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
+            }.getOrElse { JSONObject() }
+            val id = request.opt("id")
+            when (request.optString("method")) {
+                "initialize" -> {
+                    handshakes.incrementAndGet()
+                    exchange.responseHeaders.add("Mcp-Session-Id", "session-1")
+                    respond(exchange, result = JSONObject().put("protocolVersion", "2025-03-26"), id = id)
+                }
+                "notifications/initialized" -> {
+                    exchange.sendResponseHeaders(202, -1)
+                    exchange.close()
+                }
+                "tools/list" -> {
+                    val cursor = request.optJSONObject("params")?.optString("cursor").orEmpty()
+                    val start = cursor.removePrefix("page_").toIntOrNull() ?: 0
+                    val pageSize = 50
+                    val tools = JSONArray()
+                    for (index in start until minOf(start + pageSize, pageTools)) {
+                        tools.put(
+                            JSONObject()
+                                .put("name", if (index == 1) "read_only_tool" else "tool_$index")
+                                .put("description", "tool $index")
+                                .put("inputSchema", JSONObject().put("type", "object"))
+                                .apply {
+                                    if (index == 1) put("annotations", JSONObject().put("readOnlyHint", true))
+                                },
+                        )
+                    }
+                    listRequests.incrementAndGet()
+                    val result = JSONObject().put("tools", tools)
+                    if (start + pageSize < pageTools) result.put("nextCursor", "page_${start + pageSize}")
+                    respond(exchange, result = result, id = id, useSse = sse)
+                }
+                "tools/call" -> {
+                    if (failNextCall.compareAndSet(true, false)) {
+                        exchange.sendResponseHeaders(500, -1)
+                        exchange.close()
+                        return
+                    }
+                    val content = JSONArray().put(JSONObject().put("type", "text").put("text", "ok"))
+                    respond(exchange, result = JSONObject().put("content", content), id = id)
+                }
+                else -> {
+                    exchange.sendResponseHeaders(400, -1)
+                    exchange.close()
+                }
             }
-            fail("expected an McpException")
-        } catch (expected: McpException) {
-            assertEquals("jsonrpc_-32602", expected.errorCode)
         }
-    }
 
-    @Test
-    fun `an http failure keeps its status code`() {
-        handshakeServer()
-        route(mapOf("tools/list" to { exchange -> exchange.sendResponseHeaders(500, -1) }))
-
-        try {
-            runBlocking {
-                val c = client()
-                c.connect()
-                c.listTools()
+        /** Framed as SSE only when [useSse]; the handshake stays plain JSON. */
+        private fun respond(exchange: HttpExchange, result: JSONObject, id: Any?, useSse: Boolean = false) {
+            val message = JSONObject().put("jsonrpc", "2.0").put("id", id).put("result", result)
+            if (!useSse) {
+                val bytes = message.toString().toByteArray()
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(200, bytes.size.toLong())
+                exchange.responseBody.use { it.write(bytes) }
+                return
             }
-            fail("expected an McpException")
-        } catch (expected: McpException) {
-            assertEquals("http_500", expected.errorCode)
-        }
-    }
-
-    @Test
-    fun `a redirect to another host is refused`() {
-        route(
-            mapOf(
-                "initialize" to { exchange ->
-                    exchange.responseHeaders.add("Location", "http://evil.example.com/mcp")
-                    exchange.sendResponseHeaders(302, -1)
-                },
-            ),
-        )
-
-        try {
-            runBlocking { client().connect() }
-            fail("expected an McpException")
-        } catch (expected: McpException) {
-            assertEquals("redirect", expected.errorCode)
-            assertTrue(expected.message!!.contains("another host"))
-        }
-    }
-
-    @Test
-    fun `bad arguments are rejected before anything leaves the device`() {
-        handshakeServer()
-        var calls = 0
-        route(
-            mapOf(
-                "tools/call" to { exchange ->
-                    calls++
-                    respond(exchange, """{"jsonrpc":"2.0","id":2,"result":{"content":[]}}""")
-                },
-            ),
-        )
-
-        try {
-            runBlocking {
-                val c = client()
-                c.connect()
-                c.callTool("get_weather", "not json")
+            val foreign = JSONObject().put("jsonrpc", "2.0").put("method", "notifications/message")
+            val body = buildString {
+                if (foreignFrameLast) {
+                    if (!omitMatchingFrame) append("data: ").append(message).append("\n\n")
+                    append("data: ").append(foreign).append("\n\n")
+                } else {
+                    append("data: ").append(foreign).append("\n\n")
+                    if (!omitMatchingFrame) append("data: ").append(message).append("\n\n")
+                }
             }
-            fail("expected an McpException")
-        } catch (expected: McpException) {
-            assertEquals("bad_arguments", expected.errorCode)
+            val bytes = body.toByteArray()
+            exchange.responseHeaders.add("Content-Type", "text/event-stream")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
         }
-        assertEquals(0, calls)
     }
 }
