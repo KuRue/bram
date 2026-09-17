@@ -13,6 +13,7 @@ import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.RankingToolSelector
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import io.github.kurue.bram.core.domain.SkillAwareToolSelector
 import io.github.kurue.bram.core.domain.SkillSelection
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
@@ -151,7 +152,7 @@ class AppContainer(application: Application) {
      * inside, so the second evaluation of a run costs nothing. With no embedding model
      * designated the selector returns the full list, which is exactly the previous behavior.
      */
-    val toolSelector = RankingToolSelector(embedder)
+    val toolSelector = SkillAwareToolSelector(RankingToolSelector(embedder), skillStore)
     val runJournal = SqliteRunJournal(application)
     /**
      * Built-ins plus whatever MCP servers contribute. Mutable so a server's tools can be swapped in

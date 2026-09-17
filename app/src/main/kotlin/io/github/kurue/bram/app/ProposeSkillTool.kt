@@ -23,7 +23,9 @@ class ProposeSkillTool(
             "propose one whenever the user would benefit from a reusable procedure.",
         inputSchemaJson = """{"type":"object","properties":{"name":{"type":"string","description":"Skill name, 1-48 chars, no colons or line breaks"},"version":{"type":"string","description":"Semver, three numbers like 1.0.0"},"description":{"type":"string","description":"One line saying when to follow this skill, 1-500 chars"},"instructions":{"type":"string","description":"The steps to follow, written for the model to read"}},"required":["name","version","description","instructions"],"additionalProperties":false}""",
         readOnly = false,
-        approvalScopeKeys = listOf(),
+        // "Always allow propose_skill" with no target is a blanket allowance to author anything
+        // forever; scoping to the skill name makes the grant a decision about one skill.
+        approvalScopeKeys = listOf("name"),
     )
 
     override suspend fun execute(argumentsJson: String): String {

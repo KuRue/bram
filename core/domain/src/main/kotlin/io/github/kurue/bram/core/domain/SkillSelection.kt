@@ -169,3 +169,31 @@ class SkillSelection(private val cacheLimit: Int = DEFAULT_CACHE_LIMIT) {
         const val DEFAULT_COVERAGE_THRESHOLD = 0.70f
     }
 }
+
+/**
+ * A tool selector that also offers what the active skills declare they need.
+ *
+ * Ranking drops tools an ask does not seem to need, but a skill is a procedure the user approved
+ * and its front matter names the tools it is written against. Following a skill whose steps call
+ * tools the model cannot see would strand it mid-procedure, so those tools are added back while
+ * the skill is active. Declaring a tool only offers it: the approval gate still decides each call.
+ */
+class SkillAwareToolSelector(
+    private val delegate: ToolSelector,
+    private val skillStore: SkillStore,
+) : ToolSelector {
+
+    override suspend fun select(
+        query: String,
+        contextWindowTokens: Int,
+        available: List<ToolDefinition>,
+    ): List<ToolDefinition> {
+        val selected = delegate.select(query, contextWindowTokens, available)
+        val declared = runCatching { skillStore.activeSkills() }.getOrDefault(emptyList())
+            .flatMapTo(mutableSetOf()) { it.tools }
+        if (declared.isEmpty()) return selected
+        val selectedNames = selected.mapTo(mutableSetOf()) { it.name }
+        val missing = available.filter { it.name in declared && it.name !in selectedNames }
+        return if (missing.isEmpty()) selected else selected + missing
+    }
+}

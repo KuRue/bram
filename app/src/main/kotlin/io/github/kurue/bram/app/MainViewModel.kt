@@ -755,7 +755,14 @@ class MainViewModel(
                         is AgentEvent.Reasoning -> Unit
                         is AgentEvent.ContextPrepared -> attemptActivity += "Context prepared (${event.estimatedInputTokens} tokens)"
                         is AgentEvent.ToolStarted -> attemptActivity += "Called ${event.call.name}"
-                        is AgentEvent.ToolFinished -> Unit
+                        is AgentEvent.ToolFinished -> {
+                            // A task run can author a skill too; refresh and nudge exactly like an
+                            // interactive run, or a draft would wait unseen for the next app open.
+                            if (event.call.name == "propose_skill") {
+                                refreshSkills()
+                                maybePostSkillDraftNotification(event.call.argumentsJson, event.result)
+                            }
+                        }
                         is AgentEvent.TextDelta -> Unit
                         is AgentEvent.Usage -> Unit
                         is AgentEvent.Metrics -> Unit
@@ -3611,8 +3618,25 @@ class MainViewModel(
     fun rollbackSkill(skillId: String) {
         viewModelScope.launch {
             val message = when (val outcome = container.skillStore.rollback(skillId)) {
-                is SkillActionOutcome.Ok -> "Rolled back to the previous version."
+                is SkillActionOutcome.Ok -> "Rolled back to the newest version you approved."
                 is SkillActionOutcome.Failed -> "Could not roll back: ${outcome.reason}"
+            }
+            mutableState.update { it.copy(skillStatus = message) }
+            refreshSkills()
+        }
+    }
+
+    /** Leaves the skill installed but out of the prompt and the offered tool set. */
+    fun setSkillDisabled(skillId: String, disabled: Boolean) {
+        viewModelScope.launch {
+            val outcome = if (disabled) {
+                container.skillStore.disable(skillId)
+            } else {
+                container.skillStore.enable(skillId)
+            }
+            val message = when (outcome) {
+                is SkillActionOutcome.Ok -> if (disabled) "Skill disabled." else "Skill enabled."
+                is SkillActionOutcome.Failed -> "Could not change: ${outcome.reason}"
             }
             mutableState.update { it.copy(skillStatus = message) }
             refreshSkills()

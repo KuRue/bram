@@ -159,6 +159,7 @@ import io.github.kurue.bram.core.domain.RoutingPoolSlot
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.RunJournalEntry
 import io.github.kurue.bram.core.domain.RunStatus
+import io.github.kurue.bram.core.domain.SkillOrigin
 import io.github.kurue.bram.core.domain.SkillPackage
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.displayName
@@ -407,6 +408,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onSaveSkill = viewModel::importSkill,
                                 onActivateSkillDraft = viewModel::activateSkillDraft,
                                 onRollbackSkill = viewModel::rollbackSkill,
+                                onSetSkillDisabled = viewModel::setSkillDisabled,
                                 onRemoveSkill = viewModel::removeSkill,
                             )
                             AppPanel.AUTOMATIONS -> AutomationsScreen(
@@ -3388,6 +3390,7 @@ private fun SkillsScreen(
     onSaveSkill: (String) -> Unit,
     onActivateSkillDraft: (String) -> Unit,
     onRollbackSkill: (String) -> Unit,
+    onSetSkillDisabled: (String, Boolean) -> Unit,
     onRemoveSkill: (String) -> Unit,
 ) {
     // The editor writes the same SKILL.md document the file importer reads, so authoring in-app
@@ -3439,7 +3442,9 @@ private fun SkillsScreen(
         )
         state.skillStatus?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
         if (state.skills.isEmpty()) EmptyDestination("No skills imported", "Author one, or import a file, when you want a repeatable specialist workflow.")
-        else state.skills.forEach { SkillCard(it, ::openEditorForEdit, onActivateSkillDraft, onRollbackSkill, onRemoveSkill) }
+        else state.skills.forEach {
+            SkillCard(it, ::openEditorForEdit, onActivateSkillDraft, onRollbackSkill, onSetSkillDisabled, onRemoveSkill)
+        }
         if (!editorOpen) {
             Button(onClick = ::openEditorForNew, modifier = Modifier.fillMaxWidth()) { Text("New skill") }
             OutlinedButton(onClick = onImportSkill, modifier = Modifier.fillMaxWidth()) { Text("Import skill file") }
@@ -4171,29 +4176,59 @@ private fun SkillCard(
     onEdit: (SkillPackage) -> Unit,
     onActivateDraft: (String) -> Unit,
     onRollback: (String) -> Unit,
+    onSetDisabled: (String, Boolean) -> Unit,
     onRemove: (String) -> Unit,
 ) {
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(pkg.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                pkg.activeVersion?.let { version ->
+                if (pkg.disabled) {
                     Text(
-                        "active v$version",
+                        "disabled",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.error,
                     )
+                } else {
+                    pkg.activeVersion?.let { version ->
+                        Text(
+                            "active v$version",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
             pkg.versions.firstOrNull { it.version == pkg.activeVersion }?.let { active ->
                 Text(active.description, style = MaterialTheme.typography.bodySmall)
             }
             pkg.draftVersion?.let { draft ->
+                val drafted = pkg.versions.firstOrNull { it.version == draft }
                 Text(
-                    "Draft v$draft staged, not active yet.",
+                    buildString {
+                        append("Draft v$draft staged, not active yet")
+                        if (drafted?.origin == SkillOrigin.AGENT) {
+                            append(" — drafted by Bram")
+                            drafted.author.takeIf(String::isNotBlank)?.let { append(", author \"$it\"") }
+                        }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
+            }
+            // What the skill asked for, shown for review: tools are offered while it is active, and
+            // permissions still ask at the gate.
+            pkg.versions.firstOrNull { it.version == (pkg.activeVersion ?: pkg.draftVersion) }?.let { version ->
+                if (version.tools.isNotEmpty() || version.permissions.isNotEmpty()) {
+                    Text(
+                        listOfNotNull(
+                            version.tools.takeIf(Set<String>::isNotEmpty)?.let { "tools: ${it.joinToString(", ")}" },
+                            version.permissions.takeIf(Set<String>::isNotEmpty)?.let { "permissions: ${it.joinToString(", ")}" },
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             Row {
                 TextButton(onClick = { onEdit(pkg) }) { Text("Edit") }
@@ -4201,6 +4236,9 @@ private fun SkillCard(
                     TextButton(onClick = { onActivateDraft(pkg.id) }) { Text("Activate draft") }
                 }
                 TextButton(onClick = { onRollback(pkg.id) }) { Text("Roll back") }
+                TextButton(onClick = { onSetDisabled(pkg.id, !pkg.disabled) }) {
+                    Text(if (pkg.disabled) "Enable" else "Disable")
+                }
                 TextButton(onClick = { onRemove(pkg.id) }) { Text("Remove") }
             }
         }

@@ -354,6 +354,20 @@ stay drafts until user activation; review shows a diff); `read_skill` chunking w
 Exit: an active skill's declared tools survive selection for its run; rollback can only restore a
 user-approved version; a rollback of the S2 shape is impossible.
 
+Result (2026-09-17, **M5 complete**): front matter v2 parses `author:`/`tools:`/`permissions:` with
+validation and caps, and versions are monotonic (numeric compare). `SkillAwareToolSelector` adds an
+active skill's declared tools back to the offered set, so following a skill cannot strand the model
+on a hidden tool; declared permissions are recorded for review only and still ask at the gate.
+Approval is tracked per version — user imports at import, agent drafts only on activation — so
+rollback restores the newest approved version and the S2 shape (import → draft → activate → draft →
+rollback) now lands on the import with the draft still staged; a rollback with nothing approved
+staged refuses. Disable/enable keeps a skill installed but out of the prompt, versions record
+`origin` set by the code path (not the document), `skills.json` carries `schemaVersion: 2` with v1
+arrays still read and corrupt files quarantined aside, `list_skills` is core, and `propose_skill`'s
+grant scopes to the skill name. The dead `SkillManifest`/`SkillRepository`/`SkillLifecycle`
+contracts were deleted. Deferred: the draft-review diff UI, and calibrating the 0.60/0.70 similarity
+thresholds beyond the existing log line.
+
 ### M6 — Endpoints v2 (2–4 days)
 
 SSE streaming for both wire kinds; map reasoning output to the Thinking activity; an error taxonomy

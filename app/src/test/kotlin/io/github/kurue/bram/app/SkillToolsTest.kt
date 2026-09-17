@@ -40,6 +40,12 @@ class SkillToolsTest {
         override suspend fun rollback(skillId: String): SkillActionOutcome =
             library.rollback(skillId, ++now).also { persist() }
 
+        override suspend fun disable(skillId: String): SkillActionOutcome =
+            library.disable(skillId, ++now).also { persist() }
+
+        override suspend fun enable(skillId: String): SkillActionOutcome =
+            library.enable(skillId, ++now).also { persist() }
+
         override suspend fun remove(skillId: String): SkillActionOutcome = library.remove(skillId).also { persist() }
 
         private fun persist() = Unit

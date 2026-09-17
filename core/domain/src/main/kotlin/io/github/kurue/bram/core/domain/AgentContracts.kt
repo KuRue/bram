@@ -250,32 +250,6 @@ interface AgentOrchestrator {
     fun run(request: AgentRunRequest, runtime: ModelRuntime): Flow<AgentEvent>
 }
 
-enum class SkillLifecycle {
-    DRAFT,
-    ACTIVE,
-    DISABLED,
-    QUARANTINED,
-}
-
-data class SkillManifest(
-    val id: String,
-    val version: String,
-    val displayName: String,
-    val description: String,
-    val author: String,
-    val lifecycle: SkillLifecycle = SkillLifecycle.DRAFT,
-    val requiredTools: Set<String> = emptySet(),
-    val requestedPermissions: Set<String> = emptySet(),
-    val minimumContextTokens: Int? = null,
-)
-
-interface SkillRepository {
-    suspend fun listActive(): List<SkillManifest>
-    suspend fun stageDraft(manifest: SkillManifest, instructions: String)
-    suspend fun activate(skillId: String, version: String)
-    suspend fun disable(skillId: String)
-}
-
 enum class AutomationScheduleKind {
     ONE_SHOT,
     INTERVAL,
