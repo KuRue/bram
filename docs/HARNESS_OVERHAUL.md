@@ -225,17 +225,18 @@ auto-fill). The chat leg was not reached: the emulator itself became unstable du
 Exit: on the emulator, a scripted tool loop runs deterministically with no model file; the smoke
 test passes in one `am instrument` invocation.
 
-Result (2026-09-17): items 1 and 2 are done and the live leg is proven manually.
-`tools/harness-mock/mock_server.py` serves the catalog, both wire kinds, named scenarios, runtime
-arming (`POST /__scenario/<name>`), and request inspection (`GET /__log`); 19 unit tests. The
-known-good AVD is `bram_api35` (API 35 google_apis, 6 GB RAM, headless) — the API 36.1 image
-crash-loops surfaceflinger in `mapper.ranchu.so` on this host regardless of emulator version or GPU
-mode, see HANDOFF for the full matrix. On `bram_api35` the mock endpoint was injected via
-`shared_prefs/bram.remote_endpoints.xml` and routing prefs, and the tool loop ran deterministically:
-AUTO ran one silent `device_status` call and the scripted final reply; MANUAL showed the approval
-card, Allow once ran the tool, and the scripted final arrived. `/__log` shows exactly two
-completion requests per tool turn. The `am instrument` smoke (item 3) remains, with no unknowns
-left in its path.
+Result (2026-09-17): **M1 done.** `tools/harness-mock/mock_server.py` serves the catalog, both wire
+kinds, named scenarios, runtime arming (`POST /__scenario/<name>`), and request inspection
+(`GET /__log`); 20 unit tests. The known-good AVD is `bram_api35` (API 35 google_apis, 6 GB RAM,
+headless) — the API 36.1 image crash-loops surfaceflinger in `mapper.ranchu.so` on this host
+regardless of emulator version or GPU mode, see HANDOFF for the full matrix. On `bram_api35` the
+mock endpoint was injected via `shared_prefs/bram.remote_endpoints.xml` and routing prefs, and the
+tool loop ran deterministically: AUTO ran one silent `device_status` call and the scripted final
+reply; MANUAL showed the approval card, Allow once ran the tool, and the scripted final arrived.
+`/__log` shows exactly two completion requests per tool turn. `RemoteToolLoopSmokeTest` (androidTest)
+automates both legs — it seeds endpoint/routing prefs, skips via `assumeTrue` when the mock is
+unreachable, and passes in one `am instrument` invocation (55 s): the scripted tool loop runs
+deterministically with no model file.
 
 Emulator findings from M0 (2026-09-15) — prerequisites for a trustworthy test bed:
 
