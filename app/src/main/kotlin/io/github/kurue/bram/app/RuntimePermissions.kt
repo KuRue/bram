@@ -66,7 +66,16 @@ object RuntimePermissions {
  * the broker: the pending permission is published to the state flow, the Activity picks it up,
  * launches the system dialog, and calls [resolve] with the outcome.
  */
-class RuntimePermissionBroker(context: Context) {
+/**
+ * The one thing the approval wrapper needs from the runtime-permission machinery, so the wrapper's
+ * decision mapping can be tested without a Context.
+ */
+fun interface RuntimePermissionAsker {
+    /** Returns the tokens still missing after asking for them (or after nobody answered). */
+    suspend fun requestMissing(tokens: Set<String>, timeoutMillis: Long): Set<String>
+}
+
+class RuntimePermissionBroker(context: Context) : RuntimePermissionAsker {
     private val appContext = context.applicationContext
 
     private val mutablePending = MutableStateFlow<String?>(null)
@@ -84,7 +93,7 @@ class RuntimePermissionBroker(context: Context) {
      * pointless — a dialog shows one permission at a time and the user is deciding one thing — so
      * a set is asked one after another, each answer fed back before the next question.
      */
-    suspend fun requestMissing(tokens: Set<String>, timeoutMillis: Long): Set<String> {
+    override suspend fun requestMissing(tokens: Set<String>, timeoutMillis: Long): Set<String> {
         var missing = tokens.filterTo(mutableSetOf()) { token ->
             val android = RuntimePermissions.androidPermission(token)
             android != null && !granted(android)
@@ -123,13 +132,14 @@ class RuntimePermissionBroker(context: Context) {
  * before running, and is denied if the user refuses.
  *
  * The wrapper sits outside the gate because the gate is UI-free by design: asking for a system
- * permission is a UI act and belongs to the app layer, not to a decision about trust. Refusal
- * comes back as [ToolApprovalDecision.DENY], so the model sees an ordinary `permission_denied`
- * tool result and can say what happened rather than the run ending.
+ * permission is a UI act and belongs to the app layer, not to a decision about trust. A missing
+ * permission comes back as [ToolApprovalDecision.DENY_OS_PERMISSION], which the model is told apart
+ * from the user declining the call: nobody refused anything, and only the user can change a system
+ * setting.
  */
 class PermissionAwareApprovalGate(
     private val delegate: InteractiveApprovalGate,
-    private val broker: RuntimePermissionBroker,
+    private val broker: RuntimePermissionAsker,
     private val timeoutMillis: Long = 10 * 60 * 1_000,
 ) : ToolApprovalGate {
     /** The pending approval card, from the wrapped gate. */
@@ -162,6 +172,6 @@ class PermissionAwareApprovalGate(
             else -> Unit
         }
         val stillMissing = broker.requestMissing(tool.requiredPermissions, timeoutMillis)
-        return if (stillMissing.isEmpty()) decision else ToolApprovalDecision.DENY
+        return if (stillMissing.isEmpty()) decision else ToolApprovalDecision.DENY_OS_PERMISSION
     }
 }

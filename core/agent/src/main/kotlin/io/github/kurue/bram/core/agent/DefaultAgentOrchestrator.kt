@@ -401,6 +401,17 @@ class DefaultAgentOrchestrator(
                         "limitation.",
                 ),
             )
+            // Not a refusal: Android declined a permission the tool needs after the user allowed
+            // the call itself. The model must not apologise for a decision nobody made, and only
+            // the user can change the setting, so retrying is pointless.
+            ToolApprovalDecision.DENY_OS_PERMISSION -> return PreparedCall(
+                call = call,
+                answered = errorJson(
+                    "os_permission_denied",
+                    "Android denied a permission '${call.name}' needs; the user may need to grant " +
+                        "it in system settings. Do not retry this run; say what is missing.",
+                ),
+            )
             // Remembering past the run is the gate's business, not the loop's; here both mean the
             // same thing — do not ask again before this run ends.
             // A recovered call grants nothing forward: allowing this one says nothing about the

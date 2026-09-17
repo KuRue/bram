@@ -243,13 +243,19 @@ class InteractiveApprovalGate(
             untrustedContext = untrustedContext,
             answer = answer,
         )
+        // Published before anything can answer it: the notification's actions resolve the request
+        // through the gate's pending state, so posting first left a window where a fast tap found
+        // nothing to resolve and the call then waited the full timeout alone in a cancelled shade.
+        mutablePending.value = request
         if (!attended) {
             // No one is at the card. Posting a notification turns the wait into a reachable ask
             // instead of silence; when nothing can be posted the call is refused at once so an
             // unattended run reacts to the denial instead of hanging the full timeout.
-            if (notifyRequest?.invoke(request) != true) return ToolApprovalDecision.DENY_UNATTENDED
+            if (notifyRequest?.invoke(request) != true) {
+                mutablePending.value = null
+                return ToolApprovalDecision.DENY_UNATTENDED
+            }
         }
-        mutablePending.value = request
         return try {
             val decision = withTimeout(timeoutMillis) { answer.await() }
             if (decision == ToolApprovalDecision.ALLOW_ALWAYS && !recovered) {

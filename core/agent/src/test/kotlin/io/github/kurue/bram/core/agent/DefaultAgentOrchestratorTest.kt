@@ -189,6 +189,56 @@ class DefaultAgentOrchestratorTest {
     }
 
     @Test
+    fun `an os permission denial is not reported as a user refusal`() = runBlocking {
+        // Android declining a permission is not the user declining the call. The model must be
+        // pointed at the system setting instead of apologising for a decision nobody made.
+        val events = runWithToolCall { ToolApprovalDecision.DENY_OS_PERMISSION }
+        val result = (events.filterIsInstance<AgentEvent.ToolFinished>().single()).result
+        assertTrue(result.contains("\"code\":\"os_permission_denied\""))
+        assertTrue(result.contains("system settings"))
+        assertTrue("must not blame the user", !result.contains("user declined"))
+    }
+
+    @Test
+    fun `allow for run skips asking again this run`() = runBlocking {
+        var gateCalls = 0
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(NoopHandler("asked_about"))),
+            approvalGate = object : ToolApprovalGate {
+                override suspend fun decide(
+                    tool: ToolDefinition,
+                    argumentsJson: String,
+                    recovered: Boolean,
+                    untrustedContext: Boolean,
+                ): ToolApprovalDecision {
+                    gateCalls++
+                    return ToolApprovalDecision.ALLOW_FOR_RUN
+                }
+            },
+        )
+
+        val events = orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("for-run"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool twice")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = RepeatingToolRuntime("asked_about", times = 2),
+        ).toList()
+
+        assertEquals("the second call must ride on the run's allowance", 1, gateCalls)
+        assertEquals(2, events.filterIsInstance<AgentEvent.ToolFinished>().size)
+        assertTrue(events.any { it is AgentEvent.Completed })
+    }
+
+    @Test
     fun `an oversized tool result reaches the transcript bounded and marked`() = runBlocking {
         val runtime = ToolResultCapturingRuntime(contextWindowTokens = 8_192)
         val orchestrator = DefaultAgentOrchestrator(
@@ -412,6 +462,33 @@ private class TwoCallRuntime(private vararg val toolNames: String) : ModelRuntim
                     ),
                 )
             }
+        } else {
+            emit(GenerationEvent.TextDelta("Done"))
+        }
+        generations++
+        emit(GenerationEvent.Finished("stop"))
+    }
+}
+
+/** Asks for the same tool on [times] consecutive replies, then answers plainly. */
+private class RepeatingToolRuntime(private val toolName: String, private val times: Int) : ModelRuntime {
+    override val model = ModelDescriptor(
+        id = ModelId("test"),
+        displayName = "Test",
+        providerName = "Test",
+        modelName = "test",
+        location = ModelLocation.LOCAL,
+        contextWindowTokens = 4_096,
+    )
+
+    private var generations = 0
+
+    override suspend fun availability() = RuntimeAvailability(available = true, summary = "Ready")
+
+    override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+        emit(GenerationEvent.Started("Test"))
+        if (generations < times) {
+            emit(GenerationEvent.ToolCallReady(ToolCall(id = "call_$generations", name = toolName, argumentsJson = "{}")))
         } else {
             emit(GenerationEvent.TextDelta("Done"))
         }

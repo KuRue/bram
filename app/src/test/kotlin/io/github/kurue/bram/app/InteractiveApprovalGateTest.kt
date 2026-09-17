@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -182,6 +183,27 @@ class InteractiveApprovalGateTest {
         yield()
         assertNull("no card is published when nobody can answer it", gate.pending.value)
         assertEquals(ToolApprovalDecision.DENY_UNATTENDED, decision.await())
+    }
+
+    @Test
+    fun `the request is visible before the notification that can answer it`() = runTest {
+        // The shade's actions resolve through the gate's pending state. Posting before publishing
+        // left a window where a fast tap resolved nothing and cancelled the notification, stranding
+        // the call on the full timeout with no way to answer it.
+        val gate = InteractiveApprovalGate(FakePermissions())
+        gate.setAttended(false)
+        var postedId: String? = null
+        var pendingAtPost: String? = null
+        gate.notifyRequest = { request ->
+            postedId = request.id
+            pendingAtPost = gate.pending.value?.id
+            request.resolve(ToolApprovalDecision.ALLOW_ONCE)
+            true
+        }
+        val decision = gate.decide(tool(), "{}")
+        assertEquals(ToolApprovalDecision.ALLOW_ONCE, decision)
+        assertNotNull(postedId)
+        assertEquals("the notifier must see the request it is answering", postedId, pendingAtPost)
     }
 
     @Test

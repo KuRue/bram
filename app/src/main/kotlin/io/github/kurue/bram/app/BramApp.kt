@@ -84,6 +84,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
@@ -3833,6 +3834,7 @@ private fun ToolApprovalCard(
     pending: PendingToolApproval,
     onResolve: (ToolApprovalDecision) -> Unit,
 ) {
+    var showDetails by rememberSaveable(pending.id) { mutableStateOf(false) }
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Glass.cornerMedium),
@@ -3863,14 +3865,60 @@ private fun ToolApprovalCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // The one-line question carries the target; these two rows carry the consequence. The
+            // top row is the quick answer, the bottom row is a grant, and "this run" and "always"
+            // are separate choices because one ends with the run and one does not.
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Button(onClick = { onResolve(ToolApprovalDecision.ALLOW_ONCE) }) { Text("Allow once") }
-                TextButton(onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) }) { Text("Always") }
                 TextButton(onClick = { onResolve(ToolApprovalDecision.DENY) }) { Text("Refuse") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(
+                    modifier = Modifier.testTag("approval-for-run"),
+                    onClick = { onResolve(ToolApprovalDecision.ALLOW_FOR_RUN) },
+                ) { Text("For this run") }
+                TextButton(
+                    modifier = Modifier.testTag("approval-always"),
+                    onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
+                ) { Text("Always") }
+            }
+            TextButton(
+                modifier = Modifier.testTag("approval-details"),
+                onClick = { showDetails = !showDetails },
+            ) { Text(if (showDetails) "Hide details" else "Show details") }
+            if (showDetails) {
+                Text(
+                    "Always would allow ${pending.scopeLabel}.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Surface(
+                    shape = RoundedCornerShape(Glass.cornerSmall),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        prettyArguments(pending.argumentsJson),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .heightIn(max = 200.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(10.dp),
+                    )
+                }
             }
         }
     }
 }
+
+/** The full call, pretty-printed for the details section; capped so a huge body cannot freeze it. */
+private fun prettyArguments(argumentsJson: String): String {
+    val pretty = runCatching { JSONObject(argumentsJson).toString(2) }.getOrDefault(argumentsJson)
+    return if (pretty.length <= DETAILS_MAX_CHARS) pretty else pretty.take(DETAILS_MAX_CHARS) + "\n…[truncated]…"
+}
+
+private const val DETAILS_MAX_CHARS = 4_000
 
 /** The thing a call acts on, for the question. Shares its shape with the activity rows. */
 private fun approvalTarget(pending: PendingToolApproval): String {

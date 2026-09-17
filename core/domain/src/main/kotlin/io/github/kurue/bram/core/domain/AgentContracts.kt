@@ -147,6 +147,14 @@ enum class ToolApprovalDecision {
     DENY_TIMEOUT,
     /** Nobody could be asked at all: the run is unattended and no notification could be posted. */
     DENY_UNATTENDED,
+    /**
+     * Android refused a runtime permission the tool needs, after the user allowed the call.
+     *
+     * Distinct from [DENY]: nobody said no to Bram, so telling the model "the user declined" is
+     * false and pushes it to apologise for a decision the user did not make. The fix is a system
+     * setting, which only the user can change.
+     */
+    DENY_OS_PERMISSION,
 }
 
 /**

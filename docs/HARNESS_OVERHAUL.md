@@ -307,6 +307,17 @@ strip regex to only remove whole-reply recovered calls.
 Exit: every decision path in the approval matrix has a test; no path can strand a run on the
 10-minute timeout it cannot escape.
 
+Result (2026-09-17): **M3 done.** The card answers with Allow once / Refuse plus For this run /
+Always, and a details section showing the full arguments with what an always-grant would cover;
+"For this run" is `ALLOW_FOR_RUN`'s first producer (an orchestrator test proves later calls in the
+run skip the gate). The shade gained the Always action. The publish race is gone: the pending
+request is published before the notification that can answer it, proven by a unit test. Android
+denying a runtime permission now returns `DENY_OS_PERMISSION` and the model receives
+`os_permission_denied` pointing at system settings, distinct from a user refusal. `stripBareCalls`
+clears only a whole-reply call to the tool that ran, so ordinary prose keeps its parentheses. Every
+decision path has a test; the on-device MANUAL smoke asserts the new card affordances and the
+suite passes 6/6.
+
 ### M4 — Tools v2 (2–4 days)
 
 Honor capability flags (`supportsToolCalling` per endpoint, `TOOL_CALLING` before offering tools);

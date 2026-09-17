@@ -263,6 +263,7 @@ class AgentTaskService : Service() {
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(openPendingIntent(context))
                 .addAction(approvalAction(context, request.id, ToolApprovalDecision.ALLOW_ONCE, "Allow"))
+                .addAction(approvalAction(context, request.id, ToolApprovalDecision.ALLOW_ALWAYS, "Always"))
                 .addAction(approvalAction(context, request.id, ToolApprovalDecision.DENY, "Deny"))
                 .build()
             manager.notify(approvalNotificationId(request.id), notification)

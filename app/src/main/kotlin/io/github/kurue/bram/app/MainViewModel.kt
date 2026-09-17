@@ -4172,7 +4172,7 @@ class MainViewModel(
                             // wrote, drop the call itself — the row below says it better than
                             // `[web_fetch(url='…')]` sitting in the middle of the answer does.
                             val finished = streamingReply(roundText, reasoningFormat)
-                            stripBareCalls(finished.visibleText).takeIf(String::isNotBlank)
+                            stripBareCalls(finished.visibleText, event.call.name).takeIf(String::isNotBlank)
                                 ?.let { visibleParts += it }
                             roundText = ""
                             roundReasoningRecorded = 0
@@ -4738,11 +4738,19 @@ private fun org.json.JSONArray?.toIntList(): List<Int> {
 }
 
 /**
- * Removes call syntax a model wrote as text.
+ * Removes the call a recovered reply amounts to.
  *
- * Formats that mark their calls have them stripped by the runtime's parser, but the ones Bram
- * recovers from bare text are still sitting in the reply, so `[web_fetch(url='…')]` ended up in the
- * middle of the answer. The activity row above says the same thing better.
+ * A call recovered from bare text is the whole reply — that is the fence [BareToolCall] applies —
+ * so only a reply that *is* a call to the tool this round ran is cleared. An earlier version
+ * stripped any `word(...)` shape anywhere, which quietly deleted ordinary prose: an answer
+ * mentioning `f(x)` lost it.
  */
-internal fun stripBareCalls(text: String): String =
-    text.replace(Regex("""\[?\b\w+\((?:[^()]|\([^()]*\))*\)]?"""), "").trim()
+internal fun stripBareCalls(text: String, toolName: String): String {
+    val trimmed = text.trim()
+    val unbracketed = trimmed.trim('[', ']').trim()
+    val open = unbracketed.indexOf('(')
+    if (open <= 0 || !unbracketed.endsWith(")")) return text
+    val name = unbracketed.substring(0, open).trim()
+    if (name != toolName) return text
+    return ""
+}

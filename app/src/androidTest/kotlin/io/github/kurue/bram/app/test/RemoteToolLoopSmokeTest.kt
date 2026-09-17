@@ -74,6 +74,9 @@ class RemoteToolLoopSmokeTest {
         composeRule.onNodeWithTag("composer-field").performTextInput("check device")
         composeRule.onNodeWithTag("send-button").performClick()
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Allow Bram to device_status?") }
+        composeRule.onNodeWithText("For this run").assertIsDisplayed()
+        composeRule.onNodeWithText("Always").assertIsDisplayed()
+        composeRule.onNodeWithText("Show details").assertIsDisplayed()
         composeRule.onNodeWithText("Allow once").performClick()
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(FINAL_TEXT) }
         composeRule.onNodeWithText(FINAL_TEXT).assertIsDisplayed()
