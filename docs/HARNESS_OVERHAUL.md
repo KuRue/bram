@@ -273,7 +273,7 @@ Emulator findings from M0 (2026-09-15) — prerequisites for a trustworthy test 
 Exit: on the scripted server, a three-turn conversation sees its own earlier tool calls and results
 and does not repeat them; no single tool result can push an 8K-context model over budget.
 
-Result (2026-09-17, H1 and H2 done): conversation files persist assistant `toolCalls` and TOOL
+Result (2026-09-17, **M2 complete** — H1–H4 done): conversation files persist assistant `toolCalls` and TOOL
 messages with matching `toolCallId`s, and the settled transcript appends the turn's tool results, so
 the next `AgentRunRequest` replays the earlier call/result pair (no change needed in `runTurn` paths
 — they already pass the stored list). The transcript UI filters TOOL messages, which stay visible as
@@ -289,8 +289,13 @@ assertion on the replayed ids), and `oversizedToolResultIsBoundedBeforeItReplays
 `read_file` result arrives at the mock capped at 6 144 chars for the 8K endpoint). H3 then removed
 the last id collisions: no runtime mints from a reply index any more — `ToolCall.newId()` serves the
 llama.cpp event mapping and LiteRT, recovered calls are UUID-id'd too, and parser-provided ids are
-kept — and since ids are minted once and persisted, replays reuse them unchanged. Remaining: H4
-argument-schema validation, per-tool timeout, parallel read-only calls.
+kept — and since ids are minted once and persisted, replays reuse them unchanged. H4 then closed the
+remaining structural gaps: calls are checked against their own schemas before approval is asked
+(`invalid_arguments` names the problem), every execution is bounded by `ToolDefinition.timeoutMillis`
+(60 s default, `tool_timeout` when exceeded), and a reply whose calls are all read-only runs them
+concurrently — approvals still in reply order — while mixed or write batches stay sequential. On
+device the parallel path lands as one assistant message with two distinct call ids and two matching
+tool results in the replayed request.
 
 ### M3 — Gate polish (1–2 days)
 

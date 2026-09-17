@@ -9,6 +9,15 @@ data class ToolDefinition(
     val requiredPermissions: Set<String> = emptySet(),
     val readOnly: Boolean = true,
     /**
+     * How long one call may run before the harness abandons it and tells the model so.
+     *
+     * A handler without its own deadline would otherwise stall the whole turn — an approval that
+     * cannot be answered, a server that accepted the connection and went quiet. Tools that
+     * legitimately need longer (a long shell command) raise this rather than leaving the run
+     * without any bound at all.
+     */
+    val timeoutMillis: Long = 60_000,
+    /**
      * The argument names that say what a call acts on, used to scope a remembered allowance.
      *
      * A permission granted for good has to be granted for something. "Always allow `run_command`"

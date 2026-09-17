@@ -141,6 +141,32 @@ class RemoteToolLoopSmokeTest {
         }
     }
 
+    @Test
+    fun parallelReadOnlyCallsBothReachTheTranscript() {
+        assumeTrue("could not arm the parallel_calls scenario", postScenario("parallel_calls"))
+        composeRule.onNodeWithTag("new-chat").performClick()
+        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Mock endpoint") }
+        send("check the device twice")
+        composeRule.waitUntil(TIMEOUT_MILLIS) { countText("Called device_status") >= 2 }
+        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(FINAL_TEXT) }
+
+        // One reply asked for two calls; both results must come back keyed to their own call.
+        val request = lastChatCompletionRequest()
+        assertNotNull("no chat completion reached the mock", request)
+        val items = request!!.optJSONArray("items")
+        val callIds = mutableSetOf<String>()
+        val answered = mutableSetOf<String>()
+        for (index in 0 until (items?.length() ?: 0)) {
+            val item = items!!.optJSONObject(index) ?: continue
+            item.optJSONArray("toolCallIds")?.let { ids ->
+                for (idIndex in 0 until ids.length()) callIds += ids.optString(idIndex)
+            }
+            item.optString("toolCallId").takeIf(String::isNotBlank)?.let(answered::add)
+        }
+        assertTrue("expected two replayed calls, saw $callIds", callIds.size >= 2)
+        assertTrue("every call needs its own result: $callIds vs $answered", answered.containsAll(callIds))
+    }
+
     private fun send(text: String) {
         composeRule.onNodeWithTag("composer-field").performTextInput(text)
         composeRule.onNodeWithTag("send-button").performClick()

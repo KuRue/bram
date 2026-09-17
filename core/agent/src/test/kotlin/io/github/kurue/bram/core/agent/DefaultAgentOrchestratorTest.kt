@@ -22,10 +22,15 @@ import io.github.kurue.bram.core.domain.ToolCall
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import io.github.kurue.bram.core.domain.ToolResultBudget
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -218,6 +223,107 @@ class DefaultAgentOrchestratorTest {
         assertEquals("call_1", toolMessage.toolCallId)
     }
 
+    @Test
+    fun `invalid arguments are refused before approval and execution`() = runBlocking {
+        val handler = CountingHandler("asked_about")
+        var gateCalls = 0
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(handler)),
+            approvalGate = object : ToolApprovalGate {
+                override suspend fun decide(
+                    tool: ToolDefinition,
+                    argumentsJson: String,
+                    recovered: Boolean,
+                    untrustedContext: Boolean,
+                ): ToolApprovalDecision {
+                    gateCalls++
+                    return ToolApprovalDecision.ALLOW_ONCE
+                }
+            },
+        )
+
+        val events = orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("invalid-args"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = ToolCallingRuntime(argumentsJson = """{"count":"two"}"""),
+        ).toList()
+
+        assertEquals("nothing may execute with bad arguments", 0, handler.executions)
+        assertEquals("a call that cannot run needs no approval", 0, gateCalls)
+        val result = events.filterIsInstance<AgentEvent.ToolFinished>().single().result
+        assertTrue(result.contains("\"code\":\"invalid_arguments\""))
+        assertTrue(result.contains("count"))
+    }
+
+    @Test
+    fun `a tool that outlives its deadline is abandoned and the turn continues`() = runBlocking {
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(SlowHandler("asked_about", timeoutMillis = 40))),
+            approvalGate = ReadOnlyApprovalGate(),
+        )
+
+        val events = orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("timeout"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = ToolCallingRuntime(),
+        ).toList()
+
+        assertTrue("the turn must still complete", events.any { it is AgentEvent.Completed })
+        val result = events.filterIsInstance<AgentEvent.ToolFinished>().single().result
+        assertTrue(result.contains("\"code\":\"tool_timeout\""))
+    }
+
+    @Test
+    fun `read-only calls from one reply run together`() = runBlocking {
+        val latch = CountDownLatch(2)
+        val first = LatchHandler("read_one", latch)
+        val second = LatchHandler("read_two", latch)
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(first, second)),
+            approvalGate = ReadOnlyApprovalGate(),
+        )
+
+        val events = orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("parallel"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run both")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = TwoCallRuntime("read_one", "read_two"),
+        ).toList()
+
+        assertTrue(events.any { it is AgentEvent.Completed })
+        assertTrue("both read-only calls must overlap; saw $first/$second", first.overlapped && second.overlapped)
+        assertEquals(2, events.filterIsInstance<AgentEvent.ToolFinished>().size)
+    }
+
     /** One run whose model calls a tool once, with the gate answering [decision]. */
     private suspend fun runWithToolCall(decision: () -> ToolApprovalDecision): List<AgentEvent> {
         val orchestrator = DefaultAgentOrchestrator(
@@ -253,7 +359,9 @@ class DefaultAgentOrchestratorTest {
  * A runtime that asks for one tool call on the first generation and answers plainly after it, so
  * a denied call produces exactly one ToolFinished before the run completes.
  */
-private class ToolCallingRuntime : ModelRuntime {
+private class ToolCallingRuntime(
+    private val argumentsJson: String = "{}",
+) : ModelRuntime {
     override val model = ModelDescriptor(
         id = ModelId("test"),
         displayName = "Test",
@@ -270,12 +378,88 @@ private class ToolCallingRuntime : ModelRuntime {
     override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
         emit(GenerationEvent.Started("Test"))
         if (generations == 0) {
-            emit(GenerationEvent.ToolCallReady(ToolCall(id = "call_1", name = "asked_about", argumentsJson = "{}")))
+            emit(GenerationEvent.ToolCallReady(ToolCall(id = "call_1", name = "asked_about", argumentsJson = argumentsJson)))
         } else {
             emit(GenerationEvent.TextDelta("Done without it"))
         }
         generations++
         emit(GenerationEvent.Finished("stop"))
+    }
+}
+
+/** Asks for two calls in one reply, then answers plainly. */
+private class TwoCallRuntime(private vararg val toolNames: String) : ModelRuntime {
+    override val model = ModelDescriptor(
+        id = ModelId("test"),
+        displayName = "Test",
+        providerName = "Test",
+        modelName = "test",
+        location = ModelLocation.LOCAL,
+        contextWindowTokens = 4_096,
+    )
+
+    private var generations = 0
+
+    override suspend fun availability() = RuntimeAvailability(available = true, summary = "Ready")
+
+    override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+        emit(GenerationEvent.Started("Test"))
+        if (generations == 0) {
+            toolNames.forEachIndexed { index, name ->
+                emit(
+                    GenerationEvent.ToolCallReady(
+                        ToolCall(id = "call_$index", name = name, argumentsJson = "{}"),
+                    ),
+                )
+            }
+        } else {
+            emit(GenerationEvent.TextDelta("Done"))
+        }
+        generations++
+        emit(GenerationEvent.Finished("stop"))
+    }
+}
+
+private class CountingHandler(name: String) : ToolHandler {
+    var executions = 0
+    override val definition = ToolDefinition(
+        name = name,
+        description = name,
+        inputSchemaJson =
+            """{"type":"object","properties":{"count":{"type":"integer"}},"additionalProperties":false}""",
+    )
+
+    override suspend fun execute(argumentsJson: String): String {
+        executions++
+        return "{}"
+    }
+}
+
+private class SlowHandler(name: String, timeoutMillis: Long) : ToolHandler {
+    override val definition = ToolDefinition(
+        name = name,
+        description = name,
+        inputSchemaJson = "{}",
+        timeoutMillis = timeoutMillis,
+    )
+
+    override suspend fun execute(argumentsJson: String): String {
+        delay(30_000)
+        return "{}"
+    }
+}
+
+/** Records whether another handler was running at the same time; both must overlap. */
+private class LatchHandler(name: String, private val latch: CountDownLatch) : ToolHandler {
+    var overlapped = false
+    override val definition = ToolDefinition(name = name, description = name, inputSchemaJson = "{}", readOnly = true)
+
+    override suspend fun execute(argumentsJson: String): String {
+        withContext(Dispatchers.Default) {
+            latch.countDown()
+            overlapped = latch.await(3, TimeUnit.SECONDS)
+        }
+        return "{}"
     }
 }
 
