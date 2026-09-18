@@ -154,19 +154,16 @@ class SkillSelection(private val cacheLimit: Int = DEFAULT_CACHE_LIMIT) {
     private companion object {
         const val DEFAULT_CACHE_LIMIT = 64
 
-        // A draft has to be clearly about the task to nudge: cosine for normalized embedders sits
-        // around 0 for unrelated text and climbs past 0.5 only for genuinely related descriptions,
-        // so 0.60 favors precision over recall and the caller's per-conversation dedup bounds the
-        // rare loose match.
-        const val DEFAULT_DRAFT_HINT_THRESHOLD = 0.60f
+        // Calibrated against bge-small-en-v1.5 (the designated embedder) with the pairs in
+        // tools/threshold-calibration: true nudges scored 0.589-0.878 (median 0.874), unrelated
+        // pairs 0.386-0.519. 0.55 clears the noisiest unrelated pair by 0.03 and catches the
+        // weakest true match the earlier 0.60 guess would have missed.
+        const val DEFAULT_DRAFT_HINT_THRESHOLD = 0.55f
 
-        // Empirical: with bge-small-en-v1.5 the weather-fetcher stub ("Automatically fetches
-        // current weather data for a specified location") scores 0.73 against get_weather's
-        // description — a true duplicate pair. Unrelated skills (git-helper vs weather) sit near
-        // 0.4. The bar lands just under the measured duplicate; when a covering tool is offered,
-        // suppressing a same-topic skill is the safe direction — the skill survives in
-        // list_skills and read_skill, only its passive advertisement waits.
-        const val DEFAULT_COVERAGE_THRESHOLD = 0.70f
+        // Same measurement, skill description against the best of an offered tool's named/bare
+        // text: genuine duplicates scored 0.710-0.895, distinct skills 0.516-0.657. 0.68 sits in
+        // that gap: 0.02 above the highest distinct pair, 0.03 below the lowest duplicate.
+        const val DEFAULT_COVERAGE_THRESHOLD = 0.68f
     }
 }
 
