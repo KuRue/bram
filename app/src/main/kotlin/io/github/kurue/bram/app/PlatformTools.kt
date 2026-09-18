@@ -46,8 +46,7 @@ class FilesTool(context: Context) : ToolHandler {
 
     override val definition = ToolDefinition(
         name = "write_file",
-        description = "Write a file into Bram's private files area under a given relative path. " +
-            "The area starts empty; use list_files to see what is there.",
+        description = "Write a file into Bram's private files area at a relative path (overwrites).",
         inputSchemaJson = """
             {"type":"object",
              "properties":{
@@ -111,7 +110,7 @@ class ListFilesTool(context: Context) : ToolHandler {
 
     override val definition = ToolDefinition(
         name = "list_files",
-        description = "List the files in Bram's private files area, with sizes, newest last.",
+        description = "List files in Bram's private files area, newest last.",
         inputSchemaJson = """{"type":"object","properties":{},"additionalProperties":false}""",
         readOnly = true,
     )
@@ -182,8 +181,8 @@ class ClipboardTool(context: Context) : ToolHandler {
 
     override val definition = ToolDefinition(
         name = "clipboard_get",
-        description = "Read the current clipboard text. Ask first: the clipboard is private and " +
-            "may not be readable while Bram runs in the background.",
+        description = "Read the current clipboard text. The clipboard may be unreadable while Bram is " +
+            "backgrounded.",
         inputSchemaJson = """{"type":"object","properties":{},"additionalProperties":false}""",
         readOnly = true,
         requiredPermissions = setOf(RuntimePermissions.TOKEN_CLIPBOARD),
@@ -298,8 +297,7 @@ class ScheduleNotificationTool(context: Context) : ToolHandler {
 
     override val definition = ToolDefinition(
         name = "schedule_notification",
-        description = "Schedule a notification from Bram to appear at a future time, e.g. a " +
-            "reminder. Uses an exact alarm when allowed, otherwise approximate timing.",
+        description = "Schedule a notification for a future time, e.g. a reminder.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{
@@ -490,7 +488,7 @@ class LaunchUriTool(context: Context) : ToolHandler {
 
     override val definition = ToolDefinition(
         name = "launch_uri",
-        description = "Open a URI (http, https, tel, mailto, geo, ...) in whatever app handles it.",
+        description = "Open a URI (http, tel, mailto, geo) in whatever app handles it.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{
@@ -527,8 +525,7 @@ class ContactsTool(context: Context) : ToolHandler {
 
     override val definition = ToolDefinition(
         name = "search_contacts",
-        description = "Search the device contacts by name and return matching names and phone " +
-            "numbers. Requires the contacts permission.",
+        description = "Search device contacts by name; returns names and phone numbers.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{
@@ -589,8 +586,7 @@ class CalendarTool(context: Context) : ToolHandler {
 
     override val definition = ToolDefinition(
         name = "read_calendar_events",
-        description = "Read calendar events between two times. Times are epoch millis; " +
-            "from_epoch_millis and to_epoch_millis are both required.",
+        description = "Read calendar events between two epoch-millis times.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{
