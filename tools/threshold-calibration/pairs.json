@@ -1,0 +1,51 @@
+{
+  "coverage": [
+    { "skill": "Automatically fetches current weather data for a specified location", "tool": "get_weather", "expect": "suppress" },
+    { "skill": "Look up the weather forecast for a place before planning outdoor activities", "tool": "get_weather", "expect": "suppress" },
+    { "skill": "Search the web for current information on a topic", "tool": "web_search", "expect": "suppress" },
+    { "skill": "Download a web page and summarize its contents", "tool": "web_fetch", "expect": "suppress" },
+    { "skill": "Check the phone's battery level and available storage", "tool": "device_status", "expect": "suppress" },
+    { "skill": "Save a note about something the user wants to remember", "tool": "write_note", "expect": "suppress" },
+    { "skill": "Recall facts and decisions from earlier conversations", "tool": "memory_search", "expect": "suppress" },
+    { "skill": "Run a shell command on the device and report the output", "tool": "termux_exec", "expect": "suppress" },
+    { "skill": "Copy text to the system clipboard", "tool": "clipboard_set", "expect": "suppress" },
+    { "skill": "List the files saved in Bram's private storage", "tool": "list_files", "expect": "suppress" },
+    { "skill": "Read a saved file from Bram's private storage", "tool": "read_file", "expect": "suppress" },
+    { "skill": "Look up a contact's phone number by name", "tool": "search_contacts", "expect": "suppress" },
+    { "skill": "Show a reminder notification at a chosen time", "tool": "schedule_notification", "expect": "suppress" },
+    { "skill": "Find a tool that can perform a specific job", "tool": "tool_search", "expect": "suppress" },
+    { "skill": "Load a skill's instructions before following it", "tool": "read_skill", "expect": "suppress" },
+    { "skill": "Create a reusable skill for the user to approve", "tool": "propose_skill", "expect": "suppress" },
+
+    { "skill": "Write a haiku about the current season", "expect": "keep" },
+    { "skill": "Translate a paragraph into Japanese and explain the idioms", "expect": "keep" },
+    { "skill": "Compare two poems and discuss their meter and imagery", "expect": "keep" },
+    { "skill": "Plan a three-day hiking route through the Alps", "expect": "keep" },
+    { "skill": "Explain the difference between TCP and UDP with examples", "expect": "keep" },
+    { "skill": "Draft a polite email declining a meeting invitation", "expect": "keep" },
+    { "skill": "Summarize a research paper's methodology in plain language", "expect": "keep" },
+    { "skill": "Design a weekly workout routine for a beginner", "expect": "keep" },
+    { "skill": "Review C++ code for undefined behavior", "expect": "keep" },
+    { "skill": "Help name a new kitten", "expect": "keep" },
+    { "skill": "Negotiate a lower price on a used bicycle", "expect": "keep" },
+    { "skill": "Explain compound interest to a teenager", "expect": "keep" }
+  ],
+  "draft": [
+    { "query": "check the weather before my trip", "draft": "Automatically fetches current weather data for a specified location", "expect": "nudge" },
+    { "query": "what is the forecast this weekend", "draft": "Automatically fetches current weather data for a specified location", "expect": "nudge" },
+    { "query": "remind me to water the plants on Sunday", "draft": "Water all the houseplants every Sunday morning and note which were done", "expect": "nudge" },
+    { "query": "help me review this pull request", "draft": "Review a pull request: read the diff, check tests, and flag naming problems", "expect": "nudge" },
+    { "query": "summarize this long document for me", "draft": "Summarize a long document into its key points and open questions", "expect": "nudge" },
+    { "query": "write the commit message for what I staged", "draft": "Draft a git commit message from the staged changes", "expect": "nudge" },
+
+    { "query": "rename these photos by date", "draft": "Generate unit tests for a Kotlin function", "expect": "quiet" },
+    { "query": "what is my battery level", "draft": "Write a haiku about the season", "expect": "quiet" },
+    { "query": "find my sister's phone number", "draft": "Water the plants every Sunday", "expect": "quiet" },
+    { "query": "play some jazz music", "draft": "Summarize a research paper", "expect": "quiet" },
+    { "query": "how tall is Mount Everest", "draft": "Review a pull request", "expect": "quiet" },
+    { "query": "book a table for two on Friday", "draft": "Generate unit tests for a Kotlin function", "expect": "quiet" },
+
+    { "query": "what is the weather in tokyo", "draft": "Search the web for the latest news about a topic", "expect": "quiet" },
+    { "query": "convert this image to PNG", "draft": "Run a shell command and report the output", "expect": "quiet" }
+  ]
+}

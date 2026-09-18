@@ -142,11 +142,17 @@ class RankingToolSelector(
         private const val MAX_BUDGET_CHARS = 6_000
 
         /**
-         * The relevance bar for a non-core tool. Below it the tool is not obviously about the ask,
-         * and a long tail of barely-related tools measurably degrades choice; the core set carries
-         * the always-useful capabilities instead.
+         * The relevance bar for a non-core tool.
+         *
+         * Calibrated against bge-small-en-v1.5 with the pairs in tools/threshold-calibration:
+         * across 24 representative asks the tool that should be called scored 0.566-0.749 against
+         * the ask, while the other 480 ask/tool pairs scored 0.286-0.756 (median 0.473) — the two
+         * overlap, so cosine alone cannot separate them and the bar is deliberately conservative:
+         * 0.45 clears the bottom of the noise without approaching any needed tool's score. A long
+         * tail of barely-related tools still degrades choice; the context-proportional budget in
+         * [budgetFor] is what bounds the offer.
          */
-        private const val DEFAULT_MIN_SIMILARITY = 0.35f
+        private const val DEFAULT_MIN_SIMILARITY = 0.45f
 
         /** Beyond this, every definition fits comfortably and triage is skipped. */
         const val LARGE_CONTEXT_TOKENS = 32_000
