@@ -5,7 +5,6 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.platform.app.InstrumentationRegistry
@@ -53,7 +52,10 @@ class NonToolEndpointSmokeTest {
         composeRule.onNodeWithTag("composer-field").performTextInput("check device")
         composeRule.onNodeWithTag("send-button").performClick()
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(FINAL_TEXT) }
-        composeRule.onNodeWithText(FINAL_TEXT).assertIsDisplayed()
+        // onAllNodes[0] rather than a uniqueness assertion: the drawer's conversation list preview
+        // can carry the same line, and the claim here is that the reply is on screen, not that it
+        // appears exactly once in the whole semantic tree.
+        composeRule.onAllNodesWithText(FINAL_TEXT)[0].assertIsDisplayed()
 
         val request = lastChatCompletionRequest()
         assertNotNull("no chat completion reached the mock", request)

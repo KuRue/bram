@@ -25,6 +25,9 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.setAppForeground(true)
+        // Screen reading is turned on in system settings, so coming back is exactly when the
+        // Capabilities state may have changed underneath us.
+        viewModel.refreshAccessibility()
     }
 
     override fun onPause() {

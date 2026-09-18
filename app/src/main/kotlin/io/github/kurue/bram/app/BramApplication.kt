@@ -185,6 +185,7 @@ class AppContainer(application: Application) {
                 ListDocumentsTool { agentDocumentTree() },
                 ReadDocumentTool { agentDocumentTree() },
                 WriteDocumentTool { agentDocumentTree() },
+                ReadScreenTool { screenAccess() },
             ),
         ),
     )
@@ -197,6 +198,9 @@ class AppContainer(application: Application) {
     /** The folder the user granted, or null; every call re-checks the persisted grant. */
     fun agentDocumentTree(): AgentDocumentTree? =
         AgentFolderAccess.grantedTree(appContext)?.let { SafDocumentTree(appContext, it) }
+
+    /** What screen reading can do right now; fresh each call, since consent lives in settings. */
+    suspend fun screenAccess(): ScreenAccess = AccessibilityBridge.access(appContext)
 
     fun runtime(model: LocalModelRecord) = LlamaCppRuntime(
         record = model,

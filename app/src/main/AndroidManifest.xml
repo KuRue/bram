@@ -58,6 +58,22 @@
             android:name=".TermuxResultService"
             android:exported="false" />
 
+        <!-- Screen reading. There is no runtime permission to request: the user turns this on in
+             system accessibility settings, which is the consent, and can revoke it there at any
+             time. The bind permission keeps every other app out; only the system may bind it. -->
+        <service
+            android:name=".BramAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/bram_accessibility_service" />
+        </service>
+
         <!-- Turns a scheduled reminder alarm into the notification it was asked for. -->
         <receiver
             android:name=".ScheduledNotificationReceiver"

@@ -127,7 +127,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import io.github.kurue.bram.core.domain.AcceleratorCapability
 import io.github.kurue.bram.core.domain.AgentActivity
@@ -199,6 +201,7 @@ private enum class AppPanel {
 @Composable
 fun BramApp(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
     var panel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
     var panelExpansionRequested by remember(panel) { mutableStateOf(false) }
@@ -411,6 +414,9 @@ fun BramApp(viewModel: MainViewModel) {
                                 onWithdrawToolPermission = viewModel::withdrawToolPermission,
                                 onChooseAgentFolder = { agentFolderPicker.launch(null) },
                                 onClearAgentFolder = viewModel::clearAgentFolder,
+                                onOpenAccessibilitySettings = {
+                                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                                },
                             )
                             AppPanel.SKILLS -> SkillsScreen(
                                 state = state,
@@ -3303,6 +3309,7 @@ private fun ToolsScreen(
     onWithdrawToolPermission: (String) -> Unit,
     onChooseAgentFolder: () -> Unit,
     onClearAgentFolder: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
 ) {
     var addingMcp by rememberSaveable { mutableStateOf(false) }
     var mcpName by rememberSaveable { mutableStateOf("") }
@@ -3372,6 +3379,40 @@ private fun ToolsScreen(
                             onClick = onClearAgentFolder,
                         ) { Text("Remove access") }
                     }
+                }
+            }
+        }
+        GlassSurface(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Screen reading", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (state.accessibilityEnabled) "Enabled" else "Off",
+                        color = if (state.accessibilityEnabled) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                Text(
+                    if (state.accessibilityEnabled) {
+                        "Bram can read the text and controls on the current screen when a task " +
+                            "needs it. Screen content is treated as untrusted, and nothing is " +
+                            "read while the service is off."
+                    } else {
+                        "Let Bram read the text and controls on the current screen when a task " +
+                            "needs it. Android grants this in accessibility settings, and only " +
+                            "while the service is on."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(
+                    modifier = Modifier.testTag("accessibility-settings"),
+                    onClick = onOpenAccessibilitySettings,
+                ) {
+                    Text(if (state.accessibilityEnabled) "Accessibility settings" else "Turn on screen reading")
                 }
             }
         }
