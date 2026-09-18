@@ -10,6 +10,7 @@ import org.junit.Test
 class ReadScreenToolTest {
 
     private fun node(
+        walkIndex: Int = 0,
         depth: Int = 0,
         text: String = "",
         description: String = "",
@@ -19,6 +20,7 @@ class ReadScreenToolTest {
         scrollable: Boolean = false,
         editable: Boolean = false,
     ) = ScreenNode(
+        walkIndex = walkIndex,
         depth = depth,
         text = text,
         description = description,
@@ -34,7 +36,7 @@ class ReadScreenToolTest {
     )
 
     private fun tool(snapshot: ScreenSnapshot?) = ReadScreenTool {
-        ScreenAccess.Ready(ScreenReader { snapshot })
+        ScreenAccess.Ready(FakeScreenSession(snapshot = snapshot))
     }
 
     @Test
@@ -42,9 +44,9 @@ class ReadScreenToolTest {
         val snapshot = ScreenSnapshot(
             packageName = "com.example.app",
             nodes = listOf(
-                node(depth = 0, className = "android.widget.FrameLayout"),
-                node(depth = 1, text = "Inbox", clickable = true, viewId = "com.example.app:id/inbox"),
-                node(depth = 1, text = "Search", className = "android.widget.EditText", editable = true),
+                node(walkIndex = 0, className = "android.widget.FrameLayout"),
+                node(walkIndex = 1, depth = 1, text = "Inbox", clickable = true, viewId = "com.example.app:id/inbox"),
+                node(walkIndex = 2, depth = 1, text = "Search", className = "android.widget.EditText", editable = true),
             ),
         )
         val result = JSONObject(tool(snapshot).execute("{}"))
@@ -66,10 +68,10 @@ class ReadScreenToolTest {
         val snapshot = ScreenSnapshot(
             packageName = "com.example.app",
             nodes = listOf(
-                node(depth = 0),
-                node(depth = 1, description = "Back", clickable = true),
-                node(depth = 1, scrollable = true),
-                node(depth = 2),
+                node(walkIndex = 0),
+                node(walkIndex = 1, depth = 1, description = "Back", clickable = true),
+                node(walkIndex = 2, depth = 1, scrollable = true),
+                node(walkIndex = 3, depth = 2),
             ),
         )
         val result = JSONObject(tool(snapshot).execute("{}"))
@@ -94,7 +96,7 @@ class ReadScreenToolTest {
     fun `the node cap reports what was left out`() = runBlocking {
         val snapshot = ScreenSnapshot(
             packageName = "com.example.app",
-            nodes = (0 until 100).map { node(text = "row $it") },
+            nodes = (0 until 100).map { node(walkIndex = it, text = "row $it") },
         )
         val result = JSONObject(tool(snapshot).execute("{}"))
         assertEquals(80, result.getInt("count"))

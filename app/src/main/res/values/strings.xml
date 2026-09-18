@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">Bram</string>
     <string name="accessibility_service_label">Screen reading for Bram</string>
-    <string name="accessibility_service_description">Lets Bram read the text and controls on the current screen when a task needs it. Bram only reads while this service is on, and screen content is treated as untrusted.</string>
+    <string name="accessibility_service_description">Lets Bram read the controls on the current screen, and tap, type, or scroll when a task needs it and the call is approved. Bram only acts while this service is on, and screen content is treated as untrusted.</string>
 </resources>

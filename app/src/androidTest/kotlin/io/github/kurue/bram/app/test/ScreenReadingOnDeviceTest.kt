@@ -10,8 +10,12 @@ import io.github.kurue.bram.app.BramApplication
 import io.github.kurue.bram.app.MainActivity
 import io.github.kurue.bram.app.ReadScreenTool
 import io.github.kurue.bram.app.ScreenAccess
-import io.github.kurue.bram.app.ScreenReader
+import io.github.kurue.bram.app.ScreenActionResult
+import io.github.kurue.bram.app.ScreenSession
+import io.github.kurue.bram.app.ScreenSnapshot
+import io.github.kurue.bram.app.ScreenTarget
 import io.github.kurue.bram.app.ScreenTreeReader
+import io.github.kurue.bram.app.ScrollDirection
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.After
@@ -105,9 +109,15 @@ class ScreenReadingOnDeviceTest {
         composeRule.waitForIdle()
         val root = instrumentation.uiAutomation.rootInActiveWindow
         assertNotNull(root)
-        val reader = ScreenReader { ScreenTreeReader.walk(root) }
+        val session = object : ScreenSession {
+            override suspend fun snapshot(): ScreenSnapshot? = ScreenTreeReader.walk(root)
+            override suspend fun tap(target: ScreenTarget) = ScreenActionResult.NotFound
+            override suspend fun typeText(text: String, target: ScreenTarget?) = ScreenActionResult.NotFound
+            override suspend fun scroll(direction: ScrollDirection, target: ScreenTarget?) =
+                ScreenActionResult.NotFound
+        }
         val result = JSONObject(
-            runBlocking { ReadScreenTool { ScreenAccess.Ready(reader) }.execute("{}") },
+            runBlocking { ReadScreenTool { ScreenAccess.Ready(session) }.execute("{}") },
         )
         // The active window is whatever is on top, which in a test can be a system dialog rather
         // than Bram; the answer names its app either way.
