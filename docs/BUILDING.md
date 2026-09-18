@@ -149,7 +149,7 @@ The mock binds the host loopback only, so the `10.0.2.2` route needs no firewall
 adb shell am instrument -w io.github.kurue.bram.app.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-Narrow to one class with `-e class io.github.kurue.bram.app.ChatScreenSmokeTest`. The harness suite (`RemoteToolLoopSmokeTest`, `NonToolEndpointSmokeTest`, `ConversationHistoryOnDeviceTest`, `ProposeSkillToolOnDeviceTest`, `SkillStoreMigrationOnDeviceTest`) assumes the mock server is reachable and skips itself when it is not.
+Narrow to one class with `-e class io.github.kurue.bram.app.ChatScreenSmokeTest`. The harness suite (`RemoteToolLoopSmokeTest`, `NonToolEndpointSmokeTest`, `ConversationHistoryOnDeviceTest`, `ProposeSkillToolOnDeviceTest`, `SkillDraftReviewOnDeviceTest`, `SkillStoreMigrationOnDeviceTest`) assumes the mock server is reachable and skips itself when it is not.
 
 ## CI
 

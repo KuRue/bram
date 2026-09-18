@@ -160,8 +160,11 @@ import io.github.kurue.bram.core.domain.RoutingPoolSlot
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.RunJournalEntry
 import io.github.kurue.bram.core.domain.RunStatus
+import io.github.kurue.bram.core.domain.DiffLine
+import io.github.kurue.bram.core.domain.SkillDiff
 import io.github.kurue.bram.core.domain.SkillOrigin
 import io.github.kurue.bram.core.domain.SkillPackage
+import io.github.kurue.bram.core.domain.SkillVersion
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.displayName
 import kotlinx.coroutines.launch
@@ -4231,6 +4234,28 @@ private fun SkillCard(
                     )
                 }
             }
+            // A draft can be activated blind, but "what changed" is the question review answers:
+            // the diff is against the active version, or against nothing for a brand-new skill.
+            val draftVersion = pkg.draftVersion?.let { draft -> pkg.versions.firstOrNull { it.version == draft } }
+            var showDiff by rememberSaveable(pkg.id, pkg.draftVersion) { mutableStateOf(false) }
+            if (draftVersion != null) {
+                val activeVersion = pkg.activeVersion?.let { active -> pkg.versions.firstOrNull { it.version == active } }
+                TextButton(
+                    modifier = Modifier.testTag("skill-review"),
+                    onClick = { showDiff = !showDiff },
+                ) {
+                    Text(
+                        when {
+                            showDiff -> "Hide changes"
+                            activeVersion != null -> "Review changes"
+                            else -> "View draft"
+                        },
+                    )
+                }
+                if (showDiff) {
+                    SkillDraftDiff(active = activeVersion, draft = draftVersion)
+                }
+            }
             Row {
                 TextButton(onClick = { onEdit(pkg) }) { Text("Edit") }
                 if (pkg.draftVersion != null) {
@@ -4244,6 +4269,72 @@ private fun SkillCard(
             }
         }
     }
+}
+
+/**
+ * The staged draft against the version it would replace: version line, description change,
+ * declared-capability change, and the instructions as a bounded, scrollable line diff.
+ */
+@Composable
+private fun SkillDraftDiff(active: SkillVersion?, draft: SkillVersion) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            if (active == null) "New skill, v${draft.version}" else "v${active.version} → v${draft.version}",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val descriptionDiff = if (active == null || active.description == draft.description) {
+            emptyList()
+        } else {
+            SkillDiff.lines(active.description, draft.description)
+        }
+        val capabilityChange = capabilityDelta(active, draft)
+        if (capabilityChange.isNotBlank()) {
+            Text(
+                capabilityChange,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Surface(
+            shape = RoundedCornerShape(Glass.cornerSmall),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            LazyColumn(Modifier.height(220.dp).padding(10.dp)) {
+                items(descriptionDiff + SkillDiff.lines(active?.instructions.orEmpty(), draft.instructions)) { line ->
+                    val tint = when (line.kind) {
+                        DiffLine.Kind.ADDED -> MaterialTheme.colorScheme.primary
+                        DiffLine.Kind.REMOVED -> MaterialTheme.colorScheme.error
+                        DiffLine.Kind.SAME -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Text(
+                        line.prefix + line.text,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = tint,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** `+`/`-` for tools and permissions the draft adds or removes, or blank when nothing changed. */
+private fun capabilityDelta(active: SkillVersion?, draft: SkillVersion): String {
+    val previousTools = active?.tools.orEmpty()
+    val previousPermissions = active?.permissions.orEmpty()
+    val parts = buildList {
+        val toolsAdded = (draft.tools - previousTools).sorted()
+        val toolsRemoved = (previousTools - draft.tools).sorted()
+        if (toolsAdded.isNotEmpty()) add("tools +${toolsAdded.joinToString(", ")}")
+        if (toolsRemoved.isNotEmpty()) add("tools -${toolsRemoved.joinToString(", ")}")
+        val permissionsAdded = (draft.permissions - previousPermissions).sorted()
+        val permissionsRemoved = (previousPermissions - draft.permissions).sorted()
+        if (permissionsAdded.isNotEmpty()) add("permissions +${permissionsAdded.joinToString(", ")}")
+        if (permissionsRemoved.isNotEmpty()) add("permissions -${permissionsRemoved.joinToString(", ")}")
+    }
+    return parts.joinToString(" · ")
 }
 
 @Composable
