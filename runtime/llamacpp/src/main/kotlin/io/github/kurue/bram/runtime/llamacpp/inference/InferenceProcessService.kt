@@ -216,12 +216,16 @@ class InferenceProcessService : Service() {
                             .put("inputTokens", result.getInt("promptTokens"))
                             .put("outputTokens", result.getInt("outputTokens")),
                     )
+                    // No PSS read here: Debug.getPss() walks every smaps entry of the process,
+                    // and a large mmap'd model (the 17 GB split files) makes that take tens of
+                    // seconds — delaying the finished event and keeping the app "busy" long
+                    // after the last token. The load response still reports PSS once per load,
+                    // where the pause is acceptable; nothing displayed the per-turn value.
                     emit(
                         callback,
                         requestId,
                         JSONObject(result.toString())
-                            .put("type", "metrics")
-                            .put("processPssBytes", Debug.getPss().toLong() * 1_024L),
+                            .put("type", "metrics"),
                     )
                     emit(
                         callback,
@@ -267,7 +271,12 @@ class InferenceProcessService : Service() {
         override fun loadEmbedder(modelPath: String?, threads: Int): String =
             bridge.loadEmbedder(modelPath.orEmpty(), threads)
 
-        override fun embed(text: String?): FloatArray = bridge.embed(text.orEmpty())
+        override fun embed(text: String?): FloatArray = try {
+            bridge.embed(text.orEmpty())
+        } catch (error: Throwable) {
+            android.util.Log.d("BramEmbed", "native embed threw ${error::class.simpleName}: ${error.message}")
+            throw error
+        }
 
         override fun unloadEmbedder(): String = bridge.unloadEmbedder()
     }
@@ -365,6 +374,11 @@ class InferenceProcessService : Service() {
                     hexHostBuf = identity.hexHostBuf,
                     hexOpBatch = identity.hexOpBatch,
                     hexNDev = identity.hexNDev,
+                    streamExperts = identity.streamExperts,
+                    streamCacheMb = identity.streamCacheMb,
+                    streamDenseAnon = identity.streamDenseAnon,
+                    streamOverlap = identity.streamOverlap,
+                    streamOverlapLanes = identity.streamOverlapLanes,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())

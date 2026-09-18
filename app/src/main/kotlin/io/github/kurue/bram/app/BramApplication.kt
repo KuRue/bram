@@ -11,10 +11,13 @@ import io.github.kurue.bram.core.domain.Embedder
 import io.github.kurue.bram.core.domain.EndpointCredentialResolver
 import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
+import io.github.kurue.bram.core.domain.RankingToolSelector
 import io.github.kurue.bram.core.domain.RemoteEndpoint
+import io.github.kurue.bram.core.domain.SkillAwareToolSelector
 import io.github.kurue.bram.core.domain.SkillSelection
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
+import io.github.kurue.bram.core.domain.ToolRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -121,8 +124,18 @@ class AppContainer(application: Application) {
      */
     val embedder: Embedder = object : Embedder {
         override suspend fun embed(text: String): FloatArray? {
-            if (embeddingModelStore.modelId() == null) return null
-            return LlamaCppEmbedder(llamaCppClient).embed(text)
+            if (embeddingModelStore.modelId() == null) {
+                android.util.Log.d("BramEmbed", "no embedding model designated; returning null")
+                return null
+            }
+            return try {
+                LlamaCppEmbedder(llamaCppClient).embed(text).also {
+                    if (it == null) android.util.Log.d("BramEmbed", "embed returned null")
+                }
+            } catch (error: Throwable) {
+                android.util.Log.d("BramEmbed", "embed threw ${error::class.simpleName}: ${error.message}")
+                null
+            }
         }
     }
     val memoryStore = PersistentMemoryStore(application, embedder)
@@ -132,18 +145,27 @@ class AppContainer(application: Application) {
      * survives across per-run orchestrator instances.
      */
     val skillSelection = SkillSelection()
+    /**
+     * Ranks the registry's tools against the turn's ask so a small-context local model is not
+     * offered seventeen prose definitions every run. Shared by the orchestrator and by prompt
+     * assembly (skill-vs-tool dedup) so both see the identical selection; embeddings are cached
+     * inside, so the second evaluation of a run costs nothing. With no embedding model
+     * designated the selector returns the full list, which is exactly the previous behavior.
+     */
+    val toolSelector = SkillAwareToolSelector(RankingToolSelector(embedder), skillStore)
     val runJournal = SqliteRunJournal(application)
     /**
      * Built-ins plus whatever MCP servers contribute. Mutable so a server's tools can be swapped in
      * on refresh and dropped when it fails or is removed; the agent reads it per run.
      */
-    val toolRegistry = MutableToolRegistry(
+    val toolRegistry: MutableToolRegistry = MutableToolRegistry(
         StaticToolRegistry(
             listOf(
                 DeviceStatusTool(deviceProfiler),
                 ScratchNoteTool(application),
                 WebSearchTool(),
                 WebFetchTool(),
+                WeatherTool(),
                 FilesTool(application),
                 ListFilesTool(application),
                 ReadFileTool(application),
@@ -157,6 +179,9 @@ class AppContainer(application: Application) {
                 termuxTool,
                 MemorySearchTool(memoryStore),
                 ProposeSkillTool(skillStore),
+                ListSkillsTool(skillStore),
+                ReadSkillTool(skillStore),
+                ToolSearchTool(registry = { toolRegistry }),
             ),
         ),
     )
@@ -183,6 +208,7 @@ class AppContainer(application: Application) {
         approvalGate = approvalGate,
         journal = runJournal,
         memoryExtractor = GeneratingMemoryExtractor(),
+        toolSelector = toolSelector,
     )
 
     init {
@@ -192,7 +218,14 @@ class AppContainer(application: Application) {
         appScope.launch {
             val path = embeddingModelStore.modelPath()
             if (!path.isNullOrBlank()) {
-                runCatching { llamaCppClient.loadEmbedder(path, EMBEDDER_THREADS) }
+                val result = runCatching { llamaCppClient.loadEmbedder(path, EMBEDDER_THREADS) }
+                android.util.Log.d(
+                    "BramEmbed",
+                    result.fold(
+                        onSuccess = { "loaded embedder from $path => ${(it ?: "<null>")}" },
+                        onFailure = { "loadEmbedder FAILED: ${it::class.simpleName}: ${it.message}" },
+                    ),
+                )
             }
         }
     }

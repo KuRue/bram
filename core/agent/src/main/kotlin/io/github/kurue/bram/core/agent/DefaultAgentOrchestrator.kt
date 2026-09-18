@@ -11,6 +11,7 @@ import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.MemoryStore
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.ModelCapability
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.NoopMemoryExtractor
 import io.github.kurue.bram.core.domain.NoopRunJournal
@@ -19,15 +20,24 @@ import io.github.kurue.bram.core.domain.RunJournalEntry
 import io.github.kurue.bram.core.domain.RunStatus
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.ToolApprovalGate
+import io.github.kurue.bram.core.domain.ToolArgumentValidator
 import io.github.kurue.bram.core.domain.ToolCall
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import io.github.kurue.bram.core.domain.ToolRegistry
+import io.github.kurue.bram.core.domain.ToolResultBudget
+import io.github.kurue.bram.core.domain.ToolSelector
+import io.github.kurue.bram.core.domain.AllToolsSelector
 import io.github.kurue.bram.core.domain.toRecord
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withTimeoutOrNull
 
 class DefaultAgentOrchestrator(
     private val contextWindowManager: ContextWindowManager,
@@ -36,6 +46,7 @@ class DefaultAgentOrchestrator(
     private val approvalGate: ToolApprovalGate,
     private val journal: RunJournal = NoopRunJournal,
     private val memoryExtractor: MemoryExtractor = NoopMemoryExtractor,
+    private val toolSelector: ToolSelector = AllToolsSelector,
 ) : AgentOrchestrator {
 
     override fun run(request: AgentRunRequest, runtime: ModelRuntime): Flow<AgentEvent> = flow {
@@ -81,6 +92,22 @@ class DefaultAgentOrchestrator(
         // the context this run generates from.
         var untrustedContext = hasUntrustedContent(workingMessages)
         var compacted = false
+        // Tools are chosen once per run, from the ask that started it. Mid-run re-selection would
+        // let the set change under the model's feet (a tool it planned to chain vanishing after a
+        // tool result), and the query the run started with stays the best statement of its intent.
+        //
+        // A runtime that does not support tool calling is offered none: sending definitions to a
+        // server or engine that cannot use them costs context and can error on strict hosts.
+        val selectedTools = if (ModelCapability.TOOL_CALLING in runtime.model.capabilities) {
+            toolSelector.select(
+                query = request.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
+                contextWindowTokens = runtime.model.contextWindowTokens,
+                available = toolRegistry.definitions(),
+            )
+        } else {
+            emptyList()
+        }
+        emit(AgentEvent.ToolsSelected(selectedTools.map { it.name }))
 
         repeat(request.maxToolTurns + 1) { turn ->
             var context = contextWindowManager.plan(
@@ -143,10 +170,11 @@ class DefaultAgentOrchestrator(
             runtime.generate(
                 GenerationRequest(
                     messages = context.messages,
-                    tools = toolRegistry.definitions(),
+                    tools = selectedTools,
                     maxOutputTokens = request.maxOutputTokens,
                     sampler = request.sampler,
                     requestId = UUID.randomUUID().toString(),
+                    sessionId = request.conversationId.value,
                 ),
             ).collect { event ->
                 when (event) {
@@ -158,6 +186,7 @@ class DefaultAgentOrchestrator(
                         responseText.append(event.text)
                         emit(AgentEvent.TextDelta(event.text))
                     }
+                    is GenerationEvent.ReasoningDelta -> emit(AgentEvent.ReasoningDelta(event.text))
                     is GenerationEvent.ToolCallReady -> toolCalls += event.call
                     is GenerationEvent.Usage -> {
                         event.usage.inputTokens?.let { inputTokensTotal += it }
@@ -214,23 +243,46 @@ class DefaultAgentOrchestrator(
             }
 
             workingMessages += assistantMessage
-            for (call in toolCalls) {
-                emit(AgentEvent.ToolStarted(call))
-                val result = executeTool(call, allowedForRun, untrustedContext)
-                workingMessages += ConversationMessage(
-                    role = MessageRole.TOOL,
-                    content = result,
-                    toolCallId = call.id,
-                )
-                // Once outside content is in the conversation it stays in it, so this only ever
-                // goes one way within a run. A failed or denied call brought nothing back.
-                if (!untrustedContext &&
-                    toolRegistry.find(call.name)?.definition?.returnsUntrustedContent == true &&
-                    !isErrorResult(result)
-                ) {
-                    untrustedContext = true
+            val parallelBatch = toolCalls.size > 1 &&
+                toolCalls.all { toolRegistry.find(it.name)?.definition?.readOnly == true }
+            if (parallelBatch) {
+                // Read-only calls cannot interfere with each other, so a reply that asks for
+                // several runs them together. Approvals still resolve first, in reply order: the
+                // cards are a sequence for the user, not for the tools.
+                val prepared = toolCalls.map { call ->
+                    emit(AgentEvent.ToolStarted(call))
+                    prepareTool(call, allowedForRun, untrustedContext)
                 }
-                emit(AgentEvent.ToolFinished(call, result))
+                val results = coroutineScope {
+                    prepared.map { preparedCall ->
+                        async { preparedCall.call to runTool(preparedCall) }
+                    }.awaitAll()
+                }
+                for ((call, result) in results) {
+                    workingMessages += ConversationMessage(
+                        role = MessageRole.TOOL,
+                        content = ToolResultBudget.apply(result, runtime.model.contextWindowTokens),
+                        toolCallId = call.id,
+                    )
+                    // Once outside content is in the conversation it stays in it, so this only ever
+                    // goes one way within a run. A failed or denied call brought nothing back.
+                    if (bringsUntrustedContent(call, result)) untrustedContext = true
+                    emit(AgentEvent.ToolFinished(call, result))
+                }
+            } else {
+                for (call in toolCalls) {
+                    emit(AgentEvent.ToolStarted(call))
+                    val result = executeTool(call, allowedForRun, untrustedContext)
+                    workingMessages += ConversationMessage(
+                        role = MessageRole.TOOL,
+                        content = ToolResultBudget.apply(result, runtime.model.contextWindowTokens),
+                        toolCallId = call.id,
+                    )
+                    // Once outside content is in the conversation it stays in it, so this only ever
+                    // goes one way within a run. A failed or denied call brought nothing back.
+                    if (bringsUntrustedContent(call, result)) untrustedContext = true
+                    emit(AgentEvent.ToolFinished(call, result))
+                }
             }
         }
         emit(AgentEvent.Failed("Agent stopped without a reply", recoverable = true))
@@ -297,13 +349,26 @@ class DefaultAgentOrchestrator(
         return text.takeIf(String::isNotEmpty)
     }
 
-    private suspend fun executeTool(
+    /**
+     * Resolves one call up to the point where it can run: the tool must exist, its arguments must
+     * satisfy its own schema, and the gate must allow it. [PreparedCall.answered] carries the error
+     * envelope for a call that is already finished (unknown, malformed, or refused).
+     */
+    private suspend fun prepareTool(
         call: ToolCall,
         allowedForRun: MutableSet<String>,
         untrustedContext: Boolean,
-    ): String {
+    ): PreparedCall {
         val handler = toolRegistry.find(call.name)
-            ?: return errorJson("unknown_tool", "No tool named '${call.name}' is registered")
+            ?: return PreparedCall(
+                call = call,
+                answered = errorJson("unknown_tool", "No tool named '${call.name}' is registered"),
+            )
+
+        ToolArgumentValidator.validate(handler.definition.inputSchemaJson, call.argumentsJson)
+            ?.let { problem ->
+                return PreparedCall(call, answered = errorJson("invalid_arguments", problem))
+            }
 
         val decision = if (call.name in allowedForRun && !call.recovered) {
             ToolApprovalDecision.ALLOW_ONCE
@@ -317,7 +382,45 @@ class DefaultAgentOrchestrator(
         }
 
         when (decision) {
-            ToolApprovalDecision.DENY -> return errorJson("permission_denied", "The user or policy denied this tool call")
+            ToolApprovalDecision.DENY -> return PreparedCall(
+                call = call,
+                answered = errorJson(
+                    "permission_denied",
+                    "The user declined this tool call. Do not call it again this run; continue " +
+                        "without it or explain what you need from the user.",
+                ),
+            )
+            // The two silent refusals differ from a declined call in what the model should do
+            // next: nobody was there to say no, so the limitation is worth naming in the reply.
+            ToolApprovalDecision.DENY_TIMEOUT -> return PreparedCall(
+                call = call,
+                answered = errorJson(
+                    "approval_timeout",
+                    "The approval request expired with nobody answering it; the run may be " +
+                        "unattended. Continue without the tool, say so in your reply, and do not " +
+                        "immediately retry.",
+                ),
+            )
+            ToolApprovalDecision.DENY_UNATTENDED -> return PreparedCall(
+                call = call,
+                answered = errorJson(
+                    "approval_unattended",
+                    "Nobody could be asked to approve this call: the run is unattended and no " +
+                        "notification could be posted. Continue without the tool and mention the " +
+                        "limitation.",
+                ),
+            )
+            // Not a refusal: Android declined a permission the tool needs after the user allowed
+            // the call itself. The model must not apologise for a decision nobody made, and only
+            // the user can change the setting, so retrying is pointless.
+            ToolApprovalDecision.DENY_OS_PERMISSION -> return PreparedCall(
+                call = call,
+                answered = errorJson(
+                    "os_permission_denied",
+                    "Android denied a permission '${call.name}' needs; the user may need to grant " +
+                        "it in system settings. Do not retry this run; say what is missing.",
+                ),
+            )
             // Remembering past the run is the gate's business, not the loop's; here both mean the
             // same thing — do not ask again before this run ends.
             // A recovered call grants nothing forward: allowing this one says nothing about the
@@ -326,10 +429,48 @@ class DefaultAgentOrchestrator(
                 if (!call.recovered) allowedForRun += call.name
             ToolApprovalDecision.ALLOW_ONCE -> Unit
         }
-
-        return runCatching { handler.execute(call.argumentsJson) }
-            .getOrElse { errorJson("tool_error", it.message ?: it::class.java.simpleName) }
+        return PreparedCall(call = call, handler = handler)
     }
+
+    /** Runs a prepared call under the tool's own deadline, answering an already-decided call as-is. */
+    private suspend fun runTool(prepared: PreparedCall): String {
+        prepared.answered?.let { return it }
+        val handler = prepared.handler ?: return errorJson("tool_error", "No handler")
+        val timeoutMillis = handler.definition.timeoutMillis
+        return try {
+            // A handler that outlives its deadline must not hold the turn: the model gets told the
+            // call was abandoned and can continue, which is strictly better than a run that never
+            // ends.
+            withTimeoutOrNull(timeoutMillis) { handler.execute(prepared.call.argumentsJson) }
+                ?: errorJson(
+                    "tool_timeout",
+                    "The tool did not finish within ${timeoutMillis / 1_000} seconds and was " +
+                        "abandoned. Continue without its result or try a narrower call.",
+                )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            errorJson("tool_error", error.message ?: error::class.java.simpleName)
+        }
+    }
+
+    /** Whether this call's result puts outside content into the conversation. */
+    private fun bringsUntrustedContent(call: ToolCall, result: String): Boolean =
+        !isErrorResult(result) &&
+            toolRegistry.find(call.name)?.definition?.returnsUntrustedContent == true
+
+    private suspend fun executeTool(
+        call: ToolCall,
+        allowedForRun: MutableSet<String>,
+        untrustedContext: Boolean,
+    ): String = runTool(prepareTool(call, allowedForRun, untrustedContext))
+
+    private data class PreparedCall(
+        val call: ToolCall,
+        val handler: ToolHandler? = null,
+        /** The finished result for a call that never runs: unknown tool, bad arguments, or refused. */
+        val answered: String? = null,
+    )
 
     /**
      * Whether the conversation already carries content from outside.

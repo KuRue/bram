@@ -113,6 +113,12 @@ class SecureEndpointStore(
         .put("supportsToolCalling", supportsToolCalling)
         .put("allowInsecureHttp", allowInsecureHttp)
         .put("credentialAlias", credentialAlias)
+        .put("reasoningEffort", reasoningEffort)
+        // Headers routinely carry their own credentials (`x-api-key` and friends), so the map is
+        // stored encrypted under the same keystore key as the API key. Plain `customHeaders` from
+        // earlier versions is still read; the next save writes it encrypted.
+        .put("customHeadersEncrypted", encrypt(JSONObject(customHeaders).toString()))
+        .put("bodyOptionsJson", bodyOptionsJson)
 
     private fun JSONObject.toEndpoint(): RemoteEndpoint = RemoteEndpoint(
         id = getString("id"),
@@ -124,7 +130,20 @@ class SecureEndpointStore(
         supportsToolCalling = optBoolean("supportsToolCalling", true),
         allowInsecureHttp = optBoolean("allowInsecureHttp", false),
         credentialAlias = optString("credentialAlias", "endpoint-api-key"),
+        reasoningEffort = optString("reasoningEffort").takeIf(String::isNotBlank),
+        customHeaders = readCustomHeaders(),
+        bodyOptionsJson = optString("bodyOptionsJson", "{}"),
     )
+
+    /** The stored header map, from the encrypted field or the legacy plain one. */
+    private fun JSONObject.readCustomHeaders(): Map<String, String> {
+        val encrypted = optString("customHeadersEncrypted").takeIf(String::isNotBlank)
+        val decrypted = encrypted?.let { payload ->
+            runCatching { JSONObject(decrypt(payload)) }.getOrNull()
+        }
+        val headers = decrypted ?: optJSONObject("customHeaders") ?: return emptyMap()
+        return headers.keys().asSequence().associateWith { headers.optString(it) }
+    }
 
     private fun secretKey(endpointId: String, alias: String) = "secret.$endpointId.$alias"
 

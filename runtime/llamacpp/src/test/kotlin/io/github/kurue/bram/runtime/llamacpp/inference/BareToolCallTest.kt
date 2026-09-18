@@ -2,6 +2,8 @@ package io.github.kurue.bram.runtime.llamacpp.inference
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -25,6 +27,17 @@ class BareToolCallTest {
     @Test
     fun `recovers without the surrounding brackets`() {
         assertEquals("write_note", BareToolCall.recover("write_note(name='x')", offered)?.optString("name"))
+    }
+
+    @Test
+    fun `every recovered call gets its own id`() {
+        // A fixed id per tool name would collide with the same tool recovered in an earlier turn,
+        // and a replayed history must keep every call result matched to exactly one call.
+        val first = BareToolCall.recover("[write_note(name='x')]", offered)?.optString("id")
+        val second = BareToolCall.recover("[write_note(name='x')]", offered)?.optString("id")
+        assertNotNull(first)
+        assertNotNull(second)
+        assertNotEquals(first, second)
     }
 
     @Test

@@ -9,8 +9,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -47,9 +47,10 @@ fun TasksScreen(
     var minutes by remember { mutableStateOf("") }
 
     Column(
-        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        PanelHandle()
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -115,21 +116,19 @@ fun TasksScreen(
             }
         }
 
-        LazyColumn(
-            Modifier.fillMaxSize(),
+        Column(
+            Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (state.tasks.isEmpty()) {
-                item {
-                    Text(
-                        "Nothing queued. Schedule a task and Bram runs it as a named session.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(4.dp),
-                    )
-                }
+                Text(
+                    "Nothing queued. Schedule a task and Bram runs it as a named session.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(4.dp),
+                )
             }
-            items(state.tasks, key = { it.id }) { task ->
+            state.tasks.forEach { task ->
                 TaskCard(task, onCancel, onRetry, onDelete)
             }
         }

@@ -9,6 +9,15 @@ data class ToolDefinition(
     val requiredPermissions: Set<String> = emptySet(),
     val readOnly: Boolean = true,
     /**
+     * How long one call may run before the harness abandons it and tells the model so.
+     *
+     * A handler without its own deadline would otherwise stall the whole turn — an approval that
+     * cannot be answered, a server that accepted the connection and went quiet. Tools that
+     * legitimately need longer (a long shell command) raise this rather than leaving the run
+     * without any bound at all.
+     */
+    val timeoutMillis: Long = 60_000,
+    /**
      * The argument names that say what a call acts on, used to scope a remembered allowance.
      *
      * A permission granted for good has to be granted for something. "Always allow `run_command`"
@@ -43,6 +52,8 @@ data class GenerationRequest(
     /** How to sample. Carried whole, since the settings only make sense together. */
     val sampler: SamplerSettings = SamplerSettings(),
     val requestId: String,
+    /** Stable across every model/tool round in one conversation, for provider-side prompt caches. */
+    val sessionId: String? = null,
 )
 
 /**
@@ -78,6 +89,8 @@ data class GenerationMetrics(
     val processPssBytes: Long? = null,
     /** Prompt tokens covered by the KV cache kept from the previous turn; null when unknown. */
     val cachedPromptTokens: Int? = null,
+    /** Expert-streaming telemetry, non-null only when the run streamed experts from flash. */
+    val streaming: StreamingMetrics? = null,
 ) {
     val promptTokensPerSecond: Double?
         get() = promptMillis.takeIf { it > 0 }?.let { promptTokens * 1_000.0 / it }
@@ -86,6 +99,14 @@ data class GenerationMetrics(
         get() = decodeMillis.takeIf { it > 0 }?.let { outputTokens * 1_000.0 / it }
 }
 
+/** What an expert-streamed run read and held, cumulative for the loaded model. */
+data class StreamingMetrics(
+    val flashMiB: Long,
+    val residentMiB: Long,
+    val evictions: Long,
+    val denseMiB: Long,
+)
+
 sealed interface GenerationEvent {
     data class Started(
         val runtimeDescription: String,
@@ -93,6 +114,13 @@ sealed interface GenerationEvent {
         val reasoningFormat: ReasoningFormat? = null,
     ) : GenerationEvent
     data class TextDelta(val text: String) : GenerationEvent
+    /**
+     * Reasoning the runtime separated from the answer, streamed as it is written.
+     *
+     * Remote providers that emit a reasoning channel put it beside the text, not inside it; without
+     * this the app could only ever show reasoning it managed to parse back out of the reply.
+     */
+    data class ReasoningDelta(val text: String) : GenerationEvent
     data class ToolCallReady(val call: ToolCall) : GenerationEvent
     data class Usage(val usage: TokenUsage) : GenerationEvent
     data class Metrics(val metrics: GenerationMetrics) : GenerationEvent

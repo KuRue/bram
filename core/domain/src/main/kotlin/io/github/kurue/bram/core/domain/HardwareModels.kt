@@ -121,7 +121,7 @@ data class LocalModelRecord(
         modelName = fileName,
         location = ModelLocation.LOCAL,
         contextWindowTokens = preferredContextTokens,
-        capabilities = setOf(ModelCapability.TEXT),
+        capabilities = setOf(ModelCapability.TEXT, ModelCapability.TOOL_CALLING),
     )
 }
 
@@ -144,6 +144,14 @@ fun isHybridArchitecture(architecture: String): Boolean {
         arch.startsWith("jamba") ||
         arch.startsWith("lfm")
 }
+
+/**
+ * Whether an architecture's routed experts can be streamed from flash (see the expert-stream
+ * recipe registry in the native runtime). Only these are offered the "Stream experts" setting.
+ * Keep in step with `kRecipes` in expert_stream.cpp.
+ */
+fun isStreamableMoeArchitecture(architecture: String): Boolean =
+    architecture.trim().lowercase() in setOf("deepseek2", "deepseek4", "qwen3moe", "qwen35moe")
 
 data class ExecutionPlan(
     val id: String,

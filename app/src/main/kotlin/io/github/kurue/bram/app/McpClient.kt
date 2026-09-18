@@ -21,6 +21,11 @@ data class McpServerTool(
     val name: String,
     val description: String,
     val inputSchemaJson: String,
+    /**
+     * The server's own `readOnlyHint`, treated as a hint and nothing more: the server is untrusted,
+     * so this classifies the tool (it may join a read-only batch) but never silences the gate.
+     */
+    val readOnly: Boolean = false,
 )
 
 /**
@@ -62,14 +67,30 @@ class McpClient(
         )
     }
 
-    /** Lists the tools the server advertises, after the handshake. */
+    /**
+     * Lists the tools the server advertises, after the handshake.
+     *
+     * The protocol pages `tools/list` with an opaque cursor, so a server with hundreds of tools is
+     * read to the end rather than truncated at the first page. A page cap and an overall tool cap
+     * keep a hostile or broken server from looping the client forever.
+     */
     suspend fun listTools(): List<McpServerTool> = withContext(Dispatchers.IO) {
-        val result = request(
-            method = "tools/list",
-            params = JSONObject(),
-            timeoutMillis = LIST_TIMEOUT_MILLIS,
-        ).optJSONObject("result")
-        parseTools(result?.optJSONArray("tools"))
+        val collected = mutableListOf<McpServerTool>()
+        var cursor: String? = null
+        var pages = 0
+        while (pages < MAX_TOOL_PAGES && collected.size < MAX_TOOLS) {
+            pages++
+            val params = JSONObject().apply { cursor?.let { put("cursor", it) } }
+            val result = request(
+                method = "tools/list",
+                params = params,
+                timeoutMillis = LIST_TIMEOUT_MILLIS,
+            ).optJSONObject("result")
+            collected += parseTools(result?.optJSONArray("tools"), limit = MAX_TOOLS - collected.size)
+            cursor = result?.optString("nextCursor")?.takeIf(String::isNotBlank)
+            if (cursor == null) break
+        }
+        collected.take(MAX_TOOLS)
     }
 
     /** Runs one of the listed tools; the response is the tool result text for the model. */
@@ -91,12 +112,13 @@ class McpClient(
         notification: Boolean = false,
         timeoutMillis: Int,
     ): JSONObject {
+        val requestId = if (notification) null else nextId++
         val payload = JSONObject()
             .put("jsonrpc", "2.0")
-            .apply { if (!notification) put("id", nextId++) }
+            .apply { requestId?.let { put("id", it) } }
             .put("method", method)
             .put("params", params)
-        val body = post(payload.toString(), timeoutMillis)
+        val body = post(payload.toString(), timeoutMillis, requestId)
         if (notification) return JSONObject()
         val response = runCatching { JSONObject(body) }.getOrElse {
             throw McpException("bad_response", "The server answered with something that is not JSON-RPC")
@@ -115,7 +137,7 @@ class McpClient(
      * POSTs a JSON-RPC frame, follows only same-origin redirects, and returns the response body
      * whether it arrived as JSON or as SSE frames.
      */
-    private fun post(payload: String, timeoutMillis: Int): String {
+    private fun post(payload: String, timeoutMillis: Int, expectedId: Int?): String {
         var current = URL(server.baseUrl.trimEnd('/'))
         val originHost = current.host
         repeat(MAX_REDIRECTS + 1) {
@@ -160,7 +182,7 @@ class McpClient(
                 }
                 val contentType = connection.contentType?.lowercase().orEmpty()
                 val body = readCapped(connection.inputStream)
-                return if (contentType.contains("text/event-stream")) parseSse(body) else body
+                return if (contentType.contains("text/event-stream")) parseSse(body, expectedId) else body
             } finally {
                 connection.disconnect()
             }
@@ -168,26 +190,33 @@ class McpClient(
         throw McpException("redirect", "The server redirected more than $MAX_REDIRECTS times")
     }
 
-    /** A POST answered with SSE carries the JSON-RPC message in `data:` frames; the last one wins. */
-    private fun parseSse(body: String): String {
-        val frames = body.lineSequence()
+    /**
+     * A POST answered with SSE carries the JSON-RPC message in `data:` frames; the frame whose id
+     * matches this request wins. An earlier implementation took the last frame, which a server
+     * that interleaves notifications (or answers another request first) could derail.
+     *
+     * With [expectedId] null — a notification, which has no answer — any frame is accepted and an
+     * empty stream is fine.
+     */
+    private fun parseSse(body: String, expectedId: Int?): String {
+        val messages = body.lineSequence()
             .filter { it.startsWith("data:") }
             .map { it.removePrefix("data:").trim() }
+            .mapNotNull { frame -> runCatching { JSONObject(frame) }.getOrNull() }
             .toList()
-        val last = frames.lastOrNull()
-            ?: throw McpException("bad_response", "The server answered an empty event stream")
-        // A response to one request arrives as one message; frames before it are server-initiated
-        // messages with other ids, which this client has no use for.
-        return runCatching { JSONObject(last) }.getOrElse {
-            throw McpException("bad_response", "The server answered an event that is not JSON-RPC")
-        }.toString()
+        if (expectedId == null) return messages.lastOrNull()?.toString() ?: "{}"
+        messages.firstOrNull { it.optInt("id", -1) == expectedId }?.let { return it.toString() }
+        if (messages.isEmpty()) {
+            throw McpException("bad_response", "The server answered an empty event stream")
+        }
+        throw McpException("bad_response", "The server answered events for other requests and none for this one")
     }
 
-    private fun parseTools(tools: JSONArray?): List<McpServerTool> {
-        if (tools == null) return emptyList()
+    private fun parseTools(tools: JSONArray?, limit: Int): List<McpServerTool> {
+        if (tools == null || limit <= 0) return emptyList()
         val out = mutableListOf<McpServerTool>()
         for (index in 0 until tools.length()) {
-            if (out.size >= MAX_TOOLS) break
+            if (out.size >= limit) break
             val entry = tools.optJSONObject(index) ?: continue
             val name = entry.optString("name").trim()
             // Names become tool-call keys and appear in the transcript; reject anything that is
@@ -197,7 +226,13 @@ class McpClient(
             val schema = entry.optJSONObject("inputSchema")
             val schemaJson = schema?.toString()?.take(MAX_SCHEMA_CHARS)
                 ?: DEFAULT_SCHEMA
-            out += McpServerTool(name, description, schemaJson)
+            val annotations = entry.optJSONObject("annotations")
+            out += McpServerTool(
+                name = name,
+                description = description,
+                inputSchemaJson = schemaJson,
+                readOnly = annotations?.optBoolean("readOnlyHint", false) == true,
+            )
         }
         return out
     }
@@ -252,7 +287,10 @@ class McpClient(
         const val LIST_TIMEOUT_MILLIS = 30_000
         const val CALL_TIMEOUT_MILLIS = 600_000
         const val MAX_REDIRECTS = 3
-        const val MAX_TOOLS = 100
+
+        /** An overall ceiling across pages; beyond this the offered set is unusable anyway. */
+        const val MAX_TOOLS = 500
+        const val MAX_TOOL_PAGES = 20
         const val MAX_DESCRIPTION_CHARS = 2_000
         const val MAX_SCHEMA_CHARS = 64 * 1_024
         const val MAX_RESPONSE_CHARS = 4 * 1_024 * 1_024

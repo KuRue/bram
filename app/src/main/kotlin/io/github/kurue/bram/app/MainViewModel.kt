@@ -32,6 +32,7 @@ import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryPrompt
 import io.github.kurue.bram.core.domain.MemoryRecord
 import io.github.kurue.bram.core.domain.ModelId
+import io.github.kurue.bram.core.domain.ProviderProfile
 import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.RunJournalEntry
@@ -42,6 +43,7 @@ import io.github.kurue.bram.core.domain.SkillImportOutcome
 import io.github.kurue.bram.core.domain.SkillPackage
 import io.github.kurue.bram.core.domain.SkillPrompt
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
+import io.github.kurue.bram.core.domain.ToolResultBudget
 import io.github.kurue.bram.core.domain.ModelRuntime
 import io.github.kurue.bram.core.domain.ModelCapability
 import io.github.kurue.bram.core.domain.PrivacyClass
@@ -61,6 +63,8 @@ import io.github.kurue.bram.core.agent.RuleBasedModelRouter
 import io.github.kurue.bram.platform.android.CpuTopology
 import io.github.kurue.bram.platform.android.RoutingSettingsStore
 import io.github.kurue.bram.runtime.llamacpp.ModelImportProgress
+import io.github.kurue.bram.runtime.openai.RemoteModelCatalog
+import io.github.kurue.bram.runtime.openai.RemoteModelInfo
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -224,6 +228,17 @@ data class AcceleratorProbe(
     val usable: Boolean get() = AcceleratorAgreement.isUsable(agreement)
 }
 
+/** Builds the persisted winning-backend summary without treating its literal percent as a format token. */
+internal fun successfulAutoConfigureNote(
+    backendLabel: String,
+    promptTokensPerSecond: Double,
+    decodeTokensPerSecond: Double,
+    agreement: Double,
+    measuredOn: String,
+): String = "$backendLabel: ${promptTokensPerSecond.toInt()} prompt tok/s, " +
+    "${decodeTokensPerSecond.toInt()} decode tok/s, " +
+    "${(agreement * 100).toInt()}% agreement. Measured $measuredOn."
+
 /** Accelerator families Bram can validate against the CPU reference. */
 enum class AcceleratorTarget(val label: String, val devicePrefix: String) {
     VULKAN("Vulkan", "Vulkan"),
@@ -374,6 +389,8 @@ data class AppUiState(
     /** The profile a load uses. Every model has at least a default one. */
     val activeProfileId: String? = null,
     val endpoints: List<RemoteEndpoint> = emptyList(),
+    /** Result of the most recent OpenAI-compatible /models lookup in the profile editor. */
+    val remoteModelDiscovery: RemoteModelDiscovery = RemoteModelDiscovery(),
     val selectedRuntimeId: String? = null,
     val loadedModelId: String? = null,
     val cpuValidated: Boolean = false,
@@ -389,6 +406,16 @@ data class AppUiState(
     val liteRtLoadDetail: String? = null,
     val messages: List<ConversationMessage> = emptyList(),
     val isGenerating: Boolean = false,
+    /**
+     * Messages the user sent while a turn was already running. They are held here — not in
+     * [messages], which the in-flight turn overwrites as it settles — and each one starts a
+     * fresh turn as soon as the previous reply finishes.
+     */
+    val queuedMessages: List<String> = emptyList(),
+    /** Current model phase, shared by the in-app instrument and foreground notification. */
+    val modelPhase: ModelPhase = ModelPhase.IDLE,
+    /** Rolling decode rate while a reply is streaming; final runtime metrics replace it. */
+    val liveDecodeTokensPerSecond: Double? = null,
     val status: String? = null,
     val error: String? = null,
     val lastUsage: TokenUsage? = null,
@@ -515,6 +542,7 @@ data class AppUiState(
 }
 
 data class EndpointDraft(
+    val id: String? = null,
     val displayName: String,
     val baseUrl: String,
     val modelName: String,
@@ -522,6 +550,18 @@ data class EndpointDraft(
     val apiKey: String,
     val allowInsecureHttp: Boolean,
     val apiKind: RemoteApiKind = RemoteApiKind.CHAT_COMPLETIONS,
+    val reasoningEffort: String? = null,
+    val customHeadersText: String = "",
+    val bodyOptionsJson: String = "{}",
+    /** Whether the server accepts tool definitions; false keeps tools out of its requests. */
+    val supportsToolCalling: Boolean = true,
+)
+
+data class RemoteModelDiscovery(
+    val endpointId: String? = null,
+    val loading: Boolean = false,
+    val models: List<RemoteModelInfo> = emptyList(),
+    val error: String? = null,
 )
 
 /** One configured MCP server as the settings screen shows it after a refresh. */
@@ -702,18 +742,29 @@ class MainViewModel(
                 conversationId = task.conversationId,
                 messages = listOf(ConversationMessage(role = MessageRole.USER, content = task.prompt)),
                 identity = BramDefaults.IDENTITY,
-                maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
+                maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
                 sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
-                profileInstructions = runInstructions(snapshot),
+                profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
             )
             try {
                 container.agent().run(request, selection.runtime).collect { event ->
                     when (event) {
                         is AgentEvent.Status -> Unit
+                        is AgentEvent.ToolsSelected -> {
+                            android.util.Log.d("BramTools", "offering ${event.names.size} tools: ${event.names.joinToString()}")
+                        }
                         is AgentEvent.Reasoning -> Unit
+                        is AgentEvent.ReasoningDelta -> Unit
                         is AgentEvent.ContextPrepared -> attemptActivity += "Context prepared (${event.estimatedInputTokens} tokens)"
                         is AgentEvent.ToolStarted -> attemptActivity += "Called ${event.call.name}"
-                        is AgentEvent.ToolFinished -> Unit
+                        is AgentEvent.ToolFinished -> {
+                            // A task run can author a skill too; refresh and nudge exactly like an
+                            // interactive run, or a draft would wait unseen for the next app open.
+                            if (event.call.name == "propose_skill") {
+                                refreshSkills()
+                                maybePostSkillDraftNotification(event.call.argumentsJson, event.result)
+                            }
+                        }
                         is AgentEvent.TextDelta -> Unit
                         is AgentEvent.Usage -> Unit
                         is AgentEvent.Metrics -> Unit
@@ -809,6 +860,16 @@ class MainViewModel(
         viewModelScope.launch {
             runCatching { container.conversationStore.save(conversationId, messages) }
                 .onSuccess { summary ->
+                    // The first save creates the file, which is the earliest a per-conversation
+                    // setting can persist — so a mode or privacy class chosen before the first
+                    // message is written now, rather than surviving only in memory.
+                    val snapshot = mutableState.value
+                    if (snapshot.permissionMode != PermissionMode.AUTO) {
+                        runCatching { container.conversationStore.setPermissionMode(summary.id, snapshot.permissionMode) }
+                    }
+                    if (snapshot.privacyClass != PrivacyClass.STANDARD) {
+                        runCatching { container.conversationStore.setPrivacyClass(summary.id, snapshot.privacyClass) }
+                    }
                     val summaries = runCatching { container.conversationStore.list() }
                         .getOrDefault(listOf(summary))
                     mutableState.update {
@@ -1359,7 +1420,11 @@ class MainViewModel(
             // Ask the runtime what it can see now rather than trusting what was detected at start.
             // The inference process restarts across loads, and a backend that registered late was
             // missing from the list, so a profile configured for it silently loaded on the CPU.
-            val backends = detectBackendsNow()
+            // A fresh probe can be temporarily incomplete while the isolated inference process is
+            // restarting. Keep capabilities already detected during this app session and merge in
+            // anything the new probe finds; otherwise skipping one freshly reported backend (such
+            // as Vulkan) can accidentally collapse the sweep to CPU only.
+            val backends = (snapshot.availableBackends + detectBackendsNow()).distinct()
             refreshMeasurementFingerprint()
             mutableState.update { it.copy(cooldownOverride = false) }
             sweepGate()?.let { reason ->
@@ -1369,7 +1434,11 @@ class MainViewModel(
             waitForCooldown()
 
             val candidates = backends
-                .filter(RuntimeBackend::offloadsToAccelerator)
+                // Vulkan is still available for manual profiles, but its validation path is not
+                // reliable enough to spend time on during the one-tap setup pass yet.
+                .filter { backend ->
+                    backend.offloadsToAccelerator && backend != RuntimeBackend.VULKAN
+                }
                 .mapNotNull { backend ->
                     AcceleratorTarget.entries
                         .firstOrNull { it.devicePrefix == backend.devicePrefix }
@@ -1550,9 +1619,13 @@ class MainViewModel(
             val note = when {
                 best != null -> {
                     val (backend, report) = best
-                    "${backend.label}: ${report.acceleratorPromptTokPerSec.toInt()} prompt tok/s, " +
-                        "${report.acceleratorDecodeTokPerSec.toInt()} decode tok/s, " +
-                        "${(report.agreement * 100).toInt()}% agreement. Measured %s.".format(today())
+                    successfulAutoConfigureNote(
+                        backendLabel = backend.label,
+                        promptTokensPerSecond = report.acceleratorPromptTokPerSec,
+                        decodeTokensPerSecond = report.acceleratorDecodeTokPerSec,
+                        agreement = report.agreement,
+                        measuredOn = today(),
+                    )
                 }
                 measured.isEmpty() -> "No accelerator to measure, so this runs on the CPU."
                 // A backend can agree with the reference and still be slower than it — agreement
@@ -1832,9 +1905,7 @@ class MainViewModel(
         viewModelScope.launch {
             val state = mutableState.value
             val profile = state.profiles.firstOrNull { it.id == profileId } ?: return@launch
-            // A model with no profile cannot be loaded, and the store would just recreate a default
-            // on the next sync, so the last one stays.
-            if (state.profiles.count { it.modelId == profile.modelId } <= 1) return@launch
+            val removesModel = state.profiles.count { it.modelId == profile.modelId } == 1
             if (state.activeProfileId == profileId && state.loadedModelId != null) {
                 unloadModelInternal(forget = false)
             }
@@ -1844,7 +1915,12 @@ class MainViewModel(
                 container.routingSettings.setRoutingPool(updatedPool)
             }
             container.modelProfileStore.delete(profileId)
-            reloadProfiles()
+            if (removesModel) {
+                container.localModelStore.remove(profile.modelId)
+                reloadLocalModels()
+            } else {
+                reloadProfiles()
+            }
         }
     }
 
@@ -1963,6 +2039,10 @@ class MainViewModel(
                 threadPriority = profile.threadPriority,
                 loadMode = profile.loadMode,
                 hexFlags = profile.hexFlags,
+                streamExperts = profile.streamExperts,
+                streamCacheMb = profile.streamCacheMb,
+                streamDenseAnon = profile.streamDenseAnon,
+                streamOverlap = profile.streamOverlap,
             )
         }
         outcome.onSuccess { result ->
@@ -3312,17 +3392,76 @@ class MainViewModel(
                 return@launch
             }
             val endpoint = RemoteEndpoint(
-                id = UUID.randomUUID().toString(),
+                id = draft.id ?: UUID.randomUUID().toString(),
                 displayName = draft.displayName.trim(),
                 baseUrl = draft.baseUrl.trim().trimEnd('/'),
                 modelName = draft.modelName.trim(),
                 apiKind = draft.apiKind,
                 contextWindowTokens = draft.contextWindowTokens,
-                supportsToolCalling = true,
+                supportsToolCalling = draft.supportsToolCalling,
                 allowInsecureHttp = draft.allowInsecureHttp,
+                reasoningEffort = draft.reasoningEffort,
+                customHeaders = parseHeaders(draft.customHeadersText),
+                bodyOptionsJson = draft.bodyOptionsJson.trim().ifBlank { "{}" },
             )
-            container.endpointStore.upsert(endpoint, draft.apiKey)
+            // A blank key while editing means "leave the stored secret alone"; new profiles still
+            // treat blank as no credential.
+            val credential = if (draft.id != null && draft.apiKey.isBlank()) null else draft.apiKey
+            container.endpointStore.upsert(endpoint, credential)
             reloadEndpoints(selectId = endpoint.id)
+        }
+    }
+
+    fun discoverRemoteModels(draft: EndpointDraft) {
+        if (draft.baseUrl.isBlank()) {
+            mutableState.update {
+                it.copy(remoteModelDiscovery = RemoteModelDiscovery(error = "Enter a server URL first."))
+            }
+            return
+        }
+        val uri = runCatching { URI(draft.baseUrl.trim()) }.getOrNull()
+        if (uri?.scheme == "http" && !draft.allowInsecureHttp) {
+            mutableState.update {
+                it.copy(remoteModelDiscovery = RemoteModelDiscovery(error = "Allow HTTP for this trusted local server first."))
+            }
+            return
+        }
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(remoteModelDiscovery = RemoteModelDiscovery(endpointId = draft.id, loading = true))
+            }
+            val credential = draft.apiKey.takeIf(String::isNotBlank)
+                ?: draft.id?.let { id ->
+                    val endpoint = mutableState.value.endpoints.firstOrNull { it.id == id }
+                    endpoint?.let { container.endpointStore.resolveCredential(id, it.credentialAlias) }
+                }.orEmpty()
+            runCatching { RemoteModelCatalog().list(draft.baseUrl, credential) }
+                .onSuccess { models ->
+                    // A provider may advertise models in a protocol Bram cannot speak; the profile
+                    // hides those rather than offering a choice that cannot work with either
+                    // selectable API.
+                    val profile = ProviderProfile.forBaseUrl(draft.baseUrl)
+                    val compatibleModels = models.filter { profile.supportsModel(it.id) }
+                    mutableState.update {
+                        it.copy(
+                            remoteModelDiscovery = RemoteModelDiscovery(
+                                endpointId = draft.id,
+                                models = compatibleModels,
+                                error = if (compatibleModels.isEmpty()) "The server returned no compatible models." else null,
+                            ),
+                        )
+                    }
+                }
+                .onFailure { failure ->
+                    mutableState.update {
+                        it.copy(
+                            remoteModelDiscovery = RemoteModelDiscovery(
+                                endpointId = draft.id,
+                                error = failure.message ?: "Could not list models.",
+                            ),
+                        )
+                    }
+                }
         }
     }
 
@@ -3352,10 +3491,8 @@ class MainViewModel(
             val servers = runCatching { container.mcpServerStore.list() }.getOrDefault(emptyList())
             val results = servers.map { server ->
                 val token = container.mcpServerStore.resolveToken(server.id)
-                val client = McpClient(server, token)
                 runCatching {
-                    client.connect()
-                    client.listTools()
+                    McpSessions.withClient(server, token) { client -> client.listTools() }
                 }.fold(
                     onSuccess = { tools ->
                         container.toolRegistry.setServerTools(
@@ -3409,6 +3546,7 @@ class MainViewModel(
         viewModelScope.launch {
             container.mcpServerStore.remove(serverId)
             container.toolRegistry.removeServerTools(serverId)
+            McpSessions.drop(serverId)
             refreshMcpServers()
         }
     }
@@ -3481,8 +3619,25 @@ class MainViewModel(
     fun rollbackSkill(skillId: String) {
         viewModelScope.launch {
             val message = when (val outcome = container.skillStore.rollback(skillId)) {
-                is SkillActionOutcome.Ok -> "Rolled back to the previous version."
+                is SkillActionOutcome.Ok -> "Rolled back to the newest version you approved."
                 is SkillActionOutcome.Failed -> "Could not roll back: ${outcome.reason}"
+            }
+            mutableState.update { it.copy(skillStatus = message) }
+            refreshSkills()
+        }
+    }
+
+    /** Leaves the skill installed but out of the prompt and the offered tool set. */
+    fun setSkillDisabled(skillId: String, disabled: Boolean) {
+        viewModelScope.launch {
+            val outcome = if (disabled) {
+                container.skillStore.disable(skillId)
+            } else {
+                container.skillStore.enable(skillId)
+            }
+            val message = when (outcome) {
+                is SkillActionOutcome.Ok -> if (disabled) "Skill disabled." else "Skill enabled."
+                is SkillActionOutcome.Failed -> "Could not change: ${outcome.reason}"
             }
             mutableState.update { it.copy(skillStatus = message) }
             refreshSkills()
@@ -3504,7 +3659,10 @@ class MainViewModel(
      * The profile's instructions with the active skills and the user's standing memories appended,
      * read fresh for every run so newly activated skills and freshly extracted facts apply at once.
      */
-    private suspend fun runInstructions(snapshot: AppUiState): String {
+    private suspend fun runInstructions(
+        snapshot: AppUiState,
+        contextWindowTokens: Int = 8_192,
+    ): String {
         val base = snapshot.activeProfile?.systemPrompt.orEmpty()
         val skills = runCatching { container.skillStore.activeSkills() }.getOrDefault(emptyList())
         // Rank skills by description similarity to this turn's ask, so the ones that matter land
@@ -3512,7 +3670,26 @@ class MainViewModel(
         // ranker returns the input unchanged, so every active skill still joins the prompt.
         val query = snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
         val ranked = container.skillSelection.rank(skills, query, container.embedder)
-        var prompt = SkillPrompt.append(base, ranked)
+        // Evaluate the same selection the orchestrator will make (deterministic, and its
+        // embeddings are cached) so a skill that merely duplicates an offered tool is not
+        // advertised at all — on a small model the duplicate is a lure away from the tool.
+        val offered = runCatching {
+            container.toolSelector.select(
+                query = query,
+                contextWindowTokens = contextWindowTokens,
+                available = container.toolRegistry.definitions(),
+            )
+        }.getOrDefault(emptyList())
+        val advertised = container.skillSelection.withoutCovered(ranked, offered, container.embedder)
+        for (skill in ranked) {
+            val coverage = container.skillSelection.toolCoverage(skill, offered, container.embedder)
+            android.util.Log.d(
+                "BramSkill",
+                "skill ${skill.name}: max tool coverage ${coverage ?: "<unavailable>"}, " +
+                    "${if (skill in advertised) "advertised" else "suppressed"}",
+            )
+        }
+        var prompt = SkillPrompt.append(base, advertised)
         // One nudge per conversation: surface a drafted (inactive) skill whose description matches
         // this task so the user learns it exists. Drafts are unreviewed text and are never followed
         // — only their existence is named — and the set keeps a match from being suggested twice.
@@ -3632,12 +3809,34 @@ class MainViewModel(
         activity = activity.toList(),
     )
 
+    /**
+     * Turns this turn's completed tool steps into TOOL messages so the next run replays what was
+     * already called and answered. The transcript on screen keeps showing them as activity rows on
+     * the assistant bubble; these messages exist for the model's history, bounded like the live run
+     * bounded them so a replay cannot carry more than the model already saw.
+     */
+    private fun toolResultMessages(
+        activity: List<AgentActivity>,
+        contextWindowTokens: Int,
+    ): List<ConversationMessage> =
+        activity.filterIsInstance<AgentActivity.ToolInvocation>()
+            .mapNotNull { invocation ->
+                invocation.result?.let { result ->
+                    ConversationMessage(
+                        role = MessageRole.TOOL,
+                        content = ToolResultBudget.apply(result, contextWindowTokens),
+                        toolCallId = invocation.id,
+                    )
+                }
+            }
+
     /** Starts a new thread rather than erasing the current one, which is now kept on disk. */
     fun clearChat() = startNewConversation()
 
     fun stopGeneration() {
         if (!mutableState.value.isGenerating) return
-        mutableState.update { it.copy(status = "Stopping…") }
+        // Stopping is an intent to halt, so anything waiting in the queue goes with it.
+        mutableState.update { it.copy(queuedMessages = emptyList(), status = "Stopping…") }
         generationJob?.cancel(CancellationException("Stopped by user"))
     }
 
@@ -3646,6 +3845,7 @@ class MainViewModel(
      * selected, which is when there is nothing to hold a foreground service for.
      */
     private fun pushModelStatus(phase: ModelPhase, detail: String? = null) {
+        mutableState.update { it.copy(modelPhase = phase) }
         val s = mutableState.value
         val name = s.loadedModelId
             ?.let { id -> s.localModels.firstOrNull { it.id.value == id }?.displayName }
@@ -3698,6 +3898,12 @@ class MainViewModel(
     fun send(text: String) {
         val prompt = text.trim()
         if (prompt.isEmpty()) return
+        // A turn in flight holds the transcript: appending now would be wiped when it settles.
+        // The message queues here instead and starts its own turn the moment the reply lands.
+        if (mutableState.value.isGenerating) {
+            mutableState.update { it.copy(queuedMessages = it.queuedMessages + prompt) }
+            return
+        }
         val priorMessages = mutableState.value.messages
         runTurn(priorMessages + ConversationMessage(role = MessageRole.USER, content = prompt))
     }
@@ -3753,6 +3959,16 @@ class MainViewModel(
         // the ViewModel is cleared. AgentTaskService keeps the process alive for the duration.
         generationJob = container.appScope.launch {
             container.turnMutex.withLock { runTurnInProgress(requestMessages, snapshot) }
+            // Anything the user sent mid-turn now runs, one message per turn, newest transcript
+            // first. runTurn refuses while a turn is live, and the previous finally has already
+            // cleared isGenerating, so the first queued message simply starts the next turn.
+            val queued = mutableState.value.queuedMessages
+            if (queued.isNotEmpty()) {
+                val next = queued.first()
+                mutableState.update { it.copy(queuedMessages = queued.drop(1)) }
+                val messages = mutableState.value.messages
+                runTurn(messages + ConversationMessage(role = MessageRole.USER, content = next))
+            }
         }
     }
 
@@ -3853,6 +4069,9 @@ class MainViewModel(
         val activity = mutableListOf<AgentActivity>()
         var thinkingStartedAt = 0L
         var thinkingMillisTotal = 0L
+        // Remote providers stream reasoning beside the text rather than inside it, so it is
+        // accumulated here and closed into a Thinking row when the round ends.
+        val remoteReasoning = StringBuilder()
         // Parsing is per round, not per turn. A format that reports no opening marker — LFM2.5
         // among them — has the prompt open the reasoning block, and the prompt does that again for
         // every segment after a tool result. Reading the whole turn as one string therefore treated
@@ -3863,24 +4082,59 @@ class MainViewModel(
         var roundReasoningRecorded = 0
         var thinking = false
         var failure: String? = null
+        var streamedTokens = 0
+        var decodeStartedAt = 0L
+        var lastRateUpdateAt = 0L
         return try {
             agent.run(
                 request = AgentRunRequest(
                     conversationId = conversationId,
                     messages = requestMessages,
                     identity = BramDefaults.IDENTITY,
-                    maxOutputTokens = minOf(2_048, selection.runtime.model.contextWindowTokens / 4),
+                    maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
                     sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
-                    profileInstructions = runInstructions(snapshot),
+                    profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
                 ),
                 runtime = selection.runtime,
             ).collect { event ->
                     when (event) {
                         is AgentEvent.Status -> {
                             mutableState.update { it.copy(status = event.text) }
-                            pushModelStatus(ModelPhase.GENERATING)
+                            // Preparation labels only before the first token: a status event that
+                            // mentions "prompt" or "context" mid-turn (memory recall, a tool
+                            // retry) must not flip an already-writing turn back to "System prompt".
+                            val preparing = assistantText.isEmpty() && (
+                                event.text.contains("context", ignoreCase = true) ||
+                                    event.text.contains("prompt", ignoreCase = true) ||
+                                    event.text.contains("prepar", ignoreCase = true)
+                                )
+                            pushModelStatus(if (preparing) ModelPhase.PREPARING else ModelPhase.GENERATING)
                         }
                         is AgentEvent.Reasoning -> reasoningFormat = event.format
+                        is AgentEvent.ReasoningDelta -> {
+                            val now = System.currentTimeMillis()
+                            if (remoteReasoning.isEmpty()) {
+                                thinkingStartedAt = now
+                                thinking = true
+                                pushModelStatus(ModelPhase.THINKING)
+                            }
+                            remoteReasoning.append(event.text)
+                            mutableState.update {
+                                it.copy(
+                                    messages = requestMessages + inFlightMessage(
+                                        assistantText,
+                                        activity + AgentActivity.Thinking(
+                                            text = remoteReasoning.toString(),
+                                            durationMillis = now - thinkingStartedAt,
+                                            inProgress = true,
+                                        ),
+                                    ),
+                                )
+                            }
+                        }
+                        is AgentEvent.ToolsSelected -> {
+                            android.util.Log.d("BramTools", "offering ${event.names.size} tools: ${event.names.joinToString()}")
+                        }
                         is AgentEvent.ContextPrepared -> mutableState.update {
                             it.copy(
                                 lastContextTokens = event.estimatedInputTokens,
@@ -3894,6 +4148,26 @@ class MainViewModel(
                             )
                         }
                         is AgentEvent.TextDelta -> {
+                            val rateNow = android.os.SystemClock.elapsedRealtime()
+                            if (decodeStartedAt == 0L) {
+                                decodeStartedAt = rateNow
+                                // The first token is writing, whatever the last status event
+                                // said: a late "…prompt…" status used to strand the phase here
+                                // while the reply streamed under a "System prompt" label.
+                                if (mutableState.value.modelPhase == ModelPhase.PREPARING) {
+                                    pushModelStatus(ModelPhase.GENERATING)
+                                }
+                            }
+                            // Local runtimes emit one delta per decoded token. Remote providers
+                            // generally do the same, making this a useful live estimate until their
+                            // authoritative metrics arrive at the end of the turn.
+                            streamedTokens += 1
+                            if (rateNow - lastRateUpdateAt >= 200L) {
+                                val elapsed = (rateNow - decodeStartedAt).coerceAtLeast(1L)
+                                val liveRate = streamedTokens * 1_000.0 / elapsed
+                                mutableState.update { it.copy(liveDecodeTokensPerSecond = liveRate) }
+                                lastRateUpdateAt = rateNow
+                            }
                             assistantText += event.text
                             roundText += event.text
                             val streaming = streamingReply(roundText, reasoningFormat)
@@ -3948,10 +4222,20 @@ class MainViewModel(
                             // wrote, drop the call itself — the row below says it better than
                             // `[web_fetch(url='…')]` sitting in the middle of the answer does.
                             val finished = streamingReply(roundText, reasoningFormat)
-                            stripBareCalls(finished.visibleText).takeIf(String::isNotBlank)
+                            stripBareCalls(finished.visibleText, event.call.name).takeIf(String::isNotBlank)
                                 ?.let { visibleParts += it }
                             roundText = ""
                             roundReasoningRecorded = 0
+                            // Remote reasoning for this round closes here, so the rows read in the
+                            // order the model did things: thought, called, thought again.
+                            if (remoteReasoning.isNotBlank()) {
+                                val took = if (thinkingStartedAt > 0) System.currentTimeMillis() - thinkingStartedAt else 0L
+                                activity += AgentActivity.Thinking(text = remoteReasoning.toString(), durationMillis = took)
+                                thinkingMillisTotal += took
+                                remoteReasoning.clear()
+                                thinkingStartedAt = 0L
+                                thinking = false
+                            }
                             activity += AgentActivity.ToolInvocation(
                                 id = event.call.id,
                                 name = event.call.name,
@@ -4001,6 +4285,7 @@ class MainViewModel(
                         is AgentEvent.Metrics -> mutableState.update {
                             it.copy(
                                 lastMetrics = event.metrics,
+                                liveDecodeTokensPerSecond = event.metrics.decodeTokensPerSecond,
                                 sessionOutputTokens = it.sessionOutputTokens + event.metrics.outputTokens,
                             )
                         }
@@ -4013,11 +4298,22 @@ class MainViewModel(
                         is AgentEvent.Failed -> failure = event.message
                     }
                 }
-            when {
+            val outcome = when {
                 completedMessage != null -> TurnOutcome.Completed
                 failure != null -> TurnOutcome.Failed(failure, selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
                 else -> TurnOutcome.Failed("The run ended without producing a reply.", selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
             }
+            // Feed the reachability signal routing consults: a failed remote turn marks the
+            // endpoint down briefly, a completed one clears it. A stopped run says nothing about
+            // reachability either way.
+            selection.endpointId?.let { endpointId ->
+                when (outcome) {
+                    is TurnOutcome.Completed -> EndpointHealth.markSuccess(endpointId)
+                    is TurnOutcome.Failed -> EndpointHealth.markFailure(endpointId)
+                    is TurnOutcome.Cancelled -> Unit
+                }
+            }
+            outcome
         } catch (_: CancellationException) {
             TurnOutcome.Cancelled
         } catch (error: Throwable) {
@@ -4053,6 +4349,11 @@ class MainViewModel(
                     0L
                 }
                 val finalActivity = buildList {
+                    // Reasoning a remote provider streamed beside the text, unless a tool round
+                    // already closed it into the activity list.
+                    if (remoteReasoning.isNotBlank()) {
+                        add(AgentActivity.Thinking(remoteReasoning.toString(), durationMillis = thinkingMillis))
+                    }
                     reply.second.takeIf(String::isNotBlank)?.let {
                         add(AgentActivity.Thinking(it, durationMillis = thinkingMillis))
                     }
@@ -4060,14 +4361,21 @@ class MainViewModel(
                 }
                 val settled = when {
                     reply.first.isNotBlank() || finalActivity.isNotEmpty() ->
-                        requestMessages + (completedMessage ?: ConversationMessage(
-                            role = MessageRole.ASSISTANT,
-                            content = reply.first,
-                        )).copy(content = reply.first, activity = finalActivity)
+                        requestMessages +
+                            (completedMessage ?: ConversationMessage(
+                                role = MessageRole.ASSISTANT,
+                                content = reply.first,
+                            )).copy(content = reply.first, activity = finalActivity) +
+                            toolResultMessages(finalActivity, selection.runtime.model.contextWindowTokens)
                     else -> requestMessages
                 }
                 mutableState.update {
-                    it.copy(messages = settled, isGenerating = false, status = null)
+                    it.copy(
+                        messages = settled,
+                        isGenerating = false,
+                        status = null,
+                        liveDecodeTokensPerSecond = null,
+                    )
                 }
                 // Persist whatever the turn produced, including a reply that was stopped part way,
                 // so the thread on disk matches what is on screen.
@@ -4313,11 +4621,21 @@ class MainViewModel(
                         runtime = container.runtime(endpoint),
                         localModel = null,
                         routingLabel = endpoint.displayName,
-                    ) to RoutingEstimates.remoteCandidate(endpoint),
+                        endpointId = endpoint.id,
+                    ) to RoutingEstimates.remoteCandidate(endpoint, available = EndpointHealth.isReachable(endpoint.id)),
                 )
             }
         }
         if (pairs.isEmpty()) return emptyList()
+
+        // A model picked in the pill is the user's decision, not a hint: if it is a runnable
+        // candidate at all, it runs and routing has no say. Privacy still hard-gates it — picking
+        // a remote endpoint in a phone-only conversation fails with the reason rather than
+        // silently running somewhere the user did not choose.
+        val forced = snapshot.selectedRuntimeId?.let { id ->
+            pairs.firstOrNull { (selection, _) -> selection.matchesRuntimeId(id) }
+        }
+        val candidates = forced?.let { listOf(it) } ?: pairs
 
         val decision = router.route(
             request = RoutingRequest(
@@ -4330,14 +4648,16 @@ class MainViewModel(
                 preferQuality = preferQuality,
                 localBias = if (privacyClass == PrivacyClass.PRIVATE_REMOTE_ALLOWED) 2.0 else 1.0,
             ),
-            candidates = pairs.map { it.second },
+            candidates = candidates.map { it.second },
         )
         val ordered = buildList {
             decision.selected?.let { selected ->
-                pairs.firstOrNull { it.second.model.id == selected.model.id }?.let { add(it.first) }
+                candidates.firstOrNull { it.second.model.id == selected.model.id }?.let { add(it.first) }
             }
-            decision.fallbacks.forEach { fallback ->
-                pairs.firstOrNull { it.second.model.id == fallback.model.id }?.let { add(it.first) }
+            if (forced == null) {
+                decision.fallbacks.forEach { fallback ->
+                    candidates.firstOrNull { it.second.model.id == fallback.model.id }?.let { add(it.first) }
+                }
             }
         }
         val label = ordered.firstOrNull()?.routingLabel
@@ -4389,8 +4709,24 @@ class MainViewModel(
         if (uri.scheme == "http" && !draft.allowInsecureHttp) {
             return "Enable insecure HTTP for this local endpoint or use HTTPS."
         }
+        if (runCatching { JSONObject(draft.bodyOptionsJson.ifBlank { "{}" }) }.isFailure) {
+            return "Advanced request options must be a JSON object."
+        }
+        val invalidHeader = draft.customHeadersText.lineSequence()
+            .map(String::trim).filter(String::isNotEmpty).firstOrNull { ':' !in it }
+        if (invalidHeader != null) return "Custom headers must use Name: value, one per line."
         return null
     }
+
+    private fun parseHeaders(text: String): Map<String, String> = text.lineSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .mapNotNull { line ->
+            val separator = line.indexOf(':')
+            if (separator <= 0) null else line.substring(0, separator).trim() to line.substring(separator + 1).trim()
+        }
+        .filterNot { (name, _) -> name.equals("Authorization", ignoreCase = true) }
+        .toMap()
 
     override fun onCleared() {
         // Deliberately does not cancel an in-flight run or close the inference connection: the run
@@ -4406,7 +4742,15 @@ class MainViewModel(
         val litertlmModel: LiteRtModelRecord? = null,
         /** User-facing profile/provider name, which can differ for two profiles of one GGUF. */
         val routingLabel: String,
+        /** Set for a remote endpoint, so its turn outcome can feed [EndpointHealth]. */
+        val endpointId: String? = null,
     ) {
+        /** Whether this candidate is the runtime the user picked in the model pill. */
+        fun matchesRuntimeId(id: String): Boolean =
+            localModel?.id?.value == id ||
+                litertlmModel?.id?.value == id ||
+                endpointId?.let { remoteRuntimeId(it) } == id
+
         /** Whether this candidate runs on-device, which changes how a failure is treated. */
         val isLocal: Boolean
             get() = localModel != null || litertlmModel != null
@@ -4490,11 +4834,19 @@ private fun org.json.JSONArray?.toIntList(): List<Int> {
 }
 
 /**
- * Removes call syntax a model wrote as text.
+ * Removes the call a recovered reply amounts to.
  *
- * Formats that mark their calls have them stripped by the runtime's parser, but the ones Bram
- * recovers from bare text are still sitting in the reply, so `[web_fetch(url='…')]` ended up in the
- * middle of the answer. The activity row above says the same thing better.
+ * A call recovered from bare text is the whole reply — that is the fence [BareToolCall] applies —
+ * so only a reply that *is* a call to the tool this round ran is cleared. An earlier version
+ * stripped any `word(...)` shape anywhere, which quietly deleted ordinary prose: an answer
+ * mentioning `f(x)` lost it.
  */
-internal fun stripBareCalls(text: String): String =
-    text.replace(Regex("""\[?\b\w+\((?:[^()]|\([^()]*\))*\)]?"""), "").trim()
+internal fun stripBareCalls(text: String, toolName: String): String {
+    val trimmed = text.trim()
+    val unbracketed = trimmed.trim('[', ']').trim()
+    val open = unbracketed.indexOf('(')
+    if (open <= 0 || !unbracketed.endsWith(")")) return text
+    val name = unbracketed.substring(0, open).trim()
+    if (name != toolName) return text
+    return ""
+}

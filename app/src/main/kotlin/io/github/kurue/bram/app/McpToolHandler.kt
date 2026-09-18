@@ -15,9 +15,11 @@ import org.json.JSONObject
  * server sent. Like WebSearch and WebFetch, this tool leaves the device, so it always reaches the
  * approval gate; the gate shows which arguments the server asked for.
  *
- * Each call uses a fresh session: a handshake per call is a few extra small POSTs, and it means a
- * stale session can never be half-replayed after the process was killed, which matters more than
- * the round trips.
+ * The server's `readOnlyHint` is honored only as a classification — a read-only tool may join a
+ * read-only batch — and never as a reason to skip the gate: the hint comes from the same untrusted
+ * server the call is going to, so the ask stays. Calls share a cached session per server (see
+ * [McpSessions]) rather than handshaking every time; a dropped session costs one extra round trip
+ * and is retried once.
  */
 class McpToolHandler(
     private val server: McpServer,
@@ -25,14 +27,14 @@ class McpToolHandler(
     private val token: String?,
 ) : ToolHandler {
     override val definition = ToolDefinition(
-        name = "mcp_${slug(server)}_${tool.name}",
+        name = toolName(server, tool.name),
         description = tool.description.ifBlank {
             "A tool provided by the MCP server ${server.displayName}. Its arguments are whatever " +
                 "the server defined in its input schema."
         },
         inputSchemaJson = tool.inputSchemaJson,
         requiredPermissions = setOf("internet"),
-        readOnly = false,
+        readOnly = tool.readOnly,
         // Whatever the server returns is text from another process, which is the same problem a
         // fetched page is. Bram cannot see what it wrapped or where the server got it.
         returnsUntrustedContent = true,
@@ -40,10 +42,10 @@ class McpToolHandler(
     )
 
     override suspend fun execute(argumentsJson: String): String {
-        val client = McpClient(server, token)
         return runCatching {
-            client.connect()
-            client.callTool(tool.name, argumentsJson)
+            McpSessions.withClient(server, token) { client ->
+                client.callTool(tool.name, argumentsJson)
+            }
         }.getOrElse { failure ->
             toolError(
                 "mcp_error",
@@ -68,5 +70,27 @@ class McpToolHandler(
             val words = server.displayName.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim()
             return "${words.replace(" ", "_").take(16)}_${server.id.take(4)}"
         }
+
+        /**
+         * The name the model calls, kept inside the tightest function-name limit providers impose
+         * (OpenAI accepts 64). A long server tool keeps its readable head and gains a short digest,
+         * so two names that truncate alike stay distinct.
+         */
+        fun toolName(server: McpServer, name: String): String {
+            val prefix = "mcp_${slug(server)}_"
+            val candidate = prefix + name
+            if (candidate.length <= MAX_TOOL_NAME_CHARS) return candidate
+            val digest = digest8(name)
+            val keep = (MAX_TOOL_NAME_CHARS - prefix.length - digest.length - 1).coerceAtLeast(0)
+            return prefix + name.take(keep) + "_" + digest
+        }
+
+        fun digest8(value: String): String =
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(value.toByteArray(Charsets.UTF_8))
+                .take(4)
+                .joinToString("") { "%02x".format(it) }
+
+        const val MAX_TOOL_NAME_CHARS = 64
     }
 }

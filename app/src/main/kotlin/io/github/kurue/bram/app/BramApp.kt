@@ -4,9 +4,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -15,12 +17,16 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -28,6 +34,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -50,6 +57,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
@@ -76,14 +84,18 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -98,6 +110,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clip
@@ -110,6 +123,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.Manifest
 import android.content.pm.PackageManager
@@ -119,6 +134,7 @@ import io.github.kurue.bram.core.domain.AgentActivity
 import org.json.JSONObject
 import io.github.kurue.bram.core.domain.Automation
 import io.github.kurue.bram.core.domain.isHybridArchitecture
+import io.github.kurue.bram.core.domain.isStreamableMoeArchitecture
 import io.github.kurue.bram.core.domain.CapabilityState
 import io.github.kurue.bram.core.domain.BackendMeasurement
 import io.github.kurue.bram.core.domain.ConversationMessage
@@ -135,6 +151,7 @@ import io.github.kurue.bram.core.domain.TuneCandidateResult
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryRecord
+import io.github.kurue.bram.core.domain.ProviderProfile
 import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.PrivacyClass
 import io.github.kurue.bram.core.domain.RemoteApiKind
@@ -143,6 +160,7 @@ import io.github.kurue.bram.core.domain.RoutingPoolSlot
 import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.RunJournalEntry
 import io.github.kurue.bram.core.domain.RunStatus
+import io.github.kurue.bram.core.domain.SkillOrigin
 import io.github.kurue.bram.core.domain.SkillPackage
 import io.github.kurue.bram.core.domain.ToolApprovalDecision
 import io.github.kurue.bram.core.domain.displayName
@@ -174,13 +192,13 @@ private enum class AppPanel {
     TASKS,
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BramApp(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
     var panel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
-    var displayedPanel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
-    LaunchedEffect(panel) { panel?.let { displayedPanel = it } }
+    var panelExpansionRequested by remember(panel) { mutableStateOf(false) }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         viewModel.importModels(uris)
     }
@@ -210,6 +228,12 @@ fun BramApp(viewModel: MainViewModel) {
         state.runtimePermissionRequest?.let { permission ->
             runtimePermission.launch(permission)
             viewModel.consumedRuntimePermissionRequest()
+        }
+    }
+    BackHandler(enabled = panel != null || drawerOpen) {
+        when {
+            panel != null -> panel = null
+            drawerOpen -> drawerOpen = false
         }
     }
 
@@ -272,6 +296,7 @@ fun BramApp(viewModel: MainViewModel) {
                 modifier = Modifier.align(Alignment.BottomCenter),
                 onSend = viewModel::send,
                 onStop = viewModel::stopGeneration,
+                onSetPermissionMode = viewModel::updatePermissionMode,
             )
 
             if (drawerOpen) {
@@ -295,35 +320,37 @@ fun BramApp(viewModel: MainViewModel) {
                 )
             }
 
-            if (panel != null) {
-                Scrim(onDismiss = { panel = null })
-            }
-            AnimatedVisibility(
-                visible = panel != null,
-                modifier = Modifier.align(Alignment.BottomCenter),
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-            ) {
-                displayedPanel?.let { open ->
-                GlassSurface(
+            panel?.let { open ->
+                val panelState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                BoxWithConstraints {
+                val expandedHeight = this.maxHeight
+                val panelMaxHeight by animateDpAsState(
+                    targetValue = if (panelExpansionRequested) expandedHeight else expandedHeight * 0.88f,
+                    animationSpec = tween(220),
+                    label = "panel height",
+                )
+                val panelReadyToScroll = panelMaxHeight >= expandedHeight - 1.dp
+                ModalBottomSheet(
+                    onDismissRequest = { panel = null },
+                    sheetState = panelState,
+                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                    containerColor = Color.Transparent,
+                    scrimColor = Color.Black.copy(alpha = 0.42f),
+                    dragHandle = null,
+                ) {
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .fillMaxHeight(0.88f),
-                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                    alpha = Glass.chromeAlpha,
-                    // Darker than the cards it holds. Both drew from the same default before, so
-                    // lightening the cards lightened their backdrop with them and nothing separated.
-                    tint = Glass.panelTint,
+                        .wrapContentHeight()
+                        .heightIn(max = panelMaxHeight),
                 ) {
-                    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                        Box(
-                            Modifier
-                                .align(Alignment.CenterHorizontally)
-                                .padding(vertical = 10.dp)
-                                .size(width = 36.dp, height = 4.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)),
-                        )
+                    GlassSurface(
+                        modifier = Modifier.matchParentSize(),
+                        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                        alpha = Glass.chromeAlpha,
+                        tint = Glass.panelTint,
+                    ) {}
+                    Column(Modifier.fillMaxWidth()) {
                         when (open) {
                             AppPanel.MODELS -> ModelsScreen(
                                 state = state,
@@ -333,12 +360,15 @@ fun BramApp(viewModel: MainViewModel) {
                                 onUpdateProfile = viewModel::updateProfile,
                                 onDeleteProfile = viewModel::deleteProfile,
                                 onSaveEndpoint = viewModel::saveEndpoint,
+                                onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onAutoConfigure = viewModel::autoConfigure,
                                 onTuneBatch = viewModel::tuneBatch,
                                 onTuneDimension = viewModel::tuneDimension,
                                 tuningDimension = state.tuningDimension,
                                 onConvertQuant = viewModel::convertQuant,
+                                sheetReadyToScroll = panelReadyToScroll,
+                                onExpandSheet = { panelExpansionRequested = true },
                             )
                             AppPanel.ROUTING -> RoutingSummaryScreen(
                                 state = state,
@@ -361,6 +391,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onBack = { panel = AppPanel.CAPABILITIES },
                                 onSaveEndpoint = viewModel::saveEndpoint,
+                                onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                             )
                             AppPanel.TOOLS -> ToolsScreen(
@@ -378,6 +409,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onSaveSkill = viewModel::importSkill,
                                 onActivateSkillDraft = viewModel::activateSkillDraft,
                                 onRollbackSkill = viewModel::rollbackSkill,
+                                onSetSkillDisabled = viewModel::setSkillDisabled,
                                 onRemoveSkill = viewModel::removeSkill,
                             )
                             AppPanel.AUTOMATIONS -> AutomationsScreen(
@@ -413,6 +445,7 @@ fun BramApp(viewModel: MainViewModel) {
                             )
                         }
                     }
+                }
                 }
                 }
             }
@@ -473,7 +506,7 @@ private fun TopBubbleBar(
             alpha = Glass.chromeAlpha,
         ) {
             Column(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 7.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
@@ -482,15 +515,43 @@ private fun TopBubbleBar(
                         ?: state.selectedLocalModel?.let { model -> state.profileFor(model).name }
                         ?: state.selectedEndpoint?.displayName
                         ?: "Add a profile",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    modelStatusLine(state),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
+                Spacer(Modifier.height(4.dp))
+                ContextMeter(state)
+                Spacer(Modifier.height(3.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Both flanks take the same width — rate left-aligned, thermal right-aligned —
+                    // so the status between them is centred on the pill, not nudged sideways by
+                    // whichever flank happens to be wider.
+                    Text(
+                        modelRateLabel(state),
+                        modifier = Modifier.width(56.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                    ShimmerStatusText(
+                        text = modelProcessLabel(state),
+                        active = modelProcessActive(state),
+                        modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+                    )
+                    val throttled = state.deviceProfile?.thermalStatus.orEmpty().let {
+                        it.isNotBlank() && it != "none" && !it.startsWith("unknown")
+                    }
+                    Box(Modifier.width(56.dp), contentAlignment = Alignment.CenterEnd) {
+                        ThrottleIcon(
+                            tint = if (throttled) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                }
             }
         }
 
@@ -501,27 +562,119 @@ private fun TopBubbleBar(
     }
 }
 
-/** Live state belongs here: throughput while generating, otherwise what is loaded and where. */
 @Composable
-private fun modelStatusLine(state: AppUiState): String = when {
-    // Throughput belongs here rather than above the composer: it is state about the model, which is
-    // what this line is for, and the chat says it is working by animating instead.
-    state.isGenerating -> buildString {
-        append(state.loadedBackend?.label ?: "Running")
-        state.selectedLocalModel?.let { append(" · ${formatTokens(it.preferredContextTokens)}") }
-        state.lastMetrics?.decodeTokensPerSecond?.let { append(" · ${formatRate(it)}") }
+private fun ContextMeter(state: AppUiState) {
+    val limit = state.selectedEndpoint?.contextWindowTokens
+        ?: state.activeProfile?.contextTokens
+        ?: state.selectedLocalModel?.preferredContextTokens
+        ?: 0
+    val used = state.lastContextTokens ?: state.lastUsage?.inputTokens ?: 0
+    val fraction = if (limit > 0) (used.toFloat() / limit).coerceIn(0f, 1f) else 0f
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.16f)),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(fraction)
+                .fillMaxHeight()
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)),
+        )
     }
-    state.routingMode == RoutingMode.AUTO && !state.routingPool.isEmpty ->
-        state.routingTargetLabel(state.routingPool.primaryTargetId)?.let { "Primary · ready" }
-            ?: "Choose a Primary profile"
-    state.selectedLocalModelIsLoaded -> buildString {
-        append(state.loadedBackend?.label ?: "loaded")
-        state.selectedLocalModel?.let { append(" · ${formatTokens(it.preferredContextTokens)}") }
-        state.lastMetrics?.decodeTokensPerSecond?.let { append(" · ${formatRate(it)}") }
+}
+
+private fun modelRateLabel(state: AppUiState): String {
+    val rate = if (state.isGenerating) state.liveDecodeTokensPerSecond
+    else state.lastMetrics?.decodeTokensPerSecond
+    return rate?.let { String.format(Locale.US, "%.1f", it) } ?: "tok/s"
+}
+
+private fun modelProcessLabel(state: AppUiState): String = when {
+    state.isLoadingModel || state.isLoadingLiteRt -> "Loading model"
+    state.isImporting -> "Importing model"
+    state.autoConfigure != null -> "Configuring"
+    state.convertingProfileId != null -> "Converting"
+    state.modelPhase == ModelPhase.PREPARING -> "System prompt"
+    state.modelPhase == ModelPhase.THINKING -> "Thinking"
+    state.modelPhase == ModelPhase.CALLING_TOOL -> "Using tool"
+    state.modelPhase == ModelPhase.GENERATING -> "Writing"
+    state.selectedLocalModelIsLoaded || state.selectedLiteRtIsLoaded || state.selectedEndpoint != null -> "Ready"
+    state.profiles.isEmpty() && state.endpoints.isEmpty() -> "Add profile"
+    else -> "Idle"
+}
+
+/** Whether the status names work in progress, which is when it shimmers and gains dots. */
+private fun modelProcessActive(state: AppUiState): Boolean = when {
+    state.isLoadingModel || state.isLoadingLiteRt -> true
+    state.isImporting -> true
+    state.autoConfigure != null -> true
+    state.convertingProfileId != null -> true
+    state.modelPhase == ModelPhase.PREPARING -> true
+    state.modelPhase == ModelPhase.THINKING -> true
+    state.modelPhase == ModelPhase.CALLING_TOOL -> true
+    state.modelPhase == ModelPhase.GENERATING -> true
+    else -> false
+}
+
+/**
+ * The centred status line. While work is in flight the label carries three trailing dots and a
+ * light band sweeps across the glyphs, so "Thinking..." visibly lives even when the model has
+ * gone quiet between tokens. SrcATop keeps the sweep on the text and never the background.
+ */
+@Composable
+private fun ShimmerStatusText(text: String, active: Boolean, modifier: Modifier = Modifier) {
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    val label = if (active) "$text..." else text
+    if (!active) {
+        Text(
+            label,
+            modifier = modifier,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        return
     }
-    state.selectedEndpoint != null -> "Ready"
-    state.selectedLocalModel != null -> "Not loaded"
-    else -> "Add a profile to begin"
+    val transition = rememberInfiniteTransition(label = "status-shimmer")
+    val sweep by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1_400, easing = LinearEasing)),
+        label = "status-sweep",
+    )
+    Text(
+        label,
+        // The offscreen layer is what confines the sweep to the glyphs: without it SrcAtop blends
+        // against everything already on the canvas beneath the text, and the band lights up a
+        // whole stripe of the pill instead of the letters.
+        modifier = modifier
+            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+            .drawWithContent {
+                drawContent()
+                val band = size.width * 0.45f
+                val start = -band + (size.width + 2f * band) * sweep
+                drawRect(
+                    brush = Brush.linearGradient(
+                        0f to Color.Transparent,
+                        0.5f to Color.White.copy(alpha = 0.55f),
+                        1f to Color.Transparent,
+                        start = Offset(start, 0f),
+                        end = Offset(start + band, size.height),
+                    ),
+                    blendMode = BlendMode.SrcAtop,
+                )
+            },
+        style = MaterialTheme.typography.labelSmall,
+        color = color,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 /** Conversations, plus a way into the model and provider panels. */
@@ -745,6 +898,9 @@ private fun ChatTranscript(
 ) {
     val listState = rememberLazyListState()
     val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
+    // Tool results live in the history for the model to replay, but the transcript shows them as
+    // activity rows on the assistant bubble rather than as messages of their own.
+    val visibleMessages = state.messages.filterNot { it.role == MessageRole.TOOL }
 
     // Follow the reply as it streams, keyed on the last message's length so each delta scrolls and
     // not merely each new message. The large offset scrolls past the item rather than aligning its
@@ -755,10 +911,10 @@ private fun ChatTranscript(
             // The approval card sits just past the last message, so a long thread leaves it hidden
             // under the composer or off the bottom. Bring it into view the moment it appears,
             // otherwise the run blocks on a prompt the user cannot see.
-            state.pendingApproval != null && state.messages.isNotEmpty() ->
-                runCatching { listState.animateScrollToItem(state.messages.size, LARGE_SCROLL_OFFSET) }
-            state.messages.isNotEmpty() ->
-                runCatching { listState.animateScrollToItem(state.messages.lastIndex, LARGE_SCROLL_OFFSET) }
+            state.pendingApproval != null && visibleMessages.isNotEmpty() ->
+                runCatching { listState.animateScrollToItem(visibleMessages.size, LARGE_SCROLL_OFFSET) }
+            visibleMessages.isNotEmpty() ->
+                runCatching { listState.animateScrollToItem(visibleMessages.lastIndex, LARGE_SCROLL_OFFSET) }
         }
     }
 
@@ -793,7 +949,7 @@ private fun ChatTranscript(
                 )
             }
         }
-        items(state.messages, key = { it.id.value }) { message ->
+        items(visibleMessages, key = { it.id.value }) { message ->
             ChatBubble(
                 message = message,
                 canAct = !state.isGenerating,
@@ -828,8 +984,10 @@ private fun ChatComposer(
     modifier: Modifier = Modifier,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
+    onSetPermissionMode: (PermissionMode) -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf("") }
+    var confirmBypass by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier
@@ -837,6 +995,47 @@ private fun ChatComposer(
             .navigationBarsPadding()
             .padding(horizontal = 12.dp),
     ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(
+                modifier = Modifier.testTag("approval-mode-button"),
+                onClick = {
+                    if (state.permissionMode == PermissionMode.BYPASS) {
+                        onSetPermissionMode(PermissionMode.AUTO)
+                    } else {
+                        confirmBypass = true
+                    }
+                },
+            ) {
+                Text(
+                    if (state.permissionMode == PermissionMode.BYPASS) "Auto-approve on" else "Ask before tools",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (state.permissionMode == PermissionMode.BYPASS) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
+        // What is waiting: the queue exists because the in-flight turn owns the transcript, so
+        // the chip is the only on-screen trace of a message until its turn starts.
+        if (state.queuedMessages.isNotEmpty()) {
+            Text(
+                if (state.queuedMessages.size == 1) {
+                    "Queued: ${state.queuedMessages.first().take(60)}"
+                } else {
+                    "${state.queuedMessages.size} messages queued"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 1.dp),
+            )
+        }
         GlassSurface(
             modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
             shape = RoundedCornerShape(percent = 50),
@@ -852,7 +1051,7 @@ private fun ChatComposer(
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                     if (input.isEmpty()) {
                         Text(
-                            "Message Bram",
+                            if (state.isGenerating) "Queue a message" else "Message Bram",
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -861,7 +1060,6 @@ private fun ChatComposer(
                         value = input,
                         onValueChange = { input = it },
                         modifier = Modifier.fillMaxWidth().testTag("composer-field"),
-                        enabled = !state.isGenerating,
                         maxLines = 5,
                         textStyle = MaterialTheme.typography.bodyLarge.copy(
                             color = MaterialTheme.colorScheme.onSurface,
@@ -870,8 +1068,10 @@ private fun ChatComposer(
                     )
                 }
                 Spacer(Modifier.width(6.dp))
+                // While a turn runs the button stays a send (queue) as long as there is text to
+                // send; clearing the field brings back Stop, so both actions stay one tap away.
                 SendButton(
-                    generating = state.isGenerating,
+                    generating = state.isGenerating && input.isBlank(),
                     enabled = input.isNotBlank() && !state.routingPool.isEmpty,
                     onSend = {
                         onSend(input)
@@ -882,12 +1082,36 @@ private fun ChatComposer(
             }
         }
     }
+
+    if (confirmBypass) {
+        AlertDialog(
+            onDismissRequest = { confirmBypass = false },
+            title = { Text("Auto-approve tools in this chat?") },
+            text = {
+                Text(
+                    "Bram will run tool calls without asking each time. Android permissions " +
+                        "and protection against tool calls copied from fetched content still apply.",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmBypass = false
+                        onSetPermissionMode(PermissionMode.BYPASS)
+                    },
+                ) { Text("Auto-approve") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmBypass = false }) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 /** Reserves the space the floating chrome occupies so the transcript is not trapped under it. */
 private val TOP_BAR_SPACE = 76.dp
 private val TOP_FADE_HEIGHT = 64.dp
-private val COMPOSER_SPACE = 92.dp
+private val COMPOSER_SPACE = 126.dp
 
 @Composable
 private fun RuntimeOption(
@@ -928,6 +1152,7 @@ private fun ModelsScreen(
     onUpdateProfile: (ModelProfile) -> Unit,
     onDeleteProfile: (String) -> Unit,
     onSaveEndpoint: (EndpointDraft) -> Unit,
+    onDiscoverRemoteModels: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
     onAutoConfigure: (String) -> Unit,
     onTuneBatch: (String) -> Unit,
@@ -936,13 +1161,16 @@ private fun ModelsScreen(
     tuningDimension: TuningDimension?,
     /** Starts a quant conversion for a profile's file. */
     onConvertQuant: (String, String) -> Unit,
+    sheetReadyToScroll: Boolean,
+    onExpandSheet: () -> Unit,
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var addingProfile by rememberSaveable { mutableStateOf(false) }
+    var editingEndpointId by rememberSaveable { mutableStateOf<String?>(null) }
     var profileCountAtOpen by rememberSaveable { mutableStateOf(0) }
     var showAdvancedTools by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(state.profiles.size, state.endpoints.size, addingProfile) {
-        if (addingProfile && state.profiles.size + state.endpoints.size > profileCountAtOpen) {
+        if (addingProfile && editingEndpointId == null && state.profiles.size + state.endpoints.size > profileCountAtOpen) {
             addingProfile = false
         }
     }
@@ -952,22 +1180,38 @@ private fun ModelsScreen(
             onBack = { addingProfile = false },
             onImport = onImport,
             onSaveEndpoint = onSaveEndpoint,
+            onDiscoverRemoteModels = onDiscoverRemoteModels,
+            initialEndpoint = state.endpoints.firstOrNull { it.id == editingEndpointId },
         )
         return
     }
+    val sheetExpansionGesture = if (sheetReadyToScroll) {
+        Modifier
+    } else {
+        Modifier.pointerInput(Unit) {
+            detectVerticalDragGestures { change, dragAmount ->
+                change.consume()
+                if (dragAmount < 0f) onExpandSheet()
+            }
+        }
+    }
     LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        Modifier.fillMaxSize().then(sheetExpansionGesture),
+        userScrollEnabled = sheetReadyToScroll,
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item { PanelHandle() }
         item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.Top) {
                 SectionHeader("Profiles", modifier = Modifier.weight(1f))
-                TextButton(
+                IconButton(
                     onClick = {
+                        editingEndpointId = null
                         profileCountAtOpen = state.profiles.size + state.endpoints.size
                         addingProfile = true
                     },
+                    modifier = Modifier.size(40.dp),
                     enabled = !state.isImporting && !state.isGenerating,
                 ) { Text("+", style = MaterialTheme.typography.headlineSmall) }
             }
@@ -1010,7 +1254,7 @@ private fun ModelsScreen(
                     },
                     backend = backend,
                     availableBackends = state.availableBackends,
-                    canDelete = state.profiles.count { it.modelId == profile.modelId } > 1,
+                    removesModelOnDelete = state.profiles.count { it.modelId == profile.modelId } == 1,
                     onToggleExpanded = {
                         expandedProfileId = if (expandedProfileId == profile.id) null else profile.id
                     },
@@ -1030,7 +1274,14 @@ private fun ModelsScreen(
             }
         }
         items(state.endpoints, key = { "remote:${it.id}" }) { endpoint ->
-            EndpointCard(endpoint, onRemoveEndpoint)
+            EndpointCard(
+                endpoint = endpoint,
+                onEdit = {
+                    editingEndpointId = endpoint.id
+                    addingProfile = true
+                },
+                onRemove = onRemoveEndpoint,
+            )
         }
         item {
             GlassSurface(
@@ -1087,20 +1338,35 @@ private fun AddProfileScreen(
     onBack: () -> Unit,
     onImport: () -> Unit,
     onSaveEndpoint: (EndpointDraft) -> Unit,
+    onDiscoverRemoteModels: (EndpointDraft) -> Unit,
+    initialEndpoint: RemoteEndpoint? = null,
 ) {
-    var addingServer by rememberSaveable { mutableStateOf(false) }
-    var name by rememberSaveable { mutableStateOf("") }
-    var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
-    var modelName by rememberSaveable { mutableStateOf("") }
-    var context by rememberSaveable { mutableStateOf("32768") }
+    var addingServer by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint != null) }
+    var name by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.displayName.orEmpty()) }
+    var baseUrl by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.baseUrl ?: "http://127.0.0.1:11434/v1") }
+    var modelName by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.modelName.orEmpty()) }
+    var context by rememberSaveable(initialEndpoint?.id) { mutableStateOf((initialEndpoint?.contextWindowTokens ?: 32768).toString()) }
     var apiKey by rememberSaveable { mutableStateOf("") }
-    var allowHttp by rememberSaveable { mutableStateOf(false) }
-    var apiKind by rememberSaveable { mutableStateOf(RemoteApiKind.CHAT_COMPLETIONS) }
+    var allowHttp by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.allowInsecureHttp ?: false) }
+    var apiKind by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.apiKind ?: RemoteApiKind.CHAT_COMPLETIONS) }
+    var reasoningEffort by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.reasoningEffort) }
+    var customHeaders by rememberSaveable(initialEndpoint?.id) {
+        mutableStateOf(initialEndpoint?.customHeaders?.entries?.joinToString("\n") { "${it.key}: ${it.value}" }.orEmpty())
+    }
+    var bodyOptions by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.bodyOptionsJson ?: "{}") }
+    var supportsTools by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.supportsToolCalling ?: true) }
+    var advanced by rememberSaveable(initialEndpoint?.id) { mutableStateOf(false) }
+    LaunchedEffect(modelName, state.remoteModelDiscovery.models) {
+        state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
+            ?.contextWindowTokens?.let { context = it.toString() }
+    }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Add profile", "Profiles", onBack)
         if (!addingServer) {
             GlassSurface(Modifier.fillMaxWidth().clickable(enabled = !state.isImporting, onClick = onImport)) {
@@ -1138,6 +1404,41 @@ private fun AddProfileScreen(
                     OutlinedTextField(name, { name = it }, label = { Text("Profile name") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("Base URL") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(modelName, { modelName = it }, label = { Text("Model ID") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedButton(
+                        onClick = {
+                            onDiscoverRemoteModels(
+                                EndpointDraft(initialEndpoint?.id, name, baseUrl, modelName, context.toIntOrNull() ?: 32768, apiKey, allowHttp, apiKind, supportsToolCalling = supportsTools),
+                            )
+                        },
+                        enabled = !state.remoteModelDiscovery.loading,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (state.remoteModelDiscovery.loading) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else Text("Get available models")
+                    }
+                    state.remoteModelDiscovery.error?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (state.remoteModelDiscovery.models.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            state.remoteModelDiscovery.models.forEach { model ->
+                                FilterChip(
+                                    selected = modelName == model.id,
+                                    onClick = {
+                                        modelName = model.id
+                                        model.contextWindowTokens?.let { context = it.toString() }
+                                        apiKind = discoveredApiKind(baseUrl, model.id, apiKind)
+                                        if (reasoningEffort !in model.reasoningEfforts) reasoningEffort = null
+                                    },
+                                    label = { Text(model.id) },
+                                )
+                            }
+                        }
+                    }
                     OutlinedTextField(
                         context,
                         { context = it.filter(Char::isDigit) },
@@ -1161,6 +1462,16 @@ private fun AddProfileScreen(
                             )
                         }
                     }
+                    val selectedModel = state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
+                    if (!selectedModel?.reasoningEfforts.isNullOrEmpty()) {
+                        SectionLabel("Thinking")
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(selected = reasoningEffort == null, onClick = { reasoningEffort = null }, label = { Text("Default") })
+                            selectedModel!!.reasoningEfforts.forEach { effort ->
+                                FilterChip(selected = reasoningEffort == effort, onClick = { reasoningEffort = effort }, label = { Text(effort) })
+                            }
+                        }
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(allowHttp, { allowHttp = it })
                         Column {
@@ -1172,14 +1483,51 @@ private fun AddProfileScreen(
                             )
                         }
                     }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(supportsTools, { supportsTools = it })
+                        Column {
+                            Text("Supports tool calling")
+                            Text(
+                                "Turn off for models or hosts that reject tool definitions.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    TextButton(onClick = { advanced = !advanced }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (advanced) "Hide advanced" else "Advanced")
+                    }
+                    if (advanced) {
+                        OutlinedTextField(
+                            customHeaders,
+                            { customHeaders = it },
+                            label = { Text("Custom headers") },
+                            supportingText = { Text("One Name: value per line. {session_id} is replaced per conversation.") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            bodyOptions,
+                            { bodyOptions = it },
+                            label = { Text("Request options (JSON)") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        ProviderProfile.forBaseUrl(baseUrl).sessionHeader?.let { header ->
+                            Text(
+                                "Bram adds $header automatically for each conversation.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     Button(
                         onClick = {
                             onSaveEndpoint(
-                                EndpointDraft(name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind),
+                                EndpointDraft(initialEndpoint?.id, name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind, reasoningEffort, customHeaders, bodyOptions, supportsTools),
                             )
+                            onBack()
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Create profile") }
+                    ) { Text(if (initialEndpoint == null) "Create profile" else "Save changes") }
                     TextButton(onClick = { addingServer = false }, modifier = Modifier.fillMaxWidth()) {
                         Text("Choose another source")
                     }
@@ -1349,7 +1697,7 @@ private fun ProfileCard(
     tuneStatus: String?,
     backend: RuntimeBackend,
     availableBackends: List<RuntimeBackend>,
-    canDelete: Boolean,
+    removesModelOnDelete: Boolean,
     onToggleExpanded: () -> Unit,
     onUpdateProfile: (ModelProfile) -> Unit,
     onDeleteProfile: () -> Unit,
@@ -1376,7 +1724,45 @@ private fun ProfileCard(
     var editingPrompt by rememberSaveable(profile.id) { mutableStateOf(false) }
     var draftPrompt by rememberSaveable(profile.id) { mutableStateOf(profile.systemPrompt) }
     var showAdvanced by rememberSaveable(profile.id) { mutableStateOf(false) }
+    var confirmDelete by rememberSaveable(profile.id) { mutableStateOf(false) }
+    val deleteSwipeState = rememberSwipeToDismissBoxState(
+        positionalThreshold = { distance -> distance * 0.32f },
+    )
+    val swipeScope = rememberCoroutineScope()
 
+    SwipeToDismissBox(
+        state = deleteSwipeState,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)),
+        enableDismissFromStartToEnd = false,
+        enableDismissFromEndToStart = !locked,
+        backgroundContent = {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(2.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(MaterialTheme.colorScheme.errorContainer)
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                TextButton(
+                    onClick = { confirmDelete = true },
+                    enabled = !locked,
+                ) {
+                    TrashIcon(
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Delete",
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        },
+    ) {
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
@@ -1430,18 +1816,8 @@ private fun ProfileCard(
                             color = MaterialTheme.colorScheme.primary,
                             style = MaterialTheme.typography.labelMedium,
                         )
-                    } else {
-                        Text(
-                            "${backend.label} · ${formatTokens(profile.contextTokens)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
                     }
-                    Text(
-                        if (expanded) "▲" else "▼",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    ProfilePerformancePill(profile)
                 }
             }
 
@@ -1451,20 +1827,7 @@ private fun ProfileCard(
                 exit = shrinkVertically() + fadeOut(),
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (profile.measurements.isNotEmpty()) {
-                        WinningRun(profile.measurements, Modifier.fillMaxWidth())
-                    } else {
-                        profile.autoConfiguredNote.takeIf(String::isNotBlank)?.let { note ->
-                            Text(
-                                note,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    // The shape of the tuned configuration at a glance: which dimensions were
-                    // measured and what won, so the collapsed card reads like the batch pills do.
-                    TuningSummary(profile, Modifier.fillMaxWidth())
+                    ProfileSettingPills(profile, backend)
                     if (staleMeasurement) {
                         Text(
                             "These measurements were taken on a different device or build. " +
@@ -1472,54 +1835,6 @@ private fun ProfileCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
-                    }
-                    // What this file means for each processor, from the import's per-tensor quant
-                    // counts: how much of it a backend can actually compute. A file the NPU can't
-                    // fully take offers a conversion to one it can.
-                    if (model.tensorTypeCounts.isNotEmpty()) {
-                        val report = QuantCompatibility.report(model.tensorTypeCounts)
-                        SectionLabel("Compatibility")
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            CompatChip("CPU", 100, MaterialTheme.colorScheme.surfaceContainerHighest)
-                            CompatChip(
-                                "GPU",
-                                report.gpu.sharePercent,
-                                if (report.gpu.sharePercent >= 100) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHighest
-                                },
-                            )
-                            CompatChip(
-                                "NPU",
-                                report.npu.sharePercent,
-                                if (report.npu.sharePercent >= 100) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHighest
-                                },
-                            )
-                        }
-                        if (report.npu.sharePercent < 100) {
-                            Text(
-                                "The NPU can only run ${report.npu.sharePercent}% of this file's " +
-                                    "weight tensors; the rest would fall back to the CPU. " +
-                                    "Convert a copy to a type it can run fully:",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                TextButton(onClick = { onConvertQuant("q4_0") }, enabled = !busy && !converting) {
-                                    Text(if (converting) "Converting…" else "To Q4_0")
-                                }
-                                TextButton(onClick = { onConvertQuant("q8_0") }, enabled = !busy && !converting) {
-                                    Text("To Q8_0")
-                                }
-                            }
-                        }
                     }
                 HorizontalDivider()
 
@@ -1568,6 +1883,27 @@ private fun ProfileCard(
                     )
                 }
                 if (showAdvanced) {
+                    if (model.tensorTypeCounts.isNotEmpty()) {
+                        val report = QuantCompatibility.report(model.tensorTypeCounts)
+                        if (report.npu.sharePercent < 100) {
+                            SectionLabel("Quant conversion")
+                            Text(
+                                "The NPU can run ${report.npu.sharePercent}% of this file's weight " +
+                                    "tensors. Convert a separate copy for full NPU compatibility.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TextButton(onClick = { onConvertQuant("q4_0") }, enabled = !busy && !converting) {
+                                    Text(if (converting) "Converting…" else "To Q4_0")
+                                }
+                                TextButton(onClick = { onConvertQuant("q8_0") }, enabled = !busy && !converting) {
+                                    Text("To Q8_0")
+                                }
+                            }
+                        }
+                    }
+
                     SectionLabel("Backend")
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -1659,6 +1995,49 @@ private fun ProfileCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+
+                    // Expert streaming — only for MoE architectures whose routed experts can be
+                    // read from flash. This is what lets a model several times larger than RAM run.
+                    if (isStreamableMoeArchitecture(model.architecture)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            SectionLabel("Stream experts", Modifier.weight(1f))
+                            Checkbox(
+                                checked = profile.streamExperts,
+                                onCheckedChange = { onUpdateProfile(profile.copy(streamExperts = it)) },
+                                enabled = !busy,
+                            )
+                        }
+                        Text(
+                            "Read each token's experts from flash instead of loading the whole " +
+                                "model. Runs a MoE larger than RAM, losslessly, at a cost in speed.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (profile.streamExperts) {
+                            SectionLabel("Expert cache")
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                listOf(0 to "Auto", 1024 to "1 GiB", 2048 to "2 GiB", 4096 to "4 GiB")
+                                    .forEach { (mb, label) ->
+                                        FilterChip(
+                                            selected = profile.streamCacheMb == mb,
+                                            onClick = { onUpdateProfile(profile.copy(streamCacheMb = mb)) },
+                                            enabled = !busy,
+                                            label = { Text(label) },
+                                        )
+                                    }
+                            }
+                            Text(
+                                "Reads only each token's routed experts from flash. Auto sizes the cache to " +
+                                    "free RAM and pins the hot dense weights; experts are prefetched on " +
+                                    "background threads while the model computes.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         SectionLabel("Reasoning", Modifier.weight(1f))
@@ -1786,47 +2165,39 @@ private fun ProfileCard(
                             onTune = { onTuneDimension(TuningDimension.HEX_FLAGS) },
                         )
                     }
-                }
 
-                HorizontalDivider()
-
-                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    TextButton(onClick = { editingPrompt = !editingPrompt }) {
-                        Text(if (profile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
+                    HorizontalDivider()
+                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        TextButton(onClick = { editingPrompt = !editingPrompt }) {
+                            Text(if (profile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
+                        }
+                        TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
                     }
-                    // The only way left to get a second profile for one file, now that the
-                    // separate creation row is gone.
-                    TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
-                    if (canDelete) {
-                        TextButton(onClick = onDeleteProfile, enabled = !locked) { Text("Delete") }
-                    }
-                }
 
-                if (editingPrompt) {
-                    OutlinedTextField(
-                        value = draftPrompt,
-                        onValueChange = { draftPrompt = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 3,
-                        maxLines = 8,
-                        label = { Text("Instructions for this profile") },
-                    )
-                    Text(
-                        "Added to Bram's own instructions, not replacing them.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
+                    if (editingPrompt) {
+                        OutlinedTextField(
+                            value = draftPrompt,
+                            onValueChange = { draftPrompt = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 3,
+                            maxLines = 8,
+                            label = { Text("Instructions for this profile") },
+                        )
+                        Text(
+                            "Added to Bram's own instructions, not replacing them.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
                                 onUpdateProfile(profile.copy(systemPrompt = draftPrompt.trim()))
                                 editingPrompt = false
-                            },
-                        ) { Text("Save instructions") }
-                        TextButton(onClick = {
-                            draftPrompt = profile.systemPrompt
-                            editingPrompt = false
-                        }) { Text("Cancel") }
+                            }) { Text("Save instructions") }
+                            TextButton(onClick = {
+                                draftPrompt = profile.systemPrompt
+                                editingPrompt = false
+                            }) { Text("Cancel") }
+                        }
                     }
                 }
 
@@ -1839,6 +2210,42 @@ private fun ProfileCard(
                 }
             }
         }
+    }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = {
+                confirmDelete = false
+                swipeScope.launch { deleteSwipeState.reset() }
+            },
+            title = { Text("Delete ${profile.name}?") },
+            text = {
+                Text(
+                    if (removesModelOnDelete) {
+                        "This is the model's only profile, so its imported model copy will also be removed."
+                    } else {
+                        "This removes the profile and its settings. The imported model stays on this device."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = false
+                        onDeleteProfile()
+                    },
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = false
+                        swipeScope.launch { deleteSwipeState.reset() }
+                    },
+                ) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -1908,26 +2315,6 @@ private fun SamplerControls(
     )
 }
 
-/** How much of a file one processor can compute: a chip with its share. */
-@Composable
-private fun CompatChip(label: String, sharePercent: Int, container: Color) {
-    Row(
-        Modifier
-            .clip(RoundedCornerShape(percent = 50))
-            .background(container)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Text(label, style = MaterialTheme.typography.labelMedium)
-        Text(
-            "$sharePercent%",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
 /** One measured run in a sweep: name on the left, tok/s on the right, winner marked. */
 @Composable
 private fun RunRow(
@@ -1963,54 +2350,43 @@ private fun RunRow(
 
 enum class RunState { WINNER, LOSER, MEASURING, WAITING, FAILED, REFERENCE }
 
-/** The winning backend's throughput in one line, for the profile card. */
+/** The chosen backend's measured prompt/decode throughput, compact enough for the card header. */
 @Composable
-private fun WinningRun(measurements: List<BackendMeasurement>, modifier: Modifier = Modifier) {
-    val winner = measurements
-        .filter { it.agrees && !it.isReference }
-        .maxByOrNull { it.promptTokPerSec }
-    if (winner == null) {
-        val reference = measurements.firstOrNull { it.isReference }
-        if (reference != null) {
-            RunRow(
-                label = "CPU",
-                value = "%.0f tok/s".format(reference.promptTokPerSec),
-                state = RunState.WINNER,
-                modifier = modifier,
-            )
-        }
-        return
-    }
-    RunRow(
-        label = winner.label,
-        value = "%.0f tok/s".format(winner.promptTokPerSec),
-        state = RunState.WINNER,
-        modifier = modifier,
+private fun ProfilePerformancePill(profile: ModelProfile) {
+    val chosenId = profile.backendId.ifBlank { "" }
+    val measurement = profile.measurements.firstOrNull { it.backendId == chosenId }
+        ?: profile.measurements.firstOrNull { it.isReference && chosenId.isBlank() }
+        ?: return
+    if (measurement.promptTokPerSec <= 0.0 || measurement.decodeTokPerSec <= 0.0) return
+    ProfilePill(
+        "${measurement.label} ${measurement.promptTokPerSec.toInt()}/${measurement.decodeTokPerSec.toInt()}",
+        emphasized = true,
     )
 }
 
 /**
  * Auto-configure while it runs.
  *
- * An overlay in the app tree rather than a Dialog window, because this takes minutes and replaces
- * every setting underneath it — a person needs to see that something is happening to it. Every
+ * A full-width dialog window, so it remains above the modal profile sheet that launches it. Every
  * measured run is one compact row — name and tok/s — with the winner marked, so the whole run
  * reads as a ledger of numbers rather than sentences or charts.
- *
- * It is drawn here rather than in its own window for the same reason the panels and drawer are: a
- * separate window has nothing of the app behind it to sample, so it can never be frosted. Inside
- * the tree it blurs the recorded backdrop like any other panel. Only Done dismisses it; tapping
- * anywhere else does nothing.
  */
 @Composable
-private fun BoxScope.AutoConfigureOverlay(
+private fun AutoConfigureOverlay(
     progress: AutoConfigureProgress,
     cooldownOverride: Boolean,
     onContinueAnyway: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Box(Modifier.matchParentSize().zIndex(10f)) {
-        Scrim(onDismiss = {})
+    Dialog(
+        onDismissRequest = { if (progress.finished) onDismiss() },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.52f)))
         GlassSurface(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -2163,6 +2539,7 @@ private fun BoxScope.AutoConfigureOverlay(
             }
         }
     }
+    }
 }
 
 /**
@@ -2206,19 +2583,51 @@ private fun TuningDimensionRow(
     }
 }
 
-/** The measured tuning configuration in one line, for the collapsed profile card. */
+/** One quiet profile-summary pill; accent is reserved for the winning performance result. */
 @Composable
-private fun TuningSummary(profile: ModelProfile, modifier: Modifier = Modifier) {
-    val bits = profile.tuning.mapNotNull { note ->
-        note.chosen.takeUnless { it == "Default" }?.let { "${note.dimension.label} $it" }
-    }
-    if (bits.isNotEmpty()) {
+private fun ProfilePill(label: String, emphasized: Boolean = false) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(
+                if (emphasized) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceContainerHighest,
+            )
+            .padding(horizontal = 9.dp, vertical = 4.dp),
+    ) {
         Text(
-            bits.joinToString(" · "),
+            label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = modifier,
+            color = if (emphasized) MaterialTheme.colorScheme.onPrimaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = if (emphasized) FontWeight.SemiBold else FontWeight.Normal,
         )
+    }
+}
+
+/** The effective settings, visible at a glance without reopening each advanced control. */
+@Composable
+private fun ProfileSettingPills(profile: ModelProfile, backend: RuntimeBackend) {
+    val batch = profile.batchTokens.takeIf { it > 0 } ?: 512
+    val ubatch = profile.ubatchTokens.takeIf { it > 0 } ?: 128
+    val settings = buildList {
+        add("$batch/$ubatch")
+        add(profile.loadMode.label)
+        add(profile.cpuMask.takeIf(String::isNotEmpty)?.let { "Mask 0x$it" } ?: "All cores")
+        add(profile.threads.takeIf { it > 0 }?.let { "$it threads" } ?: "Default threads")
+        add(formatTokens(profile.contextTokens))
+        add(profile.flashAttention.label)
+        add(profile.kvCacheType.label)
+        if (profile.poll >= 0) add("Poll ${profile.poll}")
+        if (profile.thinkingEnabled) add("Reasoning")
+        if (backend == RuntimeBackend.HEXAGON && !profile.hexFlags.isDefault) add("HMX")
+    }
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        settings.forEach { ProfilePill(it) }
     }
 }
 
@@ -2233,9 +2642,11 @@ private fun RoutingSummaryScreen(
 ) {
     var showPolicy by rememberSaveable { mutableStateOf(false) }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         SectionHeader("Model selection", "Choose the profiles Bram can use")
 
         RoutingSlotSection(
@@ -2382,9 +2793,11 @@ private fun SessionScreen(
 ) {
     var showStats by rememberSaveable { mutableStateOf(false) }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         SectionHeader("Conversation details")
 
         // The mode is the one thing that changes how the conversation behaves rather than what it
@@ -2441,6 +2854,7 @@ private fun SessionScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        val displayCount = state.messages.count { it.role != MessageRole.TOOL }
         val userCount = state.messages.count { it.role == MessageRole.USER }
         val assistantCount = state.messages.count { it.role == MessageRole.ASSISTANT }
         val contextWindow = state.selectedLocalModel?.preferredContextTokens
@@ -2451,7 +2865,7 @@ private fun SessionScreen(
                     Column(Modifier.weight(1f)) {
                         Text("Usage", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "${state.messages.size} messages · ${formatTokenCount(state.sessionOutputTokens)} generated",
+                            "$displayCount messages · ${formatTokenCount(state.sessionOutputTokens)} generated",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -2465,7 +2879,7 @@ private fun SessionScreen(
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         HorizontalDivider()
-                        StatRow("Messages", "${state.messages.size}" + if (state.messages.isNotEmpty()) " · $userCount you, $assistantCount Bram" else "")
+                        StatRow("Messages", "$displayCount" + if (displayCount > 0) " · $userCount you, $assistantCount Bram" else "")
                         StatRow("Tokens read", formatTokenCount(state.sessionInputTokens))
                         StatRow(
                             "Context",
@@ -2483,6 +2897,14 @@ private fun SessionScreen(
                                 "${formatTokens(metrics.promptTokens)} in · ${formatTokens(metrics.outputTokens)} out" +
                                     metrics.decodeTokensPerSecond?.let { " · ${formatRate(it)}" }.orEmpty(),
                             )
+                            metrics.streaming?.let { s ->
+                                StatRow(
+                                    "Streaming",
+                                    "${s.flashMiB} MiB read · ${s.residentMiB} MiB cached" +
+                                        (if (s.evictions > 0) " · ${s.evictions} evicted" else "") +
+                                        (if (s.denseMiB > 0) " · ${s.denseMiB} MiB pinned" else ""),
+                                )
+                            }
                         }
                     }
                 }
@@ -2494,7 +2916,7 @@ private fun SessionScreen(
 private fun permissionModeUiLabel(mode: PermissionMode): String = when (mode) {
     PermissionMode.AUTO -> "Ask when needed"
     PermissionMode.MANUAL -> "Always ask"
-    PermissionMode.BYPASS -> "Don't ask"
+    PermissionMode.BYPASS -> "Auto-approve"
 }
 
 private fun privacyClassUiLabel(privacyClass: PrivacyClass): String = when (privacyClass) {
@@ -2592,9 +3014,11 @@ private fun SettingsScreen(
     onSetCompletionAlerts: (Boolean) -> Unit,
 ) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         SectionHeader("Settings", "App behavior and system destinations")
         SectionHeader("Notifications")
         GlassSurface(Modifier.fillMaxWidth()) {
@@ -2640,9 +3064,11 @@ private fun SettingsScreen(
 @Composable
 private fun CapabilitiesScreen(state: AppUiState, onOpenPanel: (AppPanel) -> Unit) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         SectionHeader("Capabilities", "What Bram can use beyond the selected model")
         DestinationCard(
             "Tools",
@@ -2676,9 +3102,11 @@ private fun ProvidersScreen(
     state: AppUiState,
     onBack: () -> Unit,
     onSaveEndpoint: (EndpointDraft) -> Unit,
+    onDiscoverRemoteModels: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
 ) {
     var adding by rememberSaveable { mutableStateOf(false) }
+    var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var name by rememberSaveable { mutableStateOf("") }
     var baseUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:11434/v1") }
     var modelName by rememberSaveable { mutableStateOf("") }
@@ -2686,11 +3114,21 @@ private fun ProvidersScreen(
     var apiKey by rememberSaveable { mutableStateOf("") }
     var allowHttp by rememberSaveable { mutableStateOf(false) }
     var apiKind by rememberSaveable { mutableStateOf(RemoteApiKind.CHAT_COMPLETIONS) }
+    var reasoningEffort by rememberSaveable { mutableStateOf<String?>(null) }
+    var customHeaders by rememberSaveable { mutableStateOf("") }
+    var bodyOptions by rememberSaveable { mutableStateOf("{}") }
+    var supportsTools by rememberSaveable { mutableStateOf(true) }
+    LaunchedEffect(modelName, state.remoteModelDiscovery.models) {
+        state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
+            ?.contextWindowTokens?.let { context = it.toString() }
+    }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Remote providers", "Capabilities", onBack)
         Text(
             "Optional OpenAI-compatible capacity. Local GGUF chat does not require a provider.",
@@ -2700,7 +3138,26 @@ private fun ProvidersScreen(
         if (state.endpoints.isEmpty()) {
             EmptyDestination("No providers yet", "Add one when you want to use a model hosted on a server.")
         } else {
-            state.endpoints.forEach { EndpointCard(it, onRemoveEndpoint) }
+            state.endpoints.forEach { endpoint ->
+                EndpointCard(
+                    endpoint = endpoint,
+                    onEdit = {
+                        editingId = endpoint.id
+                        name = endpoint.displayName
+                        baseUrl = endpoint.baseUrl
+                        modelName = endpoint.modelName
+                        context = endpoint.contextWindowTokens.toString()
+                        apiKey = ""
+                        allowHttp = endpoint.allowInsecureHttp
+                        apiKind = endpoint.apiKind
+                        reasoningEffort = endpoint.reasoningEffort
+                        customHeaders = endpoint.customHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" }
+                        bodyOptions = endpoint.bodyOptionsJson
+                        adding = true
+                    },
+                    onRemove = onRemoveEndpoint,
+                )
+            }
         }
         if (!adding) {
             Button(onClick = { adding = true }, modifier = Modifier.fillMaxWidth()) { Text("Add provider") }
@@ -2711,6 +3168,37 @@ private fun ProvidersScreen(
                     OutlinedTextField(name, { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("Base URL") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(modelName, { modelName = it }, label = { Text("Model ID") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedButton(
+                        onClick = {
+                            onDiscoverRemoteModels(
+                                EndpointDraft(editingId, name, baseUrl, modelName, context.toIntOrNull() ?: 32768, apiKey, allowHttp, apiKind, supportsToolCalling = supportsTools),
+                            )
+                        },
+                        enabled = !state.remoteModelDiscovery.loading,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(if (state.remoteModelDiscovery.loading) "Checking…" else "Get available models") }
+                    state.remoteModelDiscovery.error?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (state.remoteModelDiscovery.models.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            state.remoteModelDiscovery.models.forEach { model ->
+                                FilterChip(
+                                    selected = modelName == model.id,
+                                    onClick = {
+                                        modelName = model.id
+                                        model.contextWindowTokens?.let { context = it.toString() }
+                                        apiKind = discoveredApiKind(baseUrl, model.id, apiKind)
+                                        if (reasoningEffort !in model.reasoningEfforts) reasoningEffort = null
+                                    },
+                                    label = { Text(model.id) },
+                                )
+                            }
+                        }
+                    }
                     OutlinedTextField(
                         context,
                         { context = it.filter(Char::isDigit) },
@@ -2734,6 +3222,16 @@ private fun ProvidersScreen(
                             )
                         }
                     }
+                    val selectedModel = state.remoteModelDiscovery.models.firstOrNull { it.id == modelName }
+                    if (!selectedModel?.reasoningEfforts.isNullOrEmpty()) {
+                        SectionLabel("Thinking")
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(selected = reasoningEffort == null, onClick = { reasoningEffort = null }, label = { Text("Default") })
+                            selectedModel!!.reasoningEfforts.forEach { effort ->
+                                FilterChip(selected = reasoningEffort == effort, onClick = { reasoningEffort = effort }, label = { Text(effort) })
+                            }
+                        }
+                    }
                     Text(
                         if (apiKind == RemoteApiKind.CHAT_COMPLETIONS) {
                             "Works with Ollama, LM Studio, vLLM, llama.cpp server, and most compatible hosts."
@@ -2754,14 +3252,28 @@ private fun ProvidersScreen(
                             )
                         }
                     }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(supportsTools, { supportsTools = it })
+                        Column {
+                            Text("Supports tool calling")
+                            Text(
+                                "Turn off for models or hosts that reject tool definitions.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    OutlinedTextField(customHeaders, { customHeaders = it }, label = { Text("Custom headers") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(bodyOptions, { bodyOptions = it }, label = { Text("Request options (JSON)") }, modifier = Modifier.fillMaxWidth())
                     Button(
                         onClick = {
                             onSaveEndpoint(
-                                EndpointDraft(name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind),
+                                EndpointDraft(editingId, name, baseUrl, modelName, context.toIntOrNull() ?: 0, apiKey, allowHttp, apiKind, reasoningEffort, customHeaders, bodyOptions, supportsTools),
                             )
+                            adding = false
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Save provider") }
+                    ) { Text(if (editingId == null) "Save provider" else "Save changes") }
                     TextButton(onClick = { adding = false }, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
                 }
             }
@@ -2787,9 +3299,11 @@ private fun ToolsScreen(
     var mcpAllowHttp by rememberSaveable { mutableStateOf(false) }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Tools", "Capabilities", onBack)
         GlassSurface(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2881,6 +3395,7 @@ private fun SkillsScreen(
     onSaveSkill: (String) -> Unit,
     onActivateSkillDraft: (String) -> Unit,
     onRollbackSkill: (String) -> Unit,
+    onSetSkillDisabled: (String, Boolean) -> Unit,
     onRemoveSkill: (String) -> Unit,
 ) {
     // The editor writes the same SKILL.md document the file importer reads, so authoring in-app
@@ -2919,9 +3434,11 @@ private fun SkillsScreen(
     }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Skills", "Capabilities", onBack)
         Text(
             "Versioned procedures Bram follows when their description matches a task. Skills are instructions, not executable code.",
@@ -2930,7 +3447,9 @@ private fun SkillsScreen(
         )
         state.skillStatus?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
         if (state.skills.isEmpty()) EmptyDestination("No skills imported", "Author one, or import a file, when you want a repeatable specialist workflow.")
-        else state.skills.forEach { SkillCard(it, ::openEditorForEdit, onActivateSkillDraft, onRollbackSkill, onRemoveSkill) }
+        else state.skills.forEach {
+            SkillCard(it, ::openEditorForEdit, onActivateSkillDraft, onRollbackSkill, onSetSkillDisabled, onRemoveSkill)
+        }
         if (!editorOpen) {
             Button(onClick = ::openEditorForNew, modifier = Modifier.fillMaxWidth()) { Text("New skill") }
             OutlinedButton(onClick = onImportSkill, modifier = Modifier.fillMaxWidth()) { Text("Import skill file") }
@@ -2971,9 +3490,11 @@ private fun AutomationsScreen(
     var cron by rememberSaveable { mutableStateOf("0 9 * * *") }
     var prompt by rememberSaveable { mutableStateOf("") }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Automations", "Capabilities", onBack)
         Text(
             "Scheduled prompts enter the task queue and use the same routing and approval rules as other work.",
@@ -3020,9 +3541,11 @@ private fun MemoriesScreen(
     onClearEmbeddingModel: () -> Unit,
 ) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("Memories", "Capabilities", onBack)
         Text(
             "Facts and standing instructions Bram retained from past conversations. Remove anything wrong or stale.",
@@ -3067,9 +3590,11 @@ private fun MemoriesScreen(
 @Composable
 private fun SystemScreen(state: AppUiState, onBack: () -> Unit, onRefreshDiagnostics: () -> Unit) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        PanelHandle()
         DestinationHeader("System", "Settings", onBack)
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionHeader("Device", "Hardware and memory summary", Modifier.weight(1f))
@@ -3178,14 +3703,14 @@ private fun ChatBubble(
                 blur = false,
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    MessageBody(message, editing, draft, { draft = it }) {
+                    MessageBody(message, editing, draft, { draft = it }, onCopy) {
                         editing = false
                         onEdit(draft)
                     }
                 }
             }
         } else {
-            MessageBody(message, editing, draft, { draft = it }) {
+            MessageBody(message, editing, draft, { draft = it }, onCopy) {
                 editing = false
                 onEdit(draft)
             }
@@ -3226,6 +3751,7 @@ private fun MessageBody(
     editing: Boolean,
     draft: String,
     onDraftChange: (String) -> Unit,
+    onCopy: (String) -> Unit,
     onSubmit: () -> Unit,
 ) {
     ActivityList(message.id.value, message.activity)
@@ -3243,9 +3769,89 @@ private fun MessageBody(
     } else if (message.content.isNotBlank() || message.activity.isEmpty()) {
         // Models answer in Markdown whether or not anyone asked them to, so rendering it is closer
         // to showing the reply than showing the raw characters is.
+        MarkdownMessage(message.content.ifBlank { "…" }, onCopy)
+    }
+}
+
+@Composable
+private fun MarkdownMessage(source: String, onCopy: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        parseMarkdownBlocks(source).forEachIndexed { index, block ->
+            when (block) {
+                is MarkdownBlock.Prose -> if (block.source.isNotEmpty()) {
+                    Text(renderMarkdown(block.source), style = MaterialTheme.typography.bodyLarge)
+                }
+                is MarkdownBlock.Code -> CodeBlock(
+                    code = block.code,
+                    language = block.language,
+                    onCopy = onCopy,
+                    modifier = Modifier.testTag("code-block-$index"),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CodeBlock(
+    code: String,
+    language: String?,
+    onCopy: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.82f)),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                language?.lowercase(Locale.ROOT) ?: "code",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            IconButton(
+                onClick = { onCopy(code) },
+                modifier = Modifier.size(40.dp).testTag("copy-code"),
+            ) {
+                CopyIcon(MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(18.dp))
+            }
+        }
         Text(
-            renderMarkdown(message.content.ifBlank { "…" }),
-            style = MaterialTheme.typography.bodyLarge,
+            code,
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            softWrap = false,
+        )
+    }
+}
+
+@Composable
+private fun CopyIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.09f
+        val inset = size.minDimension * 0.12f
+        drawRoundRect(
+            color = tint.copy(alpha = 0.65f),
+            topLeft = Offset(inset, inset),
+            size = androidx.compose.ui.geometry.Size(size.width * 0.62f, size.height * 0.62f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(inset),
+            style = Stroke(stroke),
+        )
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(size.width * 0.28f, size.height * 0.28f),
+            size = androidx.compose.ui.geometry.Size(size.width * 0.62f, size.height * 0.62f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(inset),
+            style = Stroke(stroke),
         )
     }
 }
@@ -3262,6 +3868,7 @@ private fun ToolApprovalCard(
     pending: PendingToolApproval,
     onResolve: (ToolApprovalDecision) -> Unit,
 ) {
+    var showDetails by rememberSaveable(pending.id) { mutableStateOf(false) }
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Glass.cornerMedium),
@@ -3292,14 +3899,60 @@ private fun ToolApprovalCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // The one-line question carries the target; these two rows carry the consequence. The
+            // top row is the quick answer, the bottom row is a grant, and "this run" and "always"
+            // are separate choices because one ends with the run and one does not.
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Button(onClick = { onResolve(ToolApprovalDecision.ALLOW_ONCE) }) { Text("Allow once") }
-                TextButton(onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) }) { Text("Always") }
                 TextButton(onClick = { onResolve(ToolApprovalDecision.DENY) }) { Text("Refuse") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(
+                    modifier = Modifier.testTag("approval-for-run"),
+                    onClick = { onResolve(ToolApprovalDecision.ALLOW_FOR_RUN) },
+                ) { Text("For this run") }
+                TextButton(
+                    modifier = Modifier.testTag("approval-always"),
+                    onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
+                ) { Text("Always") }
+            }
+            TextButton(
+                modifier = Modifier.testTag("approval-details"),
+                onClick = { showDetails = !showDetails },
+            ) { Text(if (showDetails) "Hide details" else "Show details") }
+            if (showDetails) {
+                Text(
+                    "Always would allow ${pending.scopeLabel}.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Surface(
+                    shape = RoundedCornerShape(Glass.cornerSmall),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        prettyArguments(pending.argumentsJson),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .heightIn(max = 200.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(10.dp),
+                    )
+                }
             }
         }
     }
 }
+
+/** The full call, pretty-printed for the details section; capped so a huge body cannot freeze it. */
+private fun prettyArguments(argumentsJson: String): String {
+    val pretty = runCatching { JSONObject(argumentsJson).toString(2) }.getOrDefault(argumentsJson)
+    return if (pretty.length <= DETAILS_MAX_CHARS) pretty else pretty.take(DETAILS_MAX_CHARS) + "\n…[truncated]…"
+}
+
+private const val DETAILS_MAX_CHARS = 4_000
 
 /** The thing a call acts on, for the question. Shares its shape with the activity rows. */
 private fun approvalTarget(pending: PendingToolApproval): String {
@@ -3446,7 +4099,7 @@ private fun AcceleratorRow(capability: AcceleratorCapability) {
 }
 
 @Composable
-private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
+private fun EndpointCard(endpoint: RemoteEndpoint, onEdit: () -> Unit, onRemove: (String) -> Unit) {
     var expanded by rememberSaveable(endpoint.id) { mutableStateOf(false) }
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3476,12 +4129,17 @@ private fun EndpointCard(endpoint: RemoteEndpoint, onRemove: (String) -> Unit) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    TextButton(onClick = onEdit) { Text("Edit profile") }
                     TextButton(onClick = { onRemove(endpoint.id) }) { Text("Remove profile") }
                 }
             }
         }
     }
 }
+
+/** OpenCode Go's catalog uses ordinary OpenAI model rows even when a model uses Responses. */
+private fun discoveredApiKind(baseUrl: String, modelId: String, fallback: RemoteApiKind): RemoteApiKind =
+    ProviderProfile.forBaseUrl(baseUrl).apiKindFor(modelId, fallback)
 
 @Composable
 private fun McpServerCard(ui: McpServerUi, onRemove: (String) -> Unit) {
@@ -3519,29 +4177,59 @@ private fun SkillCard(
     onEdit: (SkillPackage) -> Unit,
     onActivateDraft: (String) -> Unit,
     onRollback: (String) -> Unit,
+    onSetDisabled: (String, Boolean) -> Unit,
     onRemove: (String) -> Unit,
 ) {
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(pkg.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                pkg.activeVersion?.let { version ->
+                if (pkg.disabled) {
                     Text(
-                        "active v$version",
+                        "disabled",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.error,
                     )
+                } else {
+                    pkg.activeVersion?.let { version ->
+                        Text(
+                            "active v$version",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
             pkg.versions.firstOrNull { it.version == pkg.activeVersion }?.let { active ->
                 Text(active.description, style = MaterialTheme.typography.bodySmall)
             }
             pkg.draftVersion?.let { draft ->
+                val drafted = pkg.versions.firstOrNull { it.version == draft }
                 Text(
-                    "Draft v$draft staged, not active yet.",
+                    buildString {
+                        append("Draft v$draft staged, not active yet")
+                        if (drafted?.origin == SkillOrigin.AGENT) {
+                            append(" — drafted by Bram")
+                            drafted.author.takeIf(String::isNotBlank)?.let { append(", author \"$it\"") }
+                        }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
+            }
+            // What the skill asked for, shown for review: tools are offered while it is active, and
+            // permissions still ask at the gate.
+            pkg.versions.firstOrNull { it.version == (pkg.activeVersion ?: pkg.draftVersion) }?.let { version ->
+                if (version.tools.isNotEmpty() || version.permissions.isNotEmpty()) {
+                    Text(
+                        listOfNotNull(
+                            version.tools.takeIf(Set<String>::isNotEmpty)?.let { "tools: ${it.joinToString(", ")}" },
+                            version.permissions.takeIf(Set<String>::isNotEmpty)?.let { "permissions: ${it.joinToString(", ")}" },
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             Row {
                 TextButton(onClick = { onEdit(pkg) }) { Text("Edit") }
@@ -3549,6 +4237,9 @@ private fun SkillCard(
                     TextButton(onClick = { onActivateDraft(pkg.id) }) { Text("Activate draft") }
                 }
                 TextButton(onClick = { onRollback(pkg.id) }) { Text("Roll back") }
+                TextButton(onClick = { onSetDisabled(pkg.id, !pkg.disabled) }) {
+                    Text(if (pkg.disabled) "Enable" else "Disable")
+                }
                 TextButton(onClick = { onRemove(pkg.id) }) { Text("Remove") }
             }
         }
@@ -3671,6 +4362,21 @@ internal fun SectionHeader(title: String, subtitle: String = "", modifier: Modif
         subtitle.takeIf(String::isNotBlank)?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+@Composable
+internal fun PanelHandle() {
+    Box(
+        Modifier.fillMaxWidth().padding(top = 5.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(width = 36.dp, height = 4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)),
+        )
     }
 }
 

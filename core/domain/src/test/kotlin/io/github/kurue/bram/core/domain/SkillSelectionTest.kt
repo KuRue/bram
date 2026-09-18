@@ -141,4 +141,73 @@ class SkillSelectionTest {
         val active = SkillPackage("a", "Active", listOf(SkillVersion("1.0.0", "desc", "body", 0)), "1.0.0", null, 0)
         assertEquals(null, SkillSelection().topDraft(listOf(active), "anything", embedder(emptyMap())))
     }
+
+    // --- suppression of skills an offered tool already covers -------------------
+
+    private fun tool(name: String, description: String) =
+        ToolDefinition(name = name, description = description, inputSchemaJson = """{"type":"object"}""")
+
+    @Test
+    fun `drops a skill whose description duplicates an offered tool`() = runBlocking {
+        val weatherSkill = skill("weather-fetcher", "Automatically fetches current weather data for a location")
+        val gitSkill = skill("git", "how to use git")
+        val embedder = embedder(
+            mapOf(
+                // Mirrors the field measurement: the stub scored 0.7326 against get_weather with
+                // bge-small — a duplicate pair, above the 0.70 bar.
+                "Automatically fetches current weather data for a location" to floatArrayOf(0.73f, 0.68f),
+                "get_weather: Current conditions and a daily forecast for any place" to floatArrayOf(1f, 0f),
+                // The bare description is compared too, and is the fairer form of the two.
+                "Current conditions and a daily forecast for any place" to floatArrayOf(1f, 0f),
+                "how to use git" to floatArrayOf(0f, 1f),
+                "termux_exec: run a shell command" to floatArrayOf(1f, 0f),
+                "run a shell command" to floatArrayOf(1f, 0f),
+            ),
+        )
+        val kept = SkillSelection().withoutCovered(
+            listOf(weatherSkill, gitSkill),
+            listOf(tool("get_weather", "Current conditions and a daily forecast for any place"), tool("termux_exec", "run a shell command")),
+            embedder,
+        )
+        assertEquals(listOf("git"), kept.map { it.id })
+    }
+
+    @Test
+    fun `keeps a skill from a different domain than any offered tool`() = runBlocking {
+        val stormSafety = skill("storm-safety", "check the forecast before planning outdoor work")
+        // Only a clipboard tool is offered; the closest pair sits around 0.6 — same gray zone as
+        // an unrelated topic with shared vocabulary, under the 0.70 bar.
+        val embedder = embedder(
+            mapOf(
+                "check the forecast before planning outdoor work" to floatArrayOf(0.6f, 0.8f),
+                "clipboard_get: Read the current clipboard text" to floatArrayOf(1f, 0f),
+                "Read the current clipboard text" to floatArrayOf(1f, 0f),
+            ),
+        )
+        val kept = SkillSelection().withoutCovered(listOf(stormSafety), listOf(tool("clipboard_get", "Read the current clipboard text")), embedder)
+        assertEquals(listOf("storm-safety"), kept.map { it.id })
+    }
+
+    @Test
+    fun `keeps every skill without an embedder or offered tools`() = runBlocking {
+        val skills = listOf(skill("weather-fetcher", "fetch weather"), skill("git", "git"))
+        assertSame(skills, SkillSelection().withoutCovered(skills, listOf(tool("get_weather", "weather")), embedder = null))
+        assertSame(skills, SkillSelection().withoutCovered(skills, emptyList(), embedder(emptyMap())))
+    }
+
+    @Test
+    fun `keeps every skill when an embedding fails`() = runBlocking {
+        val a = skill("a", "known")
+        val b = skill("b", "unknown")
+        val embedder = embedder(
+            mapOf(
+                "known" to floatArrayOf(1f),
+                "get_weather: conditions" to floatArrayOf(1f),
+                // The bare form is missing, so the comparison cannot complete.
+            ),
+        )
+        val skills = listOf(a, b)
+        // Rather than hide a skill on partial information, suppression declines entirely.
+        assertEquals(skills, SkillSelection().withoutCovered(skills, listOf(tool("get_weather", "conditions")), embedder))
+    }
 }

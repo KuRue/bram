@@ -12,14 +12,20 @@ class SkillLibraryTest {
         version: String = "1.0.0",
         description: String = "Check conditions before planning outdoors",
         instructions: String = "Before any outdoor plan, report the current weather and note rain risks.",
-    ) = """
-        ---
-        name: $name
-        version: $version
-        description: $description
-        ---
-        $instructions
-    """.trimIndent()
+        author: String? = null,
+        tools: String? = null,
+        permissions: String? = null,
+    ) = buildString {
+        appendLine("---")
+        appendLine("name: $name")
+        appendLine("version: $version")
+        appendLine("description: $description")
+        author?.let { appendLine("author: $it") }
+        tools?.let { appendLine("tools: $it") }
+        permissions?.let { appendLine("permissions: $it") }
+        appendLine("---")
+        append(instructions)
+    }.trimEnd()
 
     @Test
     fun `a new skill imports as active`() {
@@ -87,6 +93,116 @@ class SkillLibraryTest {
 
         assertTrue(outcome is SkillActionOutcome.Failed)
         assertEquals("1.0.0", library.packages().single().activeVersion)
+    }
+
+    @Test
+    fun `rollback never promotes an unapproved draft`() {
+        // The recorded bug shape: import 1.0.0, draft 1.1.0, activate it, draft 1.2.0. A rollback
+        // used to take the newest non-active version — the unreviewed 1.2.0 — and make it active
+        // while it was still listed as the draft.
+        val library = SkillLibrary()
+        library.importDocument(document(), nowMillis = 1000L)
+        library.proposeDraft(document(version = "1.1.0"), nowMillis = 2000L)
+        library.activateDraft("weather-scout", nowMillis = 3000L)
+        library.proposeDraft(document(version = "1.2.0"), nowMillis = 4000L)
+
+        assertEquals(SkillActionOutcome.Ok, library.rollback("weather-scout", nowMillis = 5000L))
+
+        val pkg = library.packages().single()
+        assertEquals("the last approved version is 1.0.0", "1.0.0", pkg.activeVersion)
+        assertEquals("the unreviewed draft is still just a draft", "1.2.0", pkg.draftVersion)
+        assertEquals("1.0.0", library.activeSkills().single().version)
+    }
+
+    @Test
+    fun `rollback with only an unapproved draft staged refuses`() {
+        // Import 1.0.0 (approved) then stage 1.1.0 from the agent: there is nothing approved to go
+        // back to, so the draft must not be activated by a rollback.
+        val library = SkillLibrary()
+        library.importDocument(document(), nowMillis = 1000L)
+        library.proposeDraft(document(version = "1.1.0"), nowMillis = 2000L)
+
+        val outcome = library.rollback("weather-scout", nowMillis = 3000L)
+
+        assertTrue(outcome is SkillActionOutcome.Failed)
+        assertEquals("1.0.0", library.packages().single().activeVersion)
+    }
+
+    @Test
+    fun `a version older than the newest is rejected as not newer`() {
+        val library = SkillLibrary()
+        library.importDocument(document(version = "1.2.0"), nowMillis = 1000L)
+
+        val outcome = library.importDocument(document(version = "1.0.0"), nowMillis = 2000L)
+
+        assertTrue((outcome as SkillImportOutcome.Rejected).reason.contains("not newer"))
+        assertEquals("1.2.0", library.packages().single().activeVersion)
+    }
+
+    @Test
+    fun `versions compare as numbers, so 1_10_0 is newer than 1_9_0`() {
+        val library = SkillLibrary()
+        library.importDocument(document(version = "1.9.0"), nowMillis = 1000L)
+
+        val outcome = library.importDocument(document(version = "1.10.0"), nowMillis = 2000L)
+
+        assertTrue(outcome is SkillImportOutcome.Imported)
+        assertEquals("1.10.0", library.packages().single().draftVersion)
+    }
+
+    @Test
+    fun `front matter capabilities reach the active skill`() {
+        val library = SkillLibrary()
+        library.importDocument(
+            document(
+                author = "Ada",
+                tools = "get_weather, web_fetch",
+                permissions = "internet",
+            ),
+            nowMillis = 1000L,
+        )
+
+        val active = library.activeSkills().single()
+        assertEquals(setOf("get_weather", "web_fetch"), active.tools)
+        val version = library.packages().single().versions.single()
+        assertEquals("Ada", version.author)
+        assertEquals(setOf("internet"), version.permissions)
+        assertEquals("an import is a user approval", SkillOrigin.USER, version.origin)
+        assertTrue(version.approvedAtEpochMillis != null)
+    }
+
+    @Test
+    fun `a malformed capabilities line is rejected rather than guessed at`() {
+        val library = SkillLibrary()
+        val outcome = library.importDocument(document(tools = "get_weather, not a tool!"), nowMillis = 1000L)
+
+        assertTrue(outcome is SkillImportOutcome.Rejected)
+        assertTrue((outcome as SkillImportOutcome.Rejected).reason.contains("tools line"))
+    }
+
+    @Test
+    fun `a proposed version is marked agent-authored and unapproved`() {
+        val library = SkillLibrary()
+        library.proposeDraft(document(version = "0.1.0"), nowMillis = 1000L)
+
+        val version = library.packages().single().versions.single()
+        assertEquals(SkillOrigin.AGENT, version.origin)
+        assertNull("an agent draft is approved only by activation", version.approvedAtEpochMillis)
+    }
+
+    @Test
+    fun `disabling removes a skill from the prompt and enabling restores it`() {
+        val library = SkillLibrary()
+        library.importDocument(document(), nowMillis = 1000L)
+        assertEquals(1, library.activeSkills().size)
+
+        assertEquals(SkillActionOutcome.Ok, library.disable("weather-scout", nowMillis = 2000L))
+        assertTrue("a disabled skill stays installed", library.packages().size == 1)
+        assertTrue("a disabled skill leaves the prompt", library.activeSkills().isEmpty())
+        assertEquals("disable keeps the active version", "1.0.0", library.packages().single().activeVersion)
+
+        assertEquals(SkillActionOutcome.Ok, library.enable("weather-scout", nowMillis = 3000L))
+        assertEquals(1, library.activeSkills().size)
     }
 
     @Test
@@ -180,7 +296,9 @@ class SkillLibraryTest {
         assertTrue(prompt.contains("ACTIVE SKILLS"))
         assertTrue(prompt.contains("Weather Scout (v1.0.0)"))
         assertTrue(prompt.contains("untrusted input"))
-        assertTrue(prompt.contains("Before any outdoor plan"))
+        // Progressive disclosure: the body loads through read_skill, never the prompt itself.
+        assertTrue(!prompt.contains("Before any outdoor plan"))
+        assertTrue(prompt.contains("read_skill"))
     }
 
     @Test

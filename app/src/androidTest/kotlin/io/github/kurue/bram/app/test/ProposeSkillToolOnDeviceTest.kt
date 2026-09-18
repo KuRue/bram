@@ -5,6 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.kurue.bram.app.BramApplication
 import io.github.kurue.bram.app.ProposeSkillTool
 import io.github.kurue.bram.core.domain.SkillActionOutcome
+import io.github.kurue.bram.core.domain.SkillOrigin
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -47,6 +48,20 @@ class ProposeSkillToolOnDeviceTest {
 
             assertEquals(SkillActionOutcome.Ok, store.activateDraft("verify-draft"))
             assertEquals("1.0.0", store.packages().first { it.id == "verify-draft" }.activeVersion)
+            assertTrue(store.activeSkills().any { it.id == "verify-draft" })
+
+            // Provenance and approval survive the round trip through skills.json: the version is
+            // agent-authored, activation is what approved it, and a rollback can only land on
+            // something approved.
+            val activated = store.packages().first { it.id == "verify-draft" }.versions.single()
+            assertEquals(SkillOrigin.AGENT, activated.origin)
+            assertTrue("activation must record the approval", activated.approvedAtEpochMillis != null)
+
+            // Disable leaves it installed but out of the prompt; enable brings it back.
+            assertEquals(SkillActionOutcome.Ok, store.disable("verify-draft"))
+            assertTrue(store.activeSkills().none { it.id == "verify-draft" })
+            assertTrue("disable keeps the package", store.packages().any { it.id == "verify-draft" })
+            assertEquals(SkillActionOutcome.Ok, store.enable("verify-draft"))
             assertTrue(store.activeSkills().any { it.id == "verify-draft" })
         } finally {
             store.remove("verify-draft")

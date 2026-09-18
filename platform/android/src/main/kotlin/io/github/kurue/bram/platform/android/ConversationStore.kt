@@ -9,6 +9,7 @@ import io.github.kurue.bram.core.domain.MessageId
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.PermissionMode
 import io.github.kurue.bram.core.domain.PrivacyClass
+import io.github.kurue.bram.core.domain.ToolCall
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -63,9 +64,14 @@ class ConversationStore(context: Context) {
             .put("title", resolvedTitle)
             .put("updatedAtEpochMillis", updatedAt)
             .put("messages", JSONArray().apply { messages.forEach { put(it.toJson()) } })
+        // Settings that live beside the messages must survive a rewrite: save() rebuilds the file
+        // from scratch, so without this a permission mode set between messages would silently
+        // reset to AUTO (and a privacy class to STANDARD) the next time one arrived.
+        carryForward(root, conversationFile(id), "permissionMode")
+        carryForward(root, conversationFile(id), "privacyClass")
         writeAtomically(conversationFile(id), root.toString())
 
-        val summary = ConversationSummary(id, resolvedTitle, updatedAt, messages.size)
+        val summary = ConversationSummary(id, resolvedTitle, updatedAt, messages.count { it.role != MessageRole.TOOL })
         writeIndex(readIndex().filterNot { it.id == id } + summary)
         summary
     }
@@ -124,6 +130,15 @@ class ConversationStore(context: Context) {
 
     fun newId(): ConversationId = ConversationId(UUID.randomUUID().toString())
 
+    /** Copies one persisted setting key from the conversation's previous file into its rewrite. */
+    private fun carryForward(root: JSONObject, previous: File, key: String) {
+        if (!previous.isFile) return
+        runCatching {
+            val value = JSONObject(previous.readText()).optString(key, "")
+            if (value.isNotBlank()) root.put(key, value)
+        }
+    }
+
     private fun existingTitle(id: ConversationId): String? =
         readIndex().firstOrNull { it.id == id }?.title?.takeIf(String::isNotBlank)
 
@@ -170,7 +185,11 @@ class ConversationStore(context: Context) {
                         id = ConversationId(root.getString("id")),
                         title = root.optString("title"),
                         updatedAtEpochMillis = root.optLong("updatedAtEpochMillis"),
-                        messageCount = root.optJSONArray("messages")?.length() ?: 0,
+                        messageCount = root.optJSONArray("messages")?.let { messages ->
+                            (0 until messages.length()).count { index ->
+                                messages.optJSONObject(index)?.optString("role") != MessageRole.TOOL.name
+                            }
+                        } ?: 0,
                     )
                 }.getOrNull()
             }
@@ -208,6 +227,25 @@ class ConversationStore(context: Context) {
         .put("role", role.name)
         .put("content", content)
         .put("createdAtEpochMillis", createdAtEpochMillis)
+        .also { root ->
+            if (toolCalls.isNotEmpty()) {
+                root.put(
+                    "toolCalls",
+                    JSONArray().apply {
+                        toolCalls.forEach { call ->
+                            put(
+                                JSONObject()
+                                    .put("id", call.id)
+                                    .put("name", call.name)
+                                    .put("argumentsJson", call.argumentsJson)
+                                    .put("recovered", call.recovered),
+                            )
+                        }
+                    },
+                )
+            }
+            toolCallId?.takeIf(String::isNotBlank)?.let { root.put("toolCallId", it) }
+        }
         .put(
             "activity",
             JSONArray().apply {
@@ -236,6 +274,18 @@ class ConversationStore(context: Context) {
         role = runCatching { MessageRole.valueOf(getString("role")) }.getOrDefault(MessageRole.USER),
         content = optString("content"),
         createdAtEpochMillis = optLong("createdAtEpochMillis", System.currentTimeMillis()),
+        toolCalls = optJSONArray("toolCalls")?.let { array ->
+            (0 until array.length()).mapNotNull { index ->
+                val call = array.optJSONObject(index) ?: return@mapNotNull null
+                ToolCall(
+                    id = call.optString("id"),
+                    name = call.optString("name"),
+                    argumentsJson = call.optString("argumentsJson"),
+                    recovered = call.optBoolean("recovered"),
+                )
+            }
+        }.orEmpty(),
+        toolCallId = optString("toolCallId").takeIf(String::isNotBlank),
         activity = optJSONArray("activity")?.let { array ->
             (0 until array.length()).mapNotNull { index ->
                 val entry = array.optJSONObject(index) ?: return@mapNotNull null

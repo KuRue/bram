@@ -1,11 +1,13 @@
 #include <jni.h>
 
 #include <android/log.h>
+#include <sys/system_properties.h>
 
 #include "llama.h"
 #include "chat.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "expert_stream.h"
 #include <deque>
 
 #include <algorithm>
@@ -69,6 +71,18 @@ struct runtime_state {
     // own KV/compute buffers. spec_init owns the draft context; speculative drives it.
     common_speculative_ptr speculative;
     std::unique_ptr<common_speculative_init_result> spec_init;
+
+    // MoE expert streaming (models larger than RAM). Non-null only when the loaded model is a
+    // streamable MoE; installed as the chat context's cb_eval. A one-time warm-up decode captures
+    // the live expert tensors so later phases can stream their weights from flash on demand.
+    std::unique_ptr<bram::ExpertStreamer> streamer;
+    bool streamer_captured = false;
+    // Expert-streaming settings from the load request (a real profile setting, not a debug flag).
+    bool stream_experts = false;
+    int stream_cache_mb = 0;
+    bool stream_dense_anon = false;
+    bool stream_overlap = false;
+    int stream_overlap_lanes = 0;
 };
 
 // A second, independent model + context for text embeddings, kept resident so memory recall can
@@ -291,7 +305,44 @@ bool abort_callback(void *) {
     return g_cancelled.load(std::memory_order_relaxed);
 }
 
-llama_context * create_context(int context_tokens = 0) {
+void decode_prompt(llama_context * context, const std::vector<llama_token> & tokens);
+
+// Derives the full shard path list from a multi-part model's first-part path. A single-file model
+// (no "-NNNNN-of-MMMMM.gguf" suffix) returns just that path. llama.cpp names its splits this way,
+// and Bram stores each part under its original name in the same directory, so the siblings are the
+// same prefix with the running index. Returns paths in split order (00001..0000M).
+std::vector<std::string> derive_shard_paths(const std::string & first_path) {
+    std::vector<std::string> shards;
+    // Match the trailing "-NNNNN-of-MMMMM.gguf".
+    const std::string suffix = ".gguf";
+    if (first_path.size() < 18 || first_path.compare(first_path.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        shards.push_back(first_path);
+        return shards;
+    }
+    const size_t stem_end = first_path.size() - suffix.size();      // index just past "MMMMM"
+    // Expect "...-NNNNN-of-MMMMM" ending at stem_end. Positions: MMMMM = [stem_end-5, stem_end).
+    if (stem_end < 13 || first_path.compare(stem_end - 9, 4, "-of-") != 0 ||
+        first_path[stem_end - 15] != '-') {
+        shards.push_back(first_path);
+        return shards;
+    }
+    const std::string mmmmm = first_path.substr(stem_end - 5, 5);
+    const std::string prefix = first_path.substr(0, stem_end - 14); // up to and excluding "NNNNN-of-MMMMM"
+    char * end = nullptr;
+    const long total = std::strtol(mmmmm.c_str(), &end, 10);
+    if (end == mmmmm.c_str() + 5 && total >= 1 && total <= 99999) {
+        for (long i = 1; i <= total; ++i) {
+            char idx[8];
+            snprintf(idx, sizeof(idx), "%05ld", i); // just the running index; the path can be long
+            shards.emplace_back(prefix + idx + "-of-" + mmmmm + ".gguf");
+        }
+        return shards;
+    }
+    shards.push_back(first_path);
+    return shards;
+}
+
+llama_context * create_context(int context_tokens = 0, bool attach_streamer = false) {
     llama_context_params params = llama_context_default_params();
     params.n_ctx = static_cast<uint32_t>(context_tokens > 0 ? context_tokens : g_state.context_tokens);
     // The batch settings travel with the load request: they are context parameters, so every
@@ -313,9 +364,72 @@ llama_context * create_context(int context_tokens = 0) {
     params.flash_attn_type = g_state.flash_attn_type;
     params.type_k = g_state.kv_type;
     params.type_v = g_state.kv_type;
+    // Expert streaming hooks the eval callback to learn each token's routed experts. Only the chat
+    // context carries it: the reference and self-test contexts stay unhooked so the CPU yardstick is
+    // never perturbed by the thing it measures. When the streamer is Off the callback is a no-op.
+    if (attach_streamer && g_state.streamer && g_state.streamer->ready()) {
+        params.cb_eval = bram::ExpertStreamer::eval_callback;
+        params.cb_eval_user_data = g_state.streamer.get();
+    }
     llama_context * context = llama_init_from_model(g_state.model, params);
     if (context == nullptr) throw std::runtime_error("Could not allocate the requested model context");
     return context;
+}
+
+// One-time warm-up decode that lets the streamer record every routed-expert weight tensor the
+// graph references. Runs the whole model on a single token (all layers, so all expert nodes
+// appear), then clears the KV the warm-up produced so the real conversation starts clean.
+void capture_experts(llama_context * context) {
+    if (!g_state.streamer || !g_state.streamer->ready() || g_state.streamer_captured) return;
+    const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
+    llama_token bos = llama_vocab_bos(vocab);
+    if (bos < 0) bos = 0;
+    g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Capture);
+    try {
+        decode_prompt(context, {bos});
+    } catch (...) {
+        // A failed warm-up leaves streaming off rather than aborting the load.
+    }
+    g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Off);
+    llama_memory_clear(llama_get_memory(context), true);
+    g_state.streamer_captured = true;
+    __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+        "bram_stream: captured %zu expert tensors (%zu offsets resolved, %.1f GiB total) across %zu shards",
+        g_state.streamer->captured_count(), g_state.streamer->resolved_count(),
+        g_state.streamer->captured_bytes() / (1024.0 * 1024.0 * 1024.0), g_state.streamer->shard_count());
+
+    // Arm the streamer when the loaded model is a streamable MoE and the profile asked for it. Two
+    // dev-only properties tune it without a rebuild: the byte-for-byte self-check (pages the resident
+    // weights, so it stays a property), and a reader-lane-count override for profiling.
+    //   adb shell setprop debug.bram.stream.verify 1     # verify streamed bytes == mmap (dev gate)
+    //   adb shell setprop debug.bram.stream.lanes 16      # override reader-lane count
+    //   adb shell setprop debug.bram.stream.nopin 1       # skip dense pinning (profiling headroom)
+    if (g_state.stream_experts) {
+        char vprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream.verify", vprop);
+        g_state.streamer->set_verify(vprop[0] == '1');
+        if (g_state.stream_cache_mb > 0) {
+            g_state.streamer->set_cache_budget(static_cast<uint64_t>(g_state.stream_cache_mb) * 1024 * 1024);
+        }
+        char lanesprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream.lanes", lanesprop);
+        const int lanes_override = lanesprop[0] ? atoi(lanesprop) : 0;
+        g_state.streamer->set_overlap(g_state.stream_overlap,
+            lanes_override > 0 ? lanes_override : g_state.stream_overlap_lanes);
+        char nopinprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.stream.nopin", nopinprop);
+        g_state.streamer->set_no_dense_pin(nopinprop[0] == '1');
+
+        std::string arm_error;
+        if (g_state.streamer->arm_stream(&arm_error)) {
+            g_state.streamer->set_mode(bram::ExpertStreamer::Mode::Stream);
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "bram_stream: STREAMING ARMED — experts will be read from flash on demand");
+        } else {
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "bram_stream: arm failed, staying resident (%s)", arm_error.c_str());
+        }
+    }
 }
 
 /** Drops the reusable chat context, so the next turn starts from an empty cache. */
@@ -401,9 +515,12 @@ void decode_prompt(llama_context * context, const std::vector<llama_token> & tok
     size_t offset = 0;
     while (offset < tokens.size()) {
         if (g_cancelled.load(std::memory_order_relaxed)) throw std::runtime_error("Generation cancelled");
+        // Batch by the context's actual n_batch, which is always >= 1 and never exceeds n_ctx. Using
+        // the raw g_state.batch_tokens here would spin forever if it were ever 0 (it is only kept > 0
+        // by a convention in the Kotlin client) and could exceed the context's batch size.
         const int count = std::min(
             static_cast<int>(tokens.size() - offset),
-            g_state.batch_tokens);
+            static_cast<int>(llama_n_batch(context)));
         llama_batch batch = llama_batch_get_one(
             const_cast<llama_token *>(tokens.data() + offset), count);
         const int result = llama_decode(context, batch);
@@ -478,11 +595,62 @@ std::string json_object_at(const std::string & source, size_t key) {
     return "{}";
 }
 
+/** The balanced object starting exactly at [open], string- and escape-aware; empty on failure. */
+std::string json_balanced_object(const std::string & source, size_t open) {
+    if (open == std::string::npos || open >= source.size() || source[open] != '{') return {};
+    int depth = 0;
+    bool in_string = false;
+    for (size_t index = open; index < source.size(); ++index) {
+        const char character = source[index];
+        if (in_string) {
+            if (character == '\\') ++index;
+            else if (character == '"') in_string = false;
+            continue;
+        }
+        if (character == '"') in_string = true;
+        else if (character == '{') ++depth;
+        else if (character == '}' && --depth == 0) return source.substr(open, index - open + 1);
+    }
+    return {};
+}
+
+/**
+ * First occurrence of the quoted [key] that sits at brace depth [want_depth], skipping anything
+ * inside strings. Depth counts braces consumed before the key's opening quote, so members of an
+ * element object `{...}` are at depth 1 and anything nested in a schema value is deeper.
+ */
+size_t json_key_at_depth(const std::string & source, const char * key, int want_depth) {
+    const std::string quoted = std::string("\"") + key + "\"";
+    int depth = 0;
+    bool in_string = false;
+    for (size_t index = 0; index < source.size(); ++index) {
+        const char character = source[index];
+        if (in_string) {
+            if (character == '\\') ++index;
+            else if (character == '"') in_string = false;
+            continue;
+        }
+        if (character == '"') {
+            if (depth == want_depth && source.compare(index, quoted.size(), quoted) == 0) return index;
+            in_string = true;
+            continue;
+        }
+        if (character == '{' || character == '[') ++depth;
+        else if (character == '}' || character == ']') --depth;
+    }
+    return std::string::npos;
+}
+
 /**
  * Parses the tool list the app sends into what the template engine expects.
  *
  * Each entry is `{"name","description","parameters"}`, where parameters is the JSON schema as a
  * string — llama.cpp wants the schema unparsed, since it feeds it to the grammar builder.
+ *
+ * Field lookup is depth-aware: only the element's own members are read. A flat find() used to
+ * splice schema internals into the tool list — read_skill's `{"name": {...}}` property became a
+ * phantom tool literally named "type" while real tools vanished — and whether it derailed
+ * depended on the JSON's key order, which org.json does not guarantee.
  */
 std::vector<common_chat_tool> parse_tools(const std::string & tools_json) {
     std::vector<common_chat_tool> tools;
@@ -491,17 +659,30 @@ std::vector<common_chat_tool> parse_tools(const std::string & tools_json) {
     // only nested value is the schema. Reading it with the string helpers keeps this file free of
     // a JSON dependency that the vendored headers only forward-declare here.
     size_t cursor = 0;
-    while (true) {
-        const size_t name = tools_json.find("\"name\"", cursor);
-        if (name == std::string::npos) break;
+    while (cursor < tools_json.size()) {
+        const size_t open = tools_json.find('{', cursor);
+        if (open == std::string::npos) break;
+        const std::string element = json_balanced_object(tools_json, open);
+        if (element.empty()) break;
+        cursor = open + element.size();
+        const size_t name = json_key_at_depth(element, "name", 1);
+        if (name == std::string::npos) continue;
         common_chat_tool tool;
-        tool.name = json_field(tools_json, name);
-        const size_t description = tools_json.find("\"description\"", name);
-        tool.description = description == std::string::npos ? "" : json_field(tools_json, description);
-        const size_t parameters = tools_json.find("\"parameters\"", name);
-        tool.parameters = parameters == std::string::npos ? "{}" : json_object_at(tools_json, parameters);
-        cursor = parameters == std::string::npos ? name + 6 : parameters + 12;
+        tool.name = json_field(element, name);
+        const size_t description = json_key_at_depth(element, "description", 1);
+        tool.description = description == std::string::npos ? "" : json_field(element, description);
+        const size_t parameters = json_key_at_depth(element, "parameters", 1);
+        tool.parameters = parameters == std::string::npos ? "{}" : json_object_at(element, parameters);
         if (!tool.name.empty()) tools.push_back(std::move(tool));
+    }
+    // One line per run round: what actually reached the template. A parse that silently drops
+    // tools or invents phantoms looks exactly like a model that cannot choose tools, which is
+    // how this bug once hid in plain sight.
+    {
+        std::string names;
+        for (const auto & t : tools) { if (!names.empty()) names += ","; names += t.name; }
+        __android_log_print(ANDROID_LOG_DEBUG, "BramTools",
+            "template received %zu tools: [%s]", tools.size(), names.c_str());
     }
     return tools;
 }
@@ -516,6 +697,28 @@ std::string apply_chat_template(
     if (!g_state.chat_templates) {
         throw std::runtime_error("This GGUF does not contain a usable chat template");
     }
+
+    // Debug: bypass the model's Jinja chat template and build a minimal DeepSeek-style prompt from
+    // the last user message. Lets a model whose baked-in template renders thousands of tokens (e.g.
+    // DeepSeek-V4-Flash → ~2600 tokens for a one-line question) be coherence-tested cheaply. Not for
+    // production; the formatting is approximate. Enable with:  adb shell setprop debug.bram.raw_prompt 1
+    {
+        char rawprop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bram.raw_prompt", rawprop);
+        if (rawprop[0] == '1') {
+            std::string last_user;
+            for (size_t i = 0; i < roles.size(); ++i) {
+                if (roles[i] == "user") last_user = contents[i];
+            }
+            std::string raw = "<｜User｜>" + last_user + "<｜Assistant｜>";
+            g_state.last_chat_params = common_chat_params{};
+            g_state.last_chat_params.prompt = raw;
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "chat template: DEBUG raw_prompt — bypassing Jinja (%zu bytes)", raw.size());
+            return raw;
+        }
+    }
+
     common_chat_templates_inputs inputs;
     inputs.messages.reserve(roles.size());
     for (size_t index = 0; index < roles.size(); ++index) {
@@ -554,6 +757,9 @@ std::string apply_chat_template(
 
 void unload_locked() {
     g_cancelled.store(true, std::memory_order_relaxed);
+    // Release the streamer before the model: disarming restores the expert tensors' ->data and
+    // munmaps the buffers, and it must run while those tensors are still alive.
+    g_state.streamer.reset();
     release_chat_context();
     g_state.chat_templates.reset();
     if (g_state.model != nullptr) llama_model_free(g_state.model);
@@ -638,7 +844,9 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     jint threads, jint gpu_layers, jstring device_filter, jboolean enable_thinking,
     jstring flash_attention, jstring kv_cache, jstring cpu_mask, jboolean cpu_strict, jint poll,
     jstring thread_priority, jstring load_mode, jboolean hex_use_hmx, jboolean hex_disable_nhvx,
-    jboolean hex_host_buf, jint hex_op_batch, jint hex_ndev) {
+    jboolean hex_host_buf, jint hex_op_batch, jint hex_ndev,
+    jboolean stream_experts, jint stream_cache_mb, jboolean stream_dense_anon,
+    jboolean stream_overlap, jint stream_overlap_lanes) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         // The Hexagon backend reads its environment once, at backend registration, so it has to
@@ -733,6 +941,19 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.load_mode = mode.empty() ? "auto" : mode;
         params.vocab_only = false;
         params.check_tensors = false;
+        // Expert streaming rebinds the live expert tensors' ->data at slices read from the gguf, so
+        // the weights must keep their native gguf layout — disable the repacking buffers ONLY when
+        // streaming is requested. Every other load keeps repacking (and the KleidiAI buffer type),
+        // which is a real CPU speedup on arm64, so this change never slows a non-streaming model.
+        g_state.stream_experts = stream_experts == JNI_TRUE;
+        g_state.stream_cache_mb = stream_cache_mb;
+        g_state.stream_dense_anon = stream_dense_anon == JNI_TRUE;
+        g_state.stream_overlap = stream_overlap == JNI_TRUE;
+        g_state.stream_overlap_lanes = stream_overlap_lanes;
+        const bool stream_requested = g_state.stream_experts;
+        if (stream_requested) {
+            params.use_extra_bufts = false;
+        }
 
         // The generation threadpool. Today's behavior — llama.cpp's own pool, default affinity,
         // default polling — is kept unless the load request names a mask, a poll level, strict
@@ -795,6 +1016,27 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         }
         g_state.chat_templates = common_chat_templates_init(g_state.model, "");
         if (!g_state.chat_templates) throw std::runtime_error("Could not initialize the GGUF chat template");
+
+        // Only when streaming is requested: stand up the expert streamer over the model's gguf
+        // shards. Skipping this entirely when off means no offset-map fds, no capture warm-up, and
+        // no behaviour change at all for the resident path — the feature is fully opt-in.
+        if (stream_requested) {
+            char arch[64] = {0};
+            llama_model_meta_val_str(g_state.model, "general.architecture", arch, sizeof(arch));
+            auto candidate = std::make_unique<bram::ExpertStreamer>();
+            std::string stream_error;
+            const std::vector<std::string> shards = derive_shard_paths(model_path);
+            if (candidate->init(shards, arch, &stream_error)) {
+                g_state.streamer = std::move(candidate);
+                g_state.streamer_captured = false;
+                __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+                    "bram_stream: expert streaming armed for arch=%s over %zu shard(s)", arch, shards.size());
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "BramLlama",
+                    "bram_stream: streaming off (%s)", stream_error.c_str());
+            }
+        }
+
         g_state.context_tokens = context_tokens;
         g_state.batch_tokens = batch_tokens;
         g_state.ubatch_tokens = ubatch_tokens;
@@ -920,13 +1162,15 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         }
 
         if (g_state.chat_context == nullptr) {
-            g_state.chat_context = create_context();
+            g_state.chat_context = create_context(0, /*attach_streamer=*/true);
             if (g_state.chat_pool != nullptr) {
                 // The tuned pool is attached here, not in create_context, so the contexts the
                 // harness builds for the CPU reference never carry it.
                 llama_attach_threadpool(g_state.chat_context, g_state.chat_pool, g_state.chat_pool_batch);
             }
             g_state.cached_tokens.clear();
+            // One-time warm-up so the streamer records the live expert tensors before real decoding.
+            capture_experts(g_state.chat_context);
         }
         llama_context * context = g_state.chat_context;
 
@@ -1063,6 +1307,14 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         std::string raw_reply;
         std::string finish_reason = "length";
         const auto decode_start = std::chrono::steady_clock::now();
+        // Snapshot the streamer counters so the per-generation profile below reports deltas for THIS
+        // decode, not cumulative totals — that's what tells us bandwidth vs latency and hit rate.
+        const bool prof = g_state.streamer && g_state.streamer->armed();
+        const uint64_t p_bytes0 = prof ? g_state.streamer->bytes_read() : 0;
+        const uint64_t p_slices0 = prof ? g_state.streamer->slices_read() : 0;
+        const uint64_t p_hits0 = prof ? g_state.streamer->cache_hits() : 0;
+        const uint64_t p_miss0 = prof ? g_state.streamer->cache_misses() : 0;
+        const uint64_t p_evict0 = prof ? g_state.streamer->evictions() : 0;
 
         // MTP speculative decoding: models with nextn heads draft several tokens from their own
         // MTP head and verify them in one batched decode, so a correct draft is several tokens
@@ -1099,7 +1351,13 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
             llama_tokens prompt_tgt = g_state.cached_tokens;
             common_speculative_begin(g_state.speculative.get(), seq_id, prompt_tgt);
 
-            llama_batch batch_tgt = llama_batch_init(llama_n_batch(context), 0, 1);
+            // RAII so the batch's arrays are freed on every exit — including the exceptions the loop
+            // below can throw (token-callback failure, a failed decode) — not just the normal path.
+            struct BatchGuard {
+                llama_batch b;
+                ~BatchGuard() { llama_batch_free(b); }
+            } batch_guard{ llama_batch_init(llama_n_batch(context), 0, 1) };
+            llama_batch & batch_tgt = batch_guard.b;
             llama_tokens draft;
             int n_past = (int) prompt_tgt.size();
             llama_token id_last = prompt_tgt.back();
@@ -1188,7 +1446,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
                 if (finish_reason == "stop" || output_count >= max_output_tokens) break;
                 draft.clear();
             }
-            llama_batch_free(batch_tgt);
+            // batch_tgt is freed by batch_guard's destructor.
         } else {
         for (; output_count < max_output_tokens; ++output_count) {
             if (g_cancelled.load(std::memory_order_relaxed)) {
@@ -1235,6 +1493,31 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
 
         const auto prompt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prompt_end - prompt_start).count();
         const auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start).count();
+
+        // Per-generation streaming profile: where a >>RAM decode's time actually goes. tok/s vs the
+        // per-token flash read volume and the effective read bandwidth (delta bytes / decode time)
+        // says whether we're bandwidth-bound (near device max) or latency/parallelism-bound (far
+        // below it); the hit rate says how much the cache is buying. Logged, not returned.
+        if (prof && output_count > 0 && decode_ms > 0) {
+            const double secs = decode_ms / 1000.0;
+            const uint64_t d_bytes = g_state.streamer->bytes_read() - p_bytes0;
+            const uint64_t d_slices = g_state.streamer->slices_read() - p_slices0;
+            const uint64_t d_hits = g_state.streamer->cache_hits() - p_hits0;
+            const uint64_t d_miss = g_state.streamer->cache_misses() - p_miss0;
+            const uint64_t d_evict = g_state.streamer->evictions() - p_evict0;
+            const uint64_t d_lookups = d_hits + d_miss;
+            __android_log_print(ANDROID_LOG_WARN, "BramLlama",
+                "bram_prof: %d tok in %.2fs = %.2f tok/s | read %.1f MiB (%.1f MiB/tok) @ %.0f MiB/s "
+                "| %llu slices | hit %.1f%% (%llu/%llu) | %llu evict",
+                output_count, secs, output_count / secs,
+                d_bytes / (1024.0 * 1024.0), d_bytes / (1024.0 * 1024.0) / output_count,
+                (d_bytes / (1024.0 * 1024.0)) / secs,
+                (unsigned long long) d_slices,
+                d_lookups ? (100.0 * d_hits / d_lookups) : 0.0,
+                (unsigned long long) d_hits, (unsigned long long) d_lookups,
+                (unsigned long long) d_evict);
+        }
+
         std::ostringstream result;
         result << "{\"rawReply\":\"" << json_escape(raw_reply) << "\""
                << ",\"promptTokens\":" << prompt_tokens.size()
@@ -1242,7 +1525,15 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
                << ",\"outputTokens\":" << output_count
                << ",\"promptMillis\":" << prompt_ms
                << ",\"decodeMillis\":" << decode_ms
-               << ",\"finishReason\":\"" << finish_reason << "\"}";
+               << ",\"finishReason\":\"" << finish_reason << "\"";
+        if (g_state.streamer && g_state.streamer->armed()) {
+            result << ",\"streaming\":true"
+                   << ",\"streamFlashMiB\":" << (g_state.streamer->bytes_read() / (1024 * 1024))
+                   << ",\"streamResidentMiB\":" << (g_state.streamer->resident_bytes() / (1024 * 1024))
+                   << ",\"streamEvictions\":" << g_state.streamer->evictions()
+                   << ",\"streamDenseMiB\":" << (g_state.streamer->dense_bytes() / (1024 * 1024));
+        }
+        result << "}";
         return result.str();
     });
 }
@@ -1478,8 +1769,6 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_parseRepl
         // own turn header and empty reasoning markers, and a content-only format passes those
         // straight through, so the reply would otherwise read as protocol rather than as an answer.
         auto trim = [](std::string & value) {
-            const char * spaces = " TABNLCR";
-            (void) spaces;
             while (!value.empty() && (value.front() == ' ' || value.front() == '\n' ||
                                       value.front() == '\r' || value.front() == '\t')) {
                 value.erase(0, 1);
@@ -1568,7 +1857,18 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_state(
         std::ostringstream result;
         result << "{\"loaded\":" << (g_state.model != nullptr ? "true" : "false")
                << ",\"contextTokens\":" << g_state.context_tokens
-               << ",\"threads\":" << g_state.threads << "}";
+               << ",\"threads\":" << g_state.threads;
+        // Expert-streaming telemetry so the UI can show what a >>RAM run is actually doing.
+        const bool streaming = g_state.streamer && g_state.streamer->armed();
+        result << ",\"streaming\":" << (streaming ? "true" : "false");
+        if (streaming) {
+            result << ",\"streamFlashMiB\":" << (g_state.streamer->bytes_read() / (1024 * 1024))
+                   << ",\"streamSlices\":" << g_state.streamer->slices_read()
+                   << ",\"streamResidentMiB\":" << (g_state.streamer->resident_bytes() / (1024 * 1024))
+                   << ",\"streamEvictions\":" << g_state.streamer->evictions()
+                   << ",\"streamDenseMiB\":" << (g_state.streamer->dense_bytes() / (1024 * 1024));
+        }
+        result << "}";
         return result.str();
     });
 }

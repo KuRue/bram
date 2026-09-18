@@ -153,11 +153,11 @@ class LiteRtEngineManager(context: Context) {
                         trySend(GenerationEvent.TextDelta(content.text))
                     }
                 }
-                message.toolCalls.forEachIndexed { index, call ->
+                message.toolCalls.forEach { call ->
                     trySend(
                         GenerationEvent.ToolCallReady(
                             ToolCall(
-                                id = "call_$index",
+                                id = ToolCall.newId(),
                                 name = call.name,
                                 argumentsJson = LiteRtLmRequests.toolCallArgumentsJson(call),
                             ),

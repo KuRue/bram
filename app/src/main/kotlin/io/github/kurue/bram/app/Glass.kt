@@ -47,6 +47,7 @@ object Glass {
 
     val cornerLarge: Dp = 22.dp
     val cornerMedium: Dp = 16.dp
+    val cornerSmall: Dp = 10.dp
 }
 
 /**

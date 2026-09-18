@@ -143,6 +143,18 @@ enum class ToolApprovalDecision {
     /** Remembered past the end of the run, until the user withdraws it. */
     ALLOW_ALWAYS,
     DENY,
+    /** The ask expired with nobody answering it; the run may be unattended. */
+    DENY_TIMEOUT,
+    /** Nobody could be asked at all: the run is unattended and no notification could be posted. */
+    DENY_UNATTENDED,
+    /**
+     * Android refused a runtime permission the tool needs, after the user allowed the call.
+     *
+     * Distinct from [DENY]: nobody said no to Bram, so telling the model "the user declined" is
+     * false and pushes it to apologise for a decision the user did not make. The fix is a system
+     * setting, which only the user can change.
+     */
+    DENY_OS_PERMISSION,
 }
 
 /**
@@ -215,10 +227,18 @@ sealed interface AgentEvent {
         val omittedMessageCount: Int,
     ) : AgentEvent
     /**
+     * The tools the run was actually offered, in order. Emitted once per run, after triage, so
+     * observability can show that a small-context run got a bounded subset rather than the full
+     * registry (and which subset, when a model declines to call anything).
+     */
+    data class ToolsSelected(val names: List<String>) : AgentEvent
+    /**
      * The reasoning markers the runtime is using, reported before any text arrives so a partial
      * reply can be split with the loaded format's own tags rather than an assumed `<think>`.
      */
     data class Reasoning(val format: ReasoningFormat) : AgentEvent
+    /** Streamed reasoning text; the transcript shows it as the Thinking activity as it arrives. */
+    data class ReasoningDelta(val text: String) : AgentEvent
     data class TextDelta(val text: String) : AgentEvent
     data class ToolStarted(val call: ToolCall) : AgentEvent
     data class ToolFinished(val call: ToolCall, val result: String) : AgentEvent
@@ -230,32 +250,6 @@ sealed interface AgentEvent {
 
 interface AgentOrchestrator {
     fun run(request: AgentRunRequest, runtime: ModelRuntime): Flow<AgentEvent>
-}
-
-enum class SkillLifecycle {
-    DRAFT,
-    ACTIVE,
-    DISABLED,
-    QUARANTINED,
-}
-
-data class SkillManifest(
-    val id: String,
-    val version: String,
-    val displayName: String,
-    val description: String,
-    val author: String,
-    val lifecycle: SkillLifecycle = SkillLifecycle.DRAFT,
-    val requiredTools: Set<String> = emptySet(),
-    val requestedPermissions: Set<String> = emptySet(),
-    val minimumContextTokens: Int? = null,
-)
-
-interface SkillRepository {
-    suspend fun listActive(): List<SkillManifest>
-    suspend fun stageDraft(manifest: SkillManifest, instructions: String)
-    suspend fun activate(skillId: String, version: String)
-    suspend fun disable(skillId: String)
 }
 
 enum class AutomationScheduleKind {

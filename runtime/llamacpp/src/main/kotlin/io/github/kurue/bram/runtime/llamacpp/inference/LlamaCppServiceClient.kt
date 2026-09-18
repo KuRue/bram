@@ -13,6 +13,7 @@ import io.github.kurue.bram.core.domain.KvCacheType
 import io.github.kurue.bram.core.domain.LoadMode
 import io.github.kurue.bram.core.domain.ReasoningFormat
 import io.github.kurue.bram.core.domain.GenerationMetrics
+import io.github.kurue.bram.core.domain.StreamingMetrics
 import io.github.kurue.bram.core.domain.GenerationRequest
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ThreadPriority
@@ -63,7 +64,9 @@ class LlamaCppServiceClient(context: Context) : Closeable {
      * Null lets the memory store fall back to keyword recall rather than failing the turn.
      */
     suspend fun embed(text: String): FloatArray? = withContext(Dispatchers.IO) {
-        runCatching { requireService().embed(text) }.getOrNull()
+        runCatching { requireService().embed(text) }
+            .onFailure { android.util.Log.d("BramEmbed", "embed call failed: ${it::class.simpleName}: ${it.message}") }
+            .getOrNull()
     }
 
     suspend fun unloadEmbedder(): JSONObject = withContext(Dispatchers.IO) {
@@ -131,6 +134,16 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         threadPriority: ThreadPriority = ThreadPriority.NORMAL,
         loadMode: LoadMode = LoadMode.AUTO,
         hexFlags: HexFlags = HexFlags(),
+        /** Stream MoE experts from flash instead of loading them resident (for models past RAM). */
+        streamExperts: Boolean = false,
+        /** Resident expert-cache budget in MiB, or 0 for unbounded. */
+        streamCacheMb: Int = 0,
+        /** Pin the always-used weights in anon RAM so they survive memory pressure. */
+        streamDenseAnon: Boolean = false,
+        /** Overlap expert reads with compute via background reader lanes + the kernel wait hook. */
+        streamOverlap: Boolean = false,
+        /** Reader-lane count for overlap; 0 lets the native side pick its default. */
+        streamOverlapLanes: Int = 0,
     ): JSONObject = withContext(Dispatchers.IO) {
         // Normalized before it reaches the service so the load identity compares concrete numbers:
         // "default" must mean the same thing on every request, or every call would force a reload.
@@ -164,6 +177,11 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("hexHostBuf", hexFlags.hostBuf)
             .put("hexOpBatch", hexFlags.opBatch)
             .put("hexNDev", hexFlags.nDev)
+            .put("streamExperts", streamExperts)
+            .put("streamCacheMb", streamCacheMb)
+            .put("streamDenseAnon", streamDenseAnon)
+            .put("streamOverlap", streamOverlap)
+            .put("streamOverlapLanes", streamOverlapLanes)
         val result = JSONObject(requireService().load(request.toString()))
         if (result.optBoolean("restartRequired")) {
             android.util.Log.d("BramTune", "restartRequired: restarting the inference process")
@@ -245,25 +263,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                         ),
                     )
                     "textDelta" -> trySend(GenerationEvent.TextDelta(event.optString("text")))
-                    "toolCalls" -> {
-                        val calls = event.optJSONArray("calls")
-                        for (index in 0 until (calls?.length() ?: 0)) {
-                            val call = calls?.optJSONObject(index) ?: continue
-                            trySend(
-                                GenerationEvent.ToolCallReady(
-                                    ToolCall(
-                                        // llama.cpp leaves the id empty for formats that have no
-                                        // notion of one, and the loop needs it to match a result
-                                        // back to its call.
-                                        id = call.optString("id").ifBlank { "call_$index" },
-                                        name = call.optString("name"),
-                                        argumentsJson = call.optString("arguments").ifBlank { "{}" },
-                                        recovered = call.optBoolean("recovered"),
-                                    ),
-                                ),
-                            )
-                        }
-                    }
+                    "toolCalls" -> parseToolCallEvents(event).forEach { trySend(it) }
                     "usage" -> trySend(
                         GenerationEvent.Usage(
                             TokenUsage(
@@ -281,6 +281,16 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                                 decodeMillis = event.optLong("decodeMillis"),
                                 processPssBytes = event.optLong("processPssBytes").takeIf { it > 0 },
                                 cachedPromptTokens = event.optInt("cachedPromptTokens").takeIf { it > 0 },
+                                streaming = if (event.optBoolean("streaming")) {
+                                    StreamingMetrics(
+                                        flashMiB = event.optLong("streamFlashMiB"),
+                                        residentMiB = event.optLong("streamResidentMiB"),
+                                        evictions = event.optLong("streamEvictions"),
+                                        denseMiB = event.optLong("streamDenseMiB"),
+                                    )
+                                } else {
+                                    null
+                                },
                             ),
                         ),
                     )
@@ -456,4 +466,28 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             }
         },
     )
+}
+
+/**
+ * Maps one `toolCalls` event to generation events, minting an id for any call the chat format did
+ * not name (llama.cpp leaves it empty) — minted per call, never per index, because a replayed
+ * history must not collide with the ids a previous turn already used.
+ */
+internal fun parseToolCallEvents(event: JSONObject): List<GenerationEvent.ToolCallReady> {
+    val calls = event.optJSONArray("calls")
+    return buildList {
+        for (index in 0 until (calls?.length() ?: 0)) {
+            val call = calls?.optJSONObject(index) ?: continue
+            add(
+                GenerationEvent.ToolCallReady(
+                    ToolCall(
+                        id = call.optString("id").ifBlank { ToolCall.newId() },
+                        name = call.optString("name"),
+                        argumentsJson = call.optString("arguments").ifBlank { "{}" },
+                        recovered = call.optBoolean("recovered"),
+                    ),
+                ),
+            )
+        }
+    }
 }
