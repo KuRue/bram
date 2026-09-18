@@ -1757,7 +1757,12 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_parseRepl
             // local model could not call a tool even once the template offered it one.
             params.parse_tool_calls = true;
             const common_chat_msg parsed = common_chat_parse(text, false, params);
-            if (!parsed.content.empty()) content = parsed.content;
+            // Taken wholesale when the parse succeeds. An empty content is a real answer for a
+            // reply that is all reasoning: the block never closed, or the model stopped while
+            // thinking, and either way there is nothing to show. Keeping the raw text in that case
+            // (the old `if (!parsed.content.empty())` guard) put the whole reasoning block, markup
+            // and all, back into the answer beside the reasoning row the app had already recorded.
+            content = parsed.content;
             if (!parsed.reasoning_content.empty()) reasoning = parsed.reasoning_content;
             tool_calls = parsed.tool_calls;
         } catch (const std::exception & error) {

@@ -376,6 +376,33 @@ private fun ReasoningFormat.firstEndTagFrom(text: String, from: Int): Pair<Int, 
         text.indexOf(tag, from).takeIf { it >= 0 }?.let { it to tag }
     }.minByOrNull { it.first }
 
+/**
+ * Splits a finished local reply into its visible answer and its reasoning.
+ *
+ * [parsedContent] and [parsedReasoning] come from the runtime's own parser, which knows the loaded
+ * format. When it found reasoning, its content is the answer even when that content is empty: a
+ * reasoning block the model never closed has no answer yet, and the raw text - which still carries
+ * the block and its markers - must not stand in for one. Keeping the raw reply there put the whole
+ * reasoning in the transcript twice, once collapsed and once as the "answer" with its markup
+ * showing (issue found on-device with Qwen3.5-0.8B, which spent its whole reply budget thinking).
+ *
+ * When the parser found no reasoning, some formats it cannot describe (LFM2.5 among them) still
+ * mark reasoning in the text, so the split falls back to the same one the stream uses rather than
+ * leaving the markers inline in the saved answer.
+ */
+internal fun splitLocalReply(
+    rawReply: String,
+    parsedContent: String,
+    parsedReasoning: String,
+    format: ReasoningFormat,
+): Pair<String, String> {
+    if (parsedReasoning.isNotBlank()) return parsedContent to parsedReasoning
+    val split = streamingReply(rawReply, format)
+    val reasoning = (split.closedReasoning + listOfNotNull(split.openReasoning))
+        .joinToString("\n\n").trim()
+    return split.visibleText.trim() to reasoning
+}
+
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
@@ -4211,15 +4238,21 @@ class MainViewModel(
                             while (roundReasoningRecorded < streaming.closedReasoning.size) {
                                 val index = roundReasoningRecorded
                                 val took = if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
-                                // Appended to the same list the tool calls go into, so the rows read
-                                // in the order the model did things: thought, called, thought again.
-                                activity += AgentActivity.Thinking(
-                                    text = streaming.closedReasoning[index],
-                                    durationMillis = took,
-                                    inProgress = false,
-                                )
+                                // An empty block is not a thought: a model that writes
+                                // ` thinking</think>` around nothing used to add a blank
+                                // "Thought for 0s" row to the transcript.
+                                val text = streaming.closedReasoning[index]
+                                if (text.isNotBlank()) {
+                                    // Appended to the same list the tool calls go into, so the rows read
+                                    // in the order the model did things: thought, called, thought again.
+                                    activity += AgentActivity.Thinking(
+                                        text = text,
+                                        durationMillis = took,
+                                        inProgress = false,
+                                    )
+                                    thinkingMillisTotal += took
+                                }
                                 roundReasoningRecorded += 1
-                                thinkingMillisTotal += took
                                 thinkingStartedAt = 0L
                             }
                             // Say "Thinking…" while the block is still open rather than waiting for
@@ -4360,19 +4393,12 @@ class MainViewModel(
                 } else {
                     runCatching {
                         val parsed = container.llamaCppClient.parseReply(rawReply)
-                        val parsedReasoning = parsed.optString("reasoning")
-                        if (parsedReasoning.isNotBlank()) {
-                            parsed.optString("content").ifBlank { rawReply } to parsedReasoning
-                        } else {
-                            // The structured parser found no reasoning. Some formats it cannot
-                            // describe (LFM2.5 among them) still mark reasoning in the text, so fall
-                            // back to the same split the stream uses rather than leaving the markers
-                            // inline in the saved answer.
-                            val split = streamingReply(rawReply, reasoningFormat)
-                            val reasoning = (split.closedReasoning + listOfNotNull(split.openReasoning))
-                                .joinToString("\n\n").trim()
-                            split.visibleText.ifBlank { rawReply } to reasoning
-                        }
+                        splitLocalReply(
+                            rawReply = rawReply,
+                            parsedContent = parsed.optString("content"),
+                            parsedReasoning = parsed.optString("reasoning"),
+                            format = reasoningFormat,
+                        )
                     }.getOrDefault(rawReply to "")
                 }
                 // Every block the model opened, including one it never closed.
