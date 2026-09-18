@@ -208,6 +208,11 @@ fun BramApp(viewModel: MainViewModel) {
     val skillPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importSkillDocument)
     }
+    // The system folder picker grants durable read/write access to one tree; the ViewModel takes
+    // the persistable permission and remembers the folder, and Capabilities shows and clears it.
+    val agentFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let(viewModel::grantAgentFolder)
+    }
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) {
@@ -404,6 +409,8 @@ fun BramApp(viewModel: MainViewModel) {
                                 onRemoveMcpServer = viewModel::removeMcpServer,
                                 onRefreshMcpServers = viewModel::refreshMcpServers,
                                 onWithdrawToolPermission = viewModel::withdrawToolPermission,
+                                onChooseAgentFolder = { agentFolderPicker.launch(null) },
+                                onClearAgentFolder = viewModel::clearAgentFolder,
                             )
                             AppPanel.SKILLS -> SkillsScreen(
                                 state = state,
@@ -3294,6 +3301,8 @@ private fun ToolsScreen(
     onRemoveMcpServer: (String) -> Unit,
     onRefreshMcpServers: () -> Unit,
     onWithdrawToolPermission: (String) -> Unit,
+    onChooseAgentFolder: () -> Unit,
+    onClearAgentFolder: () -> Unit,
 ) {
     var addingMcp by rememberSaveable { mutableStateOf(false) }
     var mcpName by rememberSaveable { mutableStateOf("") }
@@ -3329,6 +3338,41 @@ private fun ToolsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+        GlassSurface(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Agent folder", fontWeight = FontWeight.SemiBold)
+                    if (state.agentFolder != null) {
+                        Text("Granted", color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+                Text(
+                    if (state.agentFolder != null) {
+                        "Bram can list and read files in \"${state.agentFolder}\" through the system's " +
+                            "document picker, and write there with approval. Revoke it here or in system settings."
+                    } else {
+                        "Grant one folder from your documents so Bram can list and read its files, " +
+                            "and write there with approval. Without a folder, the document tools answer that none is granted."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(
+                        modifier = Modifier.testTag("agent-folder-choose"),
+                        onClick = onChooseAgentFolder,
+                    ) {
+                        Text(if (state.agentFolder != null) "Change folder" else "Choose folder")
+                    }
+                    if (state.agentFolder != null) {
+                        TextButton(
+                            modifier = Modifier.testTag("agent-folder-clear"),
+                            onClick = onClearAgentFolder,
+                        ) { Text("Remove access") }
+                    }
+                }
             }
         }
 

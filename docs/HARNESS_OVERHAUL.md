@@ -342,7 +342,12 @@ chars with a digest suffix. Device: a non-tool endpoint is sent `tools: 0` and s
 (`NonToolEndpointSmokeTest`); 7/7 instrumented tests pass. Deferred with rationale: the description
 diet (needs an on-model eval; the proportional budget already bounds the cost) and
 screenshot/accessibility + SAF tools (each needs its own consent/permission flow — a milestone, not
-a line item).
+a line item). Follow-ups landed later: the description diet and similarity-threshold calibration in
+separate PRs; the SAF agent folder (user grants one document tree; list/read run read-only, writes
+ask) as `AgentFolderOnDeviceTest`. Screenshot stays out: MediaProjection consent is per-capture, so
+the tool cannot serve an unattended run, and a consent dialog the agent triggers is worse than none.
+Accessibility remains the candidate for the next capability milestone (one-time settings consent;
+`read_screen` would be `returnsUntrustedContent`, taps approval-gated).
 
 ### M5 — Skills v2 (2–3 days)
 
