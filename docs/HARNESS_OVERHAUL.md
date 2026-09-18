@@ -346,8 +346,15 @@ a line item). Follow-ups landed later: the description diet and similarity-thres
 separate PRs; the SAF agent folder (user grants one document tree; list/read run read-only, writes
 ask) as `AgentFolderOnDeviceTest`. Screenshot stays out: MediaProjection consent is per-capture, so
 the tool cannot serve an unattended run, and a consent dialog the agent triggers is worse than none.
-Accessibility remains the candidate for the next capability milestone (one-time settings consent;
-`read_screen` would be `returnsUntrustedContent`, taps approval-gated).
+Accessibility took the same shape when its turn came: the user enables Bram's accessibility service
+in system settings (the consent; Capabilities shows the state and links there), `read_screen` is
+read-only but marked `returnsUntrustedContent` because other apps authored what it returns, and a
+`screen_unavailable`/`accessibility_off` answer tells the model which situation it is in. The tree
+walk is exercised over the real active window by `ScreenReadingOnDeviceTest`; the system binding
+itself cannot be tested under instrumentation (which suppresses other accessibility services), so
+it is verified manually (`dumpsys accessibility` lists the service under bound services when the
+app is launched normally). Interaction — taps, typing, scrolling — is the next slice, and is where
+the approval gate comes in, since those are not reads.
 
 ### M5 — Skills v2 (2–3 days)
 

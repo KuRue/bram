@@ -388,6 +388,8 @@ data class AppUiState(
     val alwaysAllowedTools: List<String> = emptyList(),
     /** Display name of the folder the user granted Bram access to, or null when none is granted. */
     val agentFolder: String? = null,
+    /** Whether the user has screen reading enabled in system accessibility settings. */
+    val accessibilityEnabled: Boolean = false,
     /** The profile a load uses. Every model has at least a default one. */
     val activeProfileId: String? = null,
     val endpoints: List<RemoteEndpoint> = emptyList(),
@@ -656,6 +658,7 @@ class MainViewModel(
         }
         refreshToolPermissions()
         refreshAgentFolder()
+        refreshAccessibility()
         refreshDeviceProfile()
         reloadCatalogs()
         detectBackends()
@@ -1316,6 +1319,16 @@ class MainViewModel(
         val granted = AgentFolderAccess.grantedTree(container.appContext)
         val name = granted?.let { AgentFolderAccess.displayName(container.appContext, it) }
         mutableState.update { it.copy(agentFolder = name ?: granted?.lastPathSegment) }
+    }
+
+    /**
+     * Screen reading is consented in system settings, so the state can change while Bram is not
+     * looking; the activity refreshes it on resume.
+     */
+    fun refreshAccessibility() {
+        mutableState.update {
+            it.copy(accessibilityEnabled = AccessibilityBridge.enabled(container.appContext))
+        }
     }
 
     /**

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    What Bram's accessibility service asks the system for.
+
+    Window-content retrieval is the point: a task that needs to know what is on screen reads the
+    view hierarchy. The event types are the minimum that keeps the service alive and its window
+    list fresh; Bram does not react to events. View ids are reported so a later interaction slice
+    can name controls the way developers do.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100" />
