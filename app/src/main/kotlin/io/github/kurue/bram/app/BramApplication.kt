@@ -182,6 +182,9 @@ class AppContainer(application: Application) {
                 ListSkillsTool(skillStore),
                 ReadSkillTool(skillStore),
                 ToolSearchTool(registry = { toolRegistry }),
+                ListDocumentsTool { agentDocumentTree() },
+                ReadDocumentTool { agentDocumentTree() },
+                WriteDocumentTool { agentDocumentTree() },
             ),
         ),
     )
@@ -190,6 +193,10 @@ class AppContainer(application: Application) {
         endpoint = endpoint,
         credentialResolver = EndpointCredentialResolver(endpointStore::resolveCredential),
     )
+
+    /** The folder the user granted, or null; every call re-checks the persisted grant. */
+    fun agentDocumentTree(): AgentDocumentTree? =
+        AgentFolderAccess.grantedTree(appContext)?.let { SafDocumentTree(appContext, it) }
 
     fun runtime(model: LocalModelRecord) = LlamaCppRuntime(
         record = model,

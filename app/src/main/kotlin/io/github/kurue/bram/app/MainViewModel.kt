@@ -386,6 +386,8 @@ data class AppUiState(
     val pendingApproval: PendingToolApproval? = null,
     /** Tool allowances the user granted for good, so they can be seen and taken back. */
     val alwaysAllowedTools: List<String> = emptyList(),
+    /** Display name of the folder the user granted Bram access to, or null when none is granted. */
+    val agentFolder: String? = null,
     /** The profile a load uses. Every model has at least a default one. */
     val activeProfileId: String? = null,
     val endpoints: List<RemoteEndpoint> = emptyList(),
@@ -653,6 +655,7 @@ class MainViewModel(
             }
         }
         refreshToolPermissions()
+        refreshAgentFolder()
         refreshDeviceProfile()
         reloadCatalogs()
         detectBackends()
@@ -1296,6 +1299,23 @@ class MainViewModel(
     fun withdrawToolPermission(scope: String) {
         container.toolPermissionStore.withdraw(scope)
         refreshToolPermissions()
+    }
+
+    /** Takes durable access to the folder the user picked, then shows it in Capabilities. */
+    fun grantAgentFolder(treeUri: Uri) {
+        AgentFolderAccess.grant(container.appContext, treeUri)
+        refreshAgentFolder()
+    }
+
+    fun clearAgentFolder() {
+        AgentFolderAccess.clear(container.appContext)
+        refreshAgentFolder()
+    }
+
+    private fun refreshAgentFolder() {
+        val granted = AgentFolderAccess.grantedTree(container.appContext)
+        val name = granted?.let { AgentFolderAccess.displayName(container.appContext, it) }
+        mutableState.update { it.copy(agentFolder = name ?: granted?.lastPathSegment) }
     }
 
     /**
