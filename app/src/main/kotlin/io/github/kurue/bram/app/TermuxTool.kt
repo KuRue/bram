@@ -58,15 +58,11 @@ class TermuxCommandTool(context: Context) : ToolHandler {
         // stdout from an arbitrary program. `curl`, `git clone` and `pip install` all end with
         // somebody else'''s text in the conversation, and Bram cannot tell those runs from `ls`.
         returnsUntrustedContent = true,
-        description = "Run a command in Termux and return its exit code, stdout, and stderr. " +
-            "Prefer `shell` (a raw bash command line) for anything that chains, pipes, globs, or " +
-            "uses builtins like cd/export: it runs under bash so `cd proj && make && git status` " +
-            "works in one call, and within a conversation the working directory persists across " +
-            "shell calls (cd into a project, then call again with just `git status`). Use " +
-            "`command`+`args` for a single executable whose arguments must be passed verbatim " +
-            "(no shell expansion); that path is stateless. Output is truncated to about 50 KB " +
-            "per stream with the original lengths reported. Requires Termux with external-app " +
-            "access enabled.",
+        description = "Run a command in Termux; returns exit code, stdout, and stderr. Prefer `shell` (a " +
+            "bash line) for anything that chains or pipes — its working directory persists across " +
+            "calls in a conversation; use `command`+`args` for one executable with verbatim " +
+            "arguments. Output is truncated near 50 KB per stream. Requires Termux with " +
+            "external-app access.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{

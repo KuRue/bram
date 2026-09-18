@@ -240,7 +240,7 @@ private class DeviceStatusTool(
 ) : ToolHandler {
     override val definition = ToolDefinition(
         name = "device_status",
-        description = "Read the phone's current RAM, storage, thermal state, and detected inference accelerators.",
+        description = "Read the phone's RAM, storage, thermal state, and inference accelerators.",
         inputSchemaJson = """{"type":"object","properties":{},"additionalProperties":false}""",
         readOnly = true,
     )

@@ -1,0 +1,23 @@
+{
+  "device_status": "Read the phone's RAM, storage, thermal state, and inference accelerators.",
+  "memory_search": "Search Bram's persistent memory across conversations for facts and earlier work.",
+  "write_file": "Write a file into Bram's private files area at a relative path (overwrites).",
+  "list_files": "List files in Bram's private files area, newest last.",
+  "read_file": "Read a file from Bram's private files area, truncated beyond 64 KB.",
+  "clipboard_get": "Read the current clipboard text. The clipboard may be unreadable while Bram is backgrounded.",
+  "clipboard_set": "Put text on the system clipboard, replacing what is there.",
+  "post_notification": "Show a notification from Bram in the status shade.",
+  "schedule_notification": "Schedule a notification for a future time, e.g. a reminder.",
+  "launch_uri": "Open a URI (http, tel, mailto, geo) in whatever app handles it.",
+  "search_contacts": "Search device contacts by name; returns names and phone numbers.",
+  "read_calendar_events": "Read calendar events between two epoch-millis times.",
+  "propose_skill": "Draft a skill — a short reusable procedure — for the user to review and activate. Drafts are not active until approved.",
+  "write_note": "Write a short note to Bram's private storage under a given name.",
+  "list_skills": "List installed skills (active and drafts) as name, version, and description.",
+  "read_skill": "Read one active skill's instructions, in chunks; pass nextOffset to continue. Read before following a skill.",
+  "termux_exec": "Run a command in Termux; returns exit code, stdout, and stderr. Prefer `shell` (a bash line) for anything that chains or pipes — its working directory persists across calls in a conversation; use `command`+`args` for one executable with verbatim arguments. Output is truncated near 50 KB per stream. Requires Termux with external-app access.",
+  "tool_search": "Find tools by what they do when the one you need is not offered; returns names, descriptions, and schemas.",
+  "get_weather": "Current weather and daily forecast for any place. Use for every weather question — never web_search or web_fetch.",
+  "web_search": "Search the public web (DuckDuckGo); returns title, URL, and snippet. Only for current or factual information no purpose-built tool covers.",
+  "web_fetch": "Download one web page and return its text with HTML stripped. Use after web_search has picked a URL to read."
+}

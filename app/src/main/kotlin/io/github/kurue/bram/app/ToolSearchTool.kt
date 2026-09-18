@@ -26,8 +26,8 @@ class ToolSearchTool(
 ) : ToolHandler {
     override val definition = ToolDefinition(
         name = "tool_search",
-        description = "Find tools by what they do when the one you need is not offered. Returns " +
-            "matching names, descriptions, and argument schemas; call a tool by the name reported.",
+        description = "Find tools by what they do when the one you need is not offered; returns names, " +
+            "descriptions, and schemas.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{

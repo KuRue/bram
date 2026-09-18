@@ -24,8 +24,7 @@ class ListSkillsTool(
 ) : ToolHandler {
     override val definition = ToolDefinition(
         name = "list_skills",
-        description = "List installed skills — active ones and drafts awaiting activation — as " +
-            "name, version, and description. Use before improving a skill with propose_skill.",
+        description = "List installed skills (active and drafts) as name, version, and description.",
         inputSchemaJson = """{"type":"object","properties":{},"additionalProperties":false}""",
         readOnly = true,
     )
@@ -75,9 +74,8 @@ class ReadSkillTool(
 ) : ToolHandler {
     override val definition = ToolDefinition(
         name = "read_skill",
-        description = "Read one active skill's instructions. Long bodies come in chunks; pass the " +
-            "returned nextOffset to continue. Call this before following a skill or proposing an " +
-            "improved version of it.",
+        description = "Read one active skill's instructions, in chunks; pass nextOffset to continue. Read " +
+            "before following a skill.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{

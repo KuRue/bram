@@ -25,8 +25,8 @@ class WeatherTool : ToolHandler {
         name = "get_weather",
         // Conditions are produced outside the device; treat them like any fetched content.
         returnsUntrustedContent = true,
-        description = "Current weather and a daily forecast for any place on Earth. Use for " +
-            "every weather or forecast question — never web_search or web_fetch.",
+        description = "Current weather and daily forecast for any place. Use for every weather question — " +
+            "never web_search or web_fetch.",
         inputSchemaJson = """
             {"type":"object",
              "properties":{

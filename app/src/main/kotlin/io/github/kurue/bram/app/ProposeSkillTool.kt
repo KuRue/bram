@@ -17,10 +17,8 @@ class ProposeSkillTool(
 ) : ToolHandler {
     override val definition = ToolDefinition(
         name = "propose_skill",
-        description = "Author a new skill (or a new version of an existing one) as a draft for the " +
-            "user to review and activate. A skill is a short procedure the agent follows whenever its " +
-            "description matches the task. Drafts are NOT active until the user approves them, so " +
-            "propose one whenever the user would benefit from a reusable procedure.",
+        description = "Draft a skill — a short reusable procedure — for the user to review and activate. " +
+            "Drafts are not active until approved.",
         inputSchemaJson = """{"type":"object","properties":{"name":{"type":"string","description":"Skill name, 1-48 chars, no colons or line breaks"},"version":{"type":"string","description":"Semver, three numbers like 1.0.0"},"description":{"type":"string","description":"One line saying when to follow this skill, 1-500 chars"},"instructions":{"type":"string","description":"The steps to follow, written for the model to read"}},"required":["name","version","description","instructions"],"additionalProperties":false}""",
         readOnly = false,
         // "Always allow propose_skill" with no target is a blanket allowance to author anything
