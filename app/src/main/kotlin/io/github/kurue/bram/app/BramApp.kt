@@ -3397,13 +3397,13 @@ private fun ToolsScreen(
                 }
                 Text(
                     if (state.accessibilityEnabled) {
-                        "Bram can read the text and controls on the current screen when a task " +
-                            "needs it. Screen content is treated as untrusted, and nothing is " +
-                            "read while the service is off."
+                        "Bram can read the current screen, and tap, type, or scroll there when a " +
+                            "task needs it and the call is approved. Screen content is treated as " +
+                            "untrusted, and nothing happens while the service is off."
                     } else {
-                        "Let Bram read the text and controls on the current screen when a task " +
-                            "needs it. Android grants this in accessibility settings, and only " +
-                            "while the service is on."
+                        "Let Bram read the current screen, and tap, type, or scroll there when a " +
+                            "task needs it. Android grants this in accessibility settings, and " +
+                            "only while the service is on; every action still needs approval."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -353,8 +353,14 @@ read-only but marked `returnsUntrustedContent` because other apps authored what 
 walk is exercised over the real active window by `ScreenReadingOnDeviceTest`; the system binding
 itself cannot be tested under instrumentation (which suppresses other accessibility services), so
 it is verified manually (`dumpsys accessibility` lists the service under bound services when the
-app is launched normally). Interaction — taps, typing, scrolling — is the next slice, and is where
-the approval gate comes in, since those are not reads.
+app is launched normally). Interaction then followed as `tap`, `type_text`, and `scroll`: each
+side-effecting and approval-gated, aimed at a control by its text or label, view id, an index from
+the last `read_screen`, or (for taps) a point, with an index re-matched against the live tree so a
+stale one answers `stale_snapshot` instead of hitting whatever moved into its place. Taps fall
+through to the nearest clickable ancestor, which is what reaches a row whose label sits on a child.
+Verified on the emulator against the real model: `read_screen` ran silently in AUTO, the approval
+card named the target ("Allow Bram to tap Ask before tools?"), and the approved tap opened the
+permission-mode dialog — a visible change from a real click through the bound service.
 
 ### M5 — Skills v2 (2–3 days)
 

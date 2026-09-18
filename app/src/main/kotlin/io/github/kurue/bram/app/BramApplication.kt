@@ -186,6 +186,9 @@ class AppContainer(application: Application) {
                 ReadDocumentTool { agentDocumentTree() },
                 WriteDocumentTool { agentDocumentTree() },
                 ReadScreenTool { screenAccess() },
+                TapTool { screenAccess() },
+                TypeTextTool { screenAccess() },
+                ScrollTool { screenAccess() },
             ),
         ),
     )
