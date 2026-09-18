@@ -4376,22 +4376,22 @@ class MainViewModel(
                     }.getOrDefault(rawReply to "")
                 }
                 // Every block the model opened, including one it never closed.
-                val thinkingMillis = thinkingMillisTotal + if (thinkingStartedAt > 0) {
-                    System.currentTimeMillis() - thinkingStartedAt
-                } else {
-                    0L
-                }
-                val finalActivity = buildList {
-                    // Reasoning a remote provider streamed beside the text, unless a tool round
-                    // already closed it into the activity list.
-                    if (remoteReasoning.isNotBlank()) {
-                        add(AgentActivity.Thinking(remoteReasoning.toString(), durationMillis = thinkingMillis))
-                    }
-                    reply.second.takeIf(String::isNotBlank)?.let {
-                        add(AgentActivity.Thinking(it, durationMillis = thinkingMillis))
-                    }
-                    addAll(activity)
-                }
+                val now = System.currentTimeMillis()
+                val thinkingMillis = thinkingMillisTotal + if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
+                val finalActivity = settleActivities(
+                    activity = activity,
+                    // Reasoning a remote provider streamed beside the text for the final round. It
+                    // happened after every row already in the list, so it belongs at the end.
+                    trailingReasoning = remoteReasoning.toString().takeIf(String::isNotBlank)?.let {
+                        AgentActivity.Thinking(
+                            text = it,
+                            durationMillis = if (thinkingStartedAt > 0) now - thinkingStartedAt else thinkingMillis,
+                        )
+                    },
+                    parsedReasoning = reply.second.takeIf(String::isNotBlank)?.let {
+                        AgentActivity.Thinking(text = it, durationMillis = thinkingMillis)
+                    },
+                )
                 val settled = when {
                     reply.first.isNotBlank() || finalActivity.isNotEmpty() ->
                         requestMessages +
@@ -4864,6 +4864,30 @@ private fun Int?.orZero(): Int = this ?: 0
 private fun org.json.JSONArray?.toIntList(): List<Int> {
     val array = this ?: return emptyList()
     return (0 until array.length()).map(array::getInt)
+}
+
+/**
+ * Assembles the rows one finished turn persists, in the order the model did things.
+ *
+ * [activity] already holds the per-round rows the stream recorded: pre-call reasoning, the tool
+ * rows, and any reasoning a middle round closed at its tool call. Two sources can still be
+ * outstanding when the turn ends, and both belong *after* everything already in the list:
+ *  - the final round's reasoning a remote provider streamed beside the text rather than inside it;
+ *  - the whole turn's reasoning read back from the finished text by the local reply parser, which
+ *    is a fallback for formats the stream could not describe, so it is added only when nothing
+ *    else recorded thinking — otherwise a turn whose blocks the stream closed shows them twice.
+ *
+ * Appending, not prepending, is the point: prepending put the last round's reasoning above the
+ * first round's, which is how a two-thinking-row tool turn persisted back to front.
+ */
+internal fun settleActivities(
+    activity: List<AgentActivity>,
+    trailingReasoning: AgentActivity.Thinking?,
+    parsedReasoning: AgentActivity.Thinking?,
+): List<AgentActivity> = buildList {
+    addAll(activity)
+    trailingReasoning?.let(::add)
+    if (parsedReasoning != null && none { it is AgentActivity.Thinking }) add(parsedReasoning)
 }
 
 /**
