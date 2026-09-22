@@ -16,6 +16,7 @@ READ_FILE_ARGUMENTS = '{"path":"oversized.txt"}'
 MALFORMED_ARGUMENTS = "{not json"
 FINAL_TEXT = "Mock endpoint: tool result received."
 TRUNCATED_FINAL_TEXT = "Mock endpoint: answered after the cut-off."
+TRUNCATED_PARTIAL_TEXT = "The answer so far is forty-two, and the reasoning was long."
 # The continuation nudge the app appends after a cut-off round with no visible answer. Its wording
 # is pinned by TruncationContinuationTest; the mock keys off "length limit" to tell the second
 # request from the first.
@@ -35,6 +36,7 @@ SCENARIOS = (
     "oversized_result",
     "status_failed",
     "truncated_then_answer",
+    "truncated_partial",
 )
 DEFAULT_SCENARIO = "happy_tool_call"
 TOOL_SCENARIOS = ("happy_tool_call", "history_check", "read_file_oversized", "parallel_calls", "malformed_args", "oversized_result")
@@ -62,7 +64,9 @@ NOT_FOUND_ERROR = {"error": {"message": "not found", "type": "invalid_request_er
 SCRIPTED_SERVER_ERROR = {
     "error": {"message": "scripted failure", "type": "server_error"}
 }
-MAX_LOG_ENTRIES = 50
+# Big enough that a full harness suite (~4 requests per test) never rolls entries out from under a
+# test that baselines the log before it starts.
+MAX_LOG_ENTRIES = 500
 
 
 def parse_body(raw):
@@ -234,6 +238,25 @@ def chat_reply(payload, scenario=DEFAULT_SCENARIO):
                 "message": {"role": "assistant", "content": ""},
                 "finish_reason": "length",
             }
+        return (
+            {
+                "id": "chatcmpl-" + uuid.uuid4().hex,
+                "object": "chat.completion",
+                "created": 0,
+                "model": model,
+                "choices": [choice],
+                "usage": usage_chat(),
+            },
+            None,
+        )
+    # A reply that got cut off after its visible text started: it exists, so it settles with the
+    # truncation notice rather than being run again.
+    if scenario == "truncated_partial":
+        choice = {
+            "index": 0,
+            "message": {"role": "assistant", "content": TRUNCATED_PARTIAL_TEXT},
+            "finish_reason": "length",
+        }
         return (
             {
                 "id": "chatcmpl-" + uuid.uuid4().hex,

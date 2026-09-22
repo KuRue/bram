@@ -18,9 +18,11 @@ import org.junit.runner.RunWith
 /**
  * Locks down the approval gate's notification path: a tool call nobody is at the card to answer
  * parks on a request the notifier posts, instead of being silently denied. The notify hook returns
- * whether it could post; when it cannot (no permission, or no hook at all), the old fast-deny still
- * applies so an invisible ask never holds the run. Bypass still runs without asking, and the
- * attended path still parks on the in-app card rather than the shade.
+ * whether it could post; when it cannot (no permission, or no hook at all), the fast-deny still
+ * applies so an invisible ask never holds the run — and it comes back as [DENY_UNATTENDED] rather
+ * than a plain denial, so the model can name the limitation instead of apologising for a decision
+ * nobody made. Bypass still runs without asking, and the attended path still parks on the in-app
+ * card rather than the shade.
  *
  * The gate is pure Kotlin; this lives in androidTest because the app module has no JVM source set.
  */
@@ -72,19 +74,20 @@ class InteractiveApprovalGateNotificationTest {
             notifyRequest = { false }
         }
         val decision = gate.decide(tool, "{}", recovered = false, untrustedContext = false)
-        assertEquals(ToolApprovalDecision.DENY, decision)
+        assertEquals(ToolApprovalDecision.DENY_UNATTENDED, decision)
     }
 
     @Test
     fun unattendedWithNoNotifierFastDenies() = runBlocking {
         // notifyRequest left null: nothing can be posted, so the run is not held for an unanswered
-        // timeout — the pre-notification behaviour is preserved.
+        // timeout — the pre-notification behaviour is preserved, with the unattended reason so the
+        // model can say why the call did not happen.
         val gate = InteractiveApprovalGate(emptyPermissions()).apply {
             setMode(PermissionMode.AUTO)
             setAttended(false)
         }
         val decision = gate.decide(tool, "{}", recovered = false, untrustedContext = false)
-        assertEquals(ToolApprovalDecision.DENY, decision)
+        assertEquals(ToolApprovalDecision.DENY_UNATTENDED, decision)
     }
 
     @Test
