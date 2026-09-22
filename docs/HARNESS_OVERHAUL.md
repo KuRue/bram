@@ -297,6 +297,17 @@ concurrently — approvals still in reply order — while mixed or write batches
 device the parallel path lands as one assistant message with two distinct call ids and two matching
 tool results in the replayed request.
 
+Reply-lifecycle hardening landed later from the phone sweep: the runtime's finish reason rides on
+`AgentEvent.Completed` as `truncated` (the orchestrator used to drop it), a reply that was cut off
+at the length limit settles with a notice naming that — the same honesty rule the result budgets
+apply — and a round that burned its whole budget on reasoning, leaving no answer at all, runs once
+more carrying the cut-off reply and a system nudge to answer directly (a system message so memory
+extraction still reads the user's real ask). Getting the nudge through exposed that the context
+planner dropped every transcript system message; those are windowed normally now, head prompts
+unchanged. Device coverage: `TruncationContinuationOnDeviceTest` against two mock scenarios
+(`truncated_then_answer`, `truncated_partial`), and the real-model cut-off was verified on the
+emulator with the notice path.
+
 ### M3 — Gate polish (1–2 days)
 
 Wire `ALLOW_FOR_RUN` to a real action or delete it; fix the notification publish race; add
