@@ -369,9 +369,11 @@ internal fun interestingNodes(snapshot: ScreenSnapshot): List<ScreenNode> =
  * Finds the control a target names in a list of nodes.
  *
  * Text and label matching prefers an exact match before a substring one, so "Send" does not land
- * on "Send feedback" when both are present. Ids match the whole resource name or its final
- * segment, since models see either. Index is the list read_screen returned, which the caller keeps
- * and staleness-checks.
+ * on "Send feedback" when both are present. The substring tier is the ambiguous one — a
+ * transcript message can quote the very label being aimed at — so a control wins over prose and
+ * the shorter containing text wins among controls, being the tighter label. Ids match the whole
+ * resource name or its final segment, since models see either. Index is the list read_screen
+ * returned, which the caller keeps and staleness-checks.
  */
 internal fun resolveScreenTarget(nodes: List<ScreenNode>, target: ScreenTarget): ScreenNode? = when (target) {
     is ScreenTarget.Index -> nodes.getOrNull(target.value)
@@ -389,9 +391,14 @@ internal fun resolveScreenTarget(nodes: List<ScreenNode>, target: ScreenTarget):
         nodes.firstOrNull {
             it.text.trim().equals(wanted, ignoreCase = true) ||
                 it.description.trim().equals(wanted, ignoreCase = true)
-        } ?: nodes.firstOrNull {
+        } ?: nodes.filter {
             it.text.contains(wanted, ignoreCase = true) || it.description.contains(wanted, ignoreCase = true)
-        }
+        }.minWithOrNull(
+            compareBy(
+                { !it.clickable && !it.editable && !it.scrollable },
+                { (it.text + it.description).length },
+            ),
+        )
     }
     is ScreenTarget.Id -> {
         val wanted = target.value.trim()

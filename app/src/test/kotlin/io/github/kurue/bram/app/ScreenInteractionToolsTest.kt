@@ -58,6 +58,27 @@ class ScreenInteractionToolsTest {
     }
 
     @Test
+    fun `a quoted label in prose loses to the control it names`() {
+        // Seen on-device: a transcript message quoted the label being aimed at, and the substring
+        // tier tapped the prose. A control wins over prose when both contain the wanted text.
+        val nodes = listOf(
+            node(walkIndex = 0, text = "please tap Settings and continue"),
+            node(walkIndex = 1, text = "Open Settings now", clickable = true),
+        )
+        assertEquals(1, resolveScreenTarget(nodes, ScreenTarget.Text("Settings"))?.walkIndex)
+    }
+
+    @Test
+    fun `the shorter containing text wins among substring matches`() {
+        // A tighter label beats a sentence that happens to contain the words.
+        val nodes = listOf(
+            node(walkIndex = 0, text = "You can find Send in the menu", clickable = true),
+            node(walkIndex = 1, text = "Send now", clickable = true),
+        )
+        assertEquals(1, resolveScreenTarget(nodes, ScreenTarget.Text("Send"))?.walkIndex)
+    }
+
+    @Test
     fun `id targets match the full resource name or its last segment`() {
         assertEquals(1, resolveScreenTarget(list, ScreenTarget.Id("com.example.app:id/inbox"))?.walkIndex)
         assertEquals(1, resolveScreenTarget(list, ScreenTarget.Id("inbox"))?.walkIndex)

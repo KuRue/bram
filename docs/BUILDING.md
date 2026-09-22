@@ -164,3 +164,14 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Different development machines may use different Android debug signing keys. If Android rejects an update because the installed build was signed with another debug key, either use a shared local debug keystore or uninstall the prior debug build before installing the new one.
+
+### Enabling screen reading on a sideloaded build
+
+The in-app "Turn on screen reading" button opens the accessibility settings, but Android 13+ blocks a *sideloaded* app from being toggled there until "restricted settings" is allowed for it: App info → the ⋮ menu → Allow restricted settings, after which Bram's toggle works normally. Installing through a store or an IDE does not hit this. For testing, the instrumentation shell path bypasses the gate entirely:
+
+```bash
+adb shell settings put secure enabled_accessibility_services io.github.kurue.bram.app/io.github.kurue.bram.app.BramAccessibilityService
+adb shell settings put secure accessibility_enabled 1
+```
+
+Verify the bind with `adb shell dumpsys accessibility | grep -A2 "Bound services"`. The setting is per-app-data — a reinstall clears it, and a same-value rewrite never rebinds a stale service after an APK update (change the value, or toggle it off and on).
