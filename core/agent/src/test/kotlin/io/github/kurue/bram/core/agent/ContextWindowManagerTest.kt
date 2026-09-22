@@ -67,4 +67,24 @@ class ContextWindowManagerTest {
 
         assertEquals(1, plan.messages.count { it.role == MessageRole.SYSTEM })
     }
+
+    @Test
+    fun `a system message appended mid-transcript stays in the window`() = runBlocking {
+        // A retry that asks the model to finish a reply the length limit cut off appends its nudge
+        // to the transcript; dropping it here would be the same as never asking.
+        val nudge = "Your previous reply was cut off. Give the final answer now."
+        val plan = ContextWindowManager().plan(
+            systemPrompt = "Be helpful.",
+            transcript = listOf(
+                ConversationMessage(role = MessageRole.USER, content = "hello"),
+                ConversationMessage(role = MessageRole.SYSTEM, content = nudge),
+            ),
+            contextWindowTokens = 512,
+            requestedOutputTokens = 64,
+            workingSummary = null,
+            retrievedMemories = emptyList(),
+        )
+
+        assertTrue(plan.messages.any { it.role == MessageRole.SYSTEM && it.content == nudge })
+    }
 }

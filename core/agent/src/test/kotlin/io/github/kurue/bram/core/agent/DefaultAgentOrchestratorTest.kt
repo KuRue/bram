@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -435,6 +436,96 @@ class DefaultAgentOrchestratorTest {
             ),
             runtime = ToolCallingRuntime(),
         ).toList()
+    }
+    @Test
+    fun `a length-limited reply is completed as truncated`() = runBlocking {
+        // Only the runtime knows the reply was cut off, so it rides on Completed: the caller
+        // decides whether to continue it (a reasoning-only round) or just mark it.
+        val events = orchestratorWith().run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("truncated"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Tell me")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = FinishReasonRuntime("length"),
+        ).toList()
+
+        val completed = events.filterIsInstance<AgentEvent.Completed>().single()
+        assertTrue("the runtime said the reply was cut off", completed.truncated)
+        assertEquals("Half a th", completed.message.content)
+    }
+
+    @Test
+    fun `an incomplete Responses-API reply is completed as truncated`() = runBlocking {
+        // The Responses API names the same condition "incomplete" rather than "length".
+        val events = orchestratorWith().run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("incomplete"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Tell me")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = FinishReasonRuntime("incomplete"),
+        ).toList()
+
+        assertTrue(events.filterIsInstance<AgentEvent.Completed>().single().truncated)
+    }
+
+    @Test
+    fun `a stopped reply is not marked truncated`() = runBlocking {
+        val events = orchestratorWith().run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("stopped"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Tell me")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = FinishReasonRuntime("stop"),
+        ).toList()
+
+        assertFalse(events.filterIsInstance<AgentEvent.Completed>().single().truncated)
+    }
+
+    /** An orchestrator with the defaults these tests need; only the runtime varies. */
+    private fun orchestratorWith(): DefaultAgentOrchestrator = DefaultAgentOrchestrator(
+        contextWindowManager = ContextWindowManager(),
+        memoryStore = InMemoryMemoryStore(),
+        toolRegistry = StaticToolRegistry(),
+        approvalGate = ReadOnlyApprovalGate(),
+    )
+}
+
+/** Answers with the given finish reason, so the truncation flag can be exercised. */
+private class FinishReasonRuntime(private val finishReason: String) : ModelRuntime {
+    override val model = ModelDescriptor(
+        id = ModelId("test"),
+        displayName = "Test",
+        providerName = "Test",
+        modelName = "test",
+        location = ModelLocation.LOCAL,
+        contextWindowTokens = 4_096,
+        capabilities = setOf(ModelCapability.TEXT),
+    )
+
+    override suspend fun availability() = RuntimeAvailability(available = true, summary = "Ready")
+
+    override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+        emit(GenerationEvent.Started("Test"))
+        emit(GenerationEvent.TextDelta("Half a th"))
+        emit(GenerationEvent.Finished(finishReason))
     }
 }
 

@@ -4145,18 +4145,28 @@ class MainViewModel(
         var streamedTokens = 0
         var decodeStartedAt = 0L
         var lastRateUpdateAt = 0L
+        // Set by the runtime on the round it cut off at the length limit. A round with no visible
+        // answer to show for it is run once more with a nudge to answer directly; a truncated
+        // reply that does exist settles with a notice.
+        var truncated = false
+        var continuationAttempts = 0
         return try {
-            agent.run(
-                request = AgentRunRequest(
-                    conversationId = conversationId,
-                    messages = requestMessages,
-                    identity = BramDefaults.IDENTITY,
-                    maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
-                    sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
-                    profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
-                ),
-                runtime = selection.runtime,
-            ).collect { event ->
+            // One run of the agent. A length-limited round with no visible answer starts a second
+            // one (see the continuation below), so the run is a function rather than a single call.
+            suspend fun runRound(messages: List<ConversationMessage>): TurnOutcome {
+                completedMessage = null
+                failure = null
+                agent.run(
+                    request = AgentRunRequest(
+                        conversationId = conversationId,
+                        messages = messages,
+                        identity = BramDefaults.IDENTITY,
+                        maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
+                        sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
+                        profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
+                    ),
+                    runtime = selection.runtime,
+                ).collect { event ->
                     when (event) {
                         is AgentEvent.Status -> {
                             mutableState.update { it.copy(status = event.text) }
@@ -4357,6 +4367,7 @@ class MainViewModel(
                         }
                         is AgentEvent.Completed -> {
                             completedMessage = event.message
+                            truncated = event.truncated
                             // Extraction runs in the orchestrator just before Completed, so the new
                             // memory is already stored — refresh so the browser reflects it live.
                             refreshMemories()
@@ -4364,10 +4375,44 @@ class MainViewModel(
                         is AgentEvent.Failed -> failure = event.message
                     }
                 }
-            val outcome = when {
-                completedMessage != null -> TurnOutcome.Completed
-                failure != null -> TurnOutcome.Failed(failure, selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
-                else -> TurnOutcome.Failed("The run ended without producing a reply.", selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
+                val failureMessage = failure
+                return when {
+                    completedMessage != null -> TurnOutcome.Completed
+                    failureMessage != null -> TurnOutcome.Failed(failureMessage, selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
+                    else -> TurnOutcome.Failed("The run ended without producing a reply.", selection.isLocal, selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value)
+                }
+            }
+            var outcome = runRound(requestMessages)
+            // A round the runtime cut off at the length limit with nothing visible to show for it
+            // leaves the user with no answer at all — thinking rows and a tool row, nothing more.
+            // It gets one more run, carrying the cut-off reply and a nudge to answer directly. A
+            // truncated reply that does exist is left alone and settles with a notice.
+            if (shouldContinueAfterTruncation(
+                    truncated = truncated,
+                    visibleAnswer = resolveReply(
+                        rawReply = completedMessage?.content ?: assistantText,
+                        isLocal = selection.isLocal,
+                        format = reasoningFormat,
+                    ).first,
+                    attempts = continuationAttempts,
+                )
+            ) {
+                continuationAttempts += 1
+                truncated = false
+                // The nudge is a system message, not a user one, so the run's memory extraction
+                // still sees the user's real ask instead of extracting the nudge.
+                val continuationMessages = requestMessages +
+                    listOfNotNull(completedMessage?.takeIf { it.content.isNotBlank() }) +
+                    ConversationMessage(
+                        role = MessageRole.SYSTEM,
+                        content = TRUNCATION_CONTINUATION_PROMPT,
+                    )
+                // The next round parses its own stream: carrying the cut-off round's text into it
+                // would let an unclosed reasoning block swallow the continuation's answer.
+                roundText = ""
+                roundReasoningRecorded = 0
+                mutableState.update { it.copy(status = "Reply cut off — asking the model to finish…") }
+                outcome = runRound(continuationMessages)
             }
             // Feed the reachability signal routing consults: a failed remote turn marks the
             // endpoint down briefly, a completed one clears it. A stopped run says nothing about
@@ -4388,19 +4433,10 @@ class MainViewModel(
                 // Separate reasoning from the answer once the reply is complete: the transcript
                 // shows thinking collapsed, and mid-stream the split is not yet determinable.
                 val rawReply = completedMessage?.content ?: assistantText
-                val reply = if (rawReply.isBlank() || !selection.isLocal) {
-                    rawReply to ""
-                } else {
-                    runCatching {
-                        val parsed = container.llamaCppClient.parseReply(rawReply)
-                        splitLocalReply(
-                            rawReply = rawReply,
-                            parsedContent = parsed.optString("content"),
-                            parsedReasoning = parsed.optString("reasoning"),
-                            format = reasoningFormat,
-                        )
-                    }.getOrDefault(rawReply to "")
-                }
+                val (visibleReply, reasoningReply) = resolveReply(rawReply, selection.isLocal, reasoningFormat)
+                // A reply that was cut off at the length limit says so, so a short answer is not
+                // mistaken for a finished one.
+                val replyContent = withTruncationNotice(visibleReply, truncated)
                 // Every block the model opened, including one it never closed.
                 val now = System.currentTimeMillis()
                 val thinkingMillis = thinkingMillisTotal + if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
@@ -4414,17 +4450,17 @@ class MainViewModel(
                             durationMillis = if (thinkingStartedAt > 0) now - thinkingStartedAt else thinkingMillis,
                         )
                     },
-                    parsedReasoning = reply.second.takeIf(String::isNotBlank)?.let {
+                    parsedReasoning = reasoningReply.takeIf(String::isNotBlank)?.let {
                         AgentActivity.Thinking(text = it, durationMillis = thinkingMillis)
                     },
                 )
                 val settled = when {
-                    reply.first.isNotBlank() || finalActivity.isNotEmpty() ->
+                    replyContent.isNotBlank() || finalActivity.isNotEmpty() ->
                         requestMessages +
                             (completedMessage ?: ConversationMessage(
                                 role = MessageRole.ASSISTANT,
-                                content = reply.first,
-                            )).copy(content = reply.first, activity = finalActivity) +
+                                content = replyContent,
+                            )).copy(content = replyContent, activity = finalActivity) +
                             toolResultMessages(finalActivity, selection.runtime.model.contextWindowTokens)
                     else -> requestMessages
                 }
@@ -4450,12 +4486,37 @@ class MainViewModel(
                 if (!appForeground && container.notificationSettings.completionAlertsEnabled()) {
                     val turnName = selection.localModel?.displayName
                         ?: selection.runtime.model.displayName
-                    val summary = reply.first.ifBlank { turnName }
+                    val summary = replyContent.ifBlank { turnName }
                     AgentTaskService.postCompletion(container.appContext, model = turnName, summary = summary)
                 }
                 refreshDeviceProfile()
             }
         }
+
+    /**
+     * Splits a finished reply the way the transcript will show it: the visible answer and any
+     * reasoning, using the runtime's own parser for a local turn. Remote providers have already
+     * separated the two, so their content is the answer as-is.
+     *
+     * A parser failure falls back to the raw reply rather than dropping it: an unparsable reply is
+     * still the only copy of the answer.
+     */
+    private suspend fun resolveReply(
+        rawReply: String,
+        isLocal: Boolean,
+        format: ReasoningFormat,
+    ): Pair<String, String> {
+        if (rawReply.isBlank() || !isLocal) return rawReply to ""
+        return runCatching {
+            val parsed = container.llamaCppClient.parseReply(rawReply)
+            splitLocalReply(
+                rawReply = rawReply,
+                parsedContent = parsed.optString("content"),
+                parsedReasoning = parsed.optString("reasoning"),
+                format = format,
+            )
+        }.getOrDefault(rawReply to "")
+    }
 
     /**
      * The result of one agent run on one runtime. [Failed.localAttemptFailed] lets the caller
@@ -4932,4 +4993,42 @@ internal fun stripBareCalls(text: String, toolName: String): String {
     val name = unbracketed.substring(0, open).trim()
     if (name != toolName) return text
     return ""
+}
+
+/**
+ * The nudge that asks a model to finish a reply the length limit cut off.
+ *
+ * Sent as a system message, not a user one, so the run's memory extraction still sees the user's
+ * real ask rather than treating the nudge as the thing that was said.
+ */
+internal const val TRUNCATION_CONTINUATION_PROMPT =
+    "Your previous reply was cut off because it reached the length limit before it finished. " +
+        "Give the user your final answer now, briefly and directly, without repeating your reasoning."
+
+/** The marker a cut-off reply carries, so a short answer is not mistaken for a finished one. */
+internal const val TRUNCATION_NOTICE = "…[the reply hit the length limit before it finished]…"
+
+/**
+ * Whether a truncated turn should be run again rather than settled as-is.
+ *
+ * Only when there is no visible answer at all: a reply that exists is left alone and marked, but a
+ * round that spent its whole budget on reasoning leaves the user with nothing to read, so it gets
+ * one more run with a nudge to answer directly. [attempts] bounds that to one.
+ */
+internal fun shouldContinueAfterTruncation(
+    truncated: Boolean,
+    visibleAnswer: String,
+    attempts: Int,
+): Boolean = truncated && visibleAnswer.isBlank() && attempts < 1
+
+/**
+ * The persisted answer, with a note when the runtime cut it off at the length limit.
+ *
+ * A truncated reply with no visible text at all is *only* the note: the alternative is an empty
+ * message beside the thinking rows, which says nothing about why there is no answer.
+ */
+internal fun withTruncationNotice(visible: String, truncated: Boolean): String = when {
+    !truncated -> visible
+    visible.isBlank() -> TRUNCATION_NOTICE
+    else -> visible + "\n\n" + TRUNCATION_NOTICE
 }

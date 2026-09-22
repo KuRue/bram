@@ -87,8 +87,11 @@ class ContextWindowManager(
 
         val selected = mutableListOf<ConversationMessage>()
         var estimated = estimator.estimate(fixed)
-        val nonSystemTranscript = transcript.filterNot { it.role == MessageRole.SYSTEM }
-        val groups = coherentTurnGroups(nonSystemTranscript)
+        // System messages in the transcript are windowed like any other message rather than
+        // dropped. The transcript is canonical, and an instruction a retry appends mid-conversation
+        // — the nudge that asks a model to finish a reply the length limit cut off — only does its
+        // job if it reaches the model. The fixed head prompts are separate and always included.
+        val groups = coherentTurnGroups(transcript)
 
         for (group in groups.asReversed()) {
             val groupTokens = estimator.estimate(group)
@@ -103,7 +106,7 @@ class ContextWindowManager(
         }
 
         val truncated = mutableListOf<MessageId>()
-        if (selected.isEmpty() && nonSystemTranscript.isNotEmpty()) {
+        if (selected.isEmpty() && transcript.isNotEmpty()) {
             val newestGroup = groups.lastOrNull().orEmpty()
             val remainingTokens = (inputBudget - estimated - newestGroup.size * 8).coerceAtLeast(16)
             val tokensPerMessage = (remainingTokens / newestGroup.size.coerceAtLeast(1)).coerceAtLeast(8)
@@ -116,7 +119,7 @@ class ContextWindowManager(
 
         val outputMessages = fixed + selected
         val includedIds = selected.mapTo(hashSetOf()) { it.id }
-        val omittedIds = nonSystemTranscript.mapNotNull { message ->
+        val omittedIds = transcript.mapNotNull { message ->
             message.id.takeUnless { it in includedIds }
         }
 
