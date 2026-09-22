@@ -166,6 +166,7 @@ class DefaultAgentOrchestrator(
             val responseText = StringBuilder()
             val toolCalls = mutableListOf<ToolCall>()
             var failure: GenerationEvent.Failed? = null
+            var finishReason: String? = null
 
             runtime.generate(
                 GenerationRequest(
@@ -195,7 +196,7 @@ class DefaultAgentOrchestrator(
                     }
                     is GenerationEvent.Metrics -> emit(AgentEvent.Metrics(event.metrics))
                     is GenerationEvent.Failed -> failure = event
-                    is GenerationEvent.Finished -> Unit
+                    is GenerationEvent.Finished -> finishReason = event.finishReason
                 }
             }
 
@@ -230,7 +231,9 @@ class DefaultAgentOrchestrator(
                         }
                     }
                 }
-                emit(AgentEvent.Completed(assistantMessage))
+                // The caller decides what to do about a cut-off reply — continuing it, marking it,
+                // or both — but only the runtime knows it happened, so it is carried on the event.
+                emit(AgentEvent.Completed(assistantMessage, truncated = isLengthLimited(finishReason)))
                 upsertJournal(RunStatus.SUCCEEDED)
                 return@flow
             }
@@ -500,6 +503,14 @@ class DefaultAgentOrchestrator(
     /** Recognises the envelope [errorJson] writes, so a refusal is not mistaken for a page. */
     private fun isErrorResult(result: String): Boolean =
         result.trimStart().startsWith("{\"error\":")
+
+    /**
+     * Whether a finish reason means the runtime stopped because it ran out of reply room rather
+     * than because the model was done. The names differ by API: OpenAI-compatible servers say
+     * "length", the Responses API says "incomplete", and some compatible servers say "max_tokens".
+     */
+    private fun isLengthLimited(finishReason: String?): Boolean =
+        finishReason == "length" || finishReason == "incomplete" || finishReason == "max_tokens"
 
     private fun errorJson(code: String, message: String): String {
         val safe = message.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")

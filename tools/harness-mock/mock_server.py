@@ -15,6 +15,11 @@ READ_FILE_TOOL = "read_file"
 READ_FILE_ARGUMENTS = '{"path":"oversized.txt"}'
 MALFORMED_ARGUMENTS = "{not json"
 FINAL_TEXT = "Mock endpoint: tool result received."
+TRUNCATED_FINAL_TEXT = "Mock endpoint: answered after the cut-off."
+# The continuation nudge the app appends after a cut-off round with no visible answer. Its wording
+# is pinned by TruncationContinuationTest; the mock keys off "length limit" to tell the second
+# request from the first.
+TRUNCATION_NUDGE_MARKER = "length limit"
 OVERSIZED_TEXT_CHARS = 200_000
 SLOW_SECONDS = 10.0
 SCENARIOS = (
@@ -29,6 +34,7 @@ SCENARIOS = (
     "slow_response",
     "oversized_result",
     "status_failed",
+    "truncated_then_answer",
 )
 DEFAULT_SCENARIO = "happy_tool_call"
 TOOL_SCENARIOS = ("happy_tool_call", "history_check", "read_file_oversized", "parallel_calls", "malformed_args", "oversized_result")
@@ -206,6 +212,39 @@ def chat_reply(payload, scenario=DEFAULT_SCENARIO):
     if not isinstance(messages, list):
         return None, INVALID_REQUEST_ERROR
     model = payload.get("model") or MODELS[0]["id"]
+    # A reasoning-only reply the runtime cut off at the length limit: nothing visible, finish
+    # reason "length". The app answers a round like that with a nudge to finish, so the second
+    # request - the one carrying the nudge - gets the real answer.
+    if scenario == "truncated_then_answer":
+        nudged = any(
+            isinstance(message, dict)
+            and message.get("role") == "system"
+            and TRUNCATION_NUDGE_MARKER in (message.get("content") or "")
+            for message in messages
+        )
+        if nudged:
+            choice = {
+                "index": 0,
+                "message": {"role": "assistant", "content": TRUNCATED_FINAL_TEXT},
+                "finish_reason": "stop",
+            }
+        else:
+            choice = {
+                "index": 0,
+                "message": {"role": "assistant", "content": ""},
+                "finish_reason": "length",
+            }
+        return (
+            {
+                "id": "chatcmpl-" + uuid.uuid4().hex,
+                "object": "chat.completion",
+                "created": 0,
+                "model": model,
+                "choices": [choice],
+                "usage": usage_chat(),
+            },
+            None,
+        )
     calls = None
     if scenario in TOOL_SCENARIOS and should_call_tool(
         tool_names(payload), tool_for(scenario)[0], chat_output_after_latest_user(messages)
