@@ -67,6 +67,7 @@ import io.github.kurue.bram.runtime.openai.RemoteModelCatalog
 import io.github.kurue.bram.runtime.openai.RemoteModelInfo
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 import java.util.UUID
@@ -74,6 +75,7 @@ import kotlin.concurrent.thread
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -4064,7 +4066,9 @@ class MainViewModel(
                 mutableState.update { it.copy(status = "Falling back to ${selection.runtime.model.displayName}…") }
             }
             when (val outcome = runTurnAttempt(selection, runSnapshot, requestMessages)) {
-                is TurnOutcome.Completed -> { stopped = false; break }
+                // failure is cleared too: attempt-1 failing then attempt-2 completing used to
+                // leave the old reason up, so a recovered turn still showed the stale error.
+                is TurnOutcome.Completed -> { stopped = false; failure = null; break }
                 is TurnOutcome.Failed -> {
                     failure = outcome.reason
                     if (outcome.localAttemptFailed) {
@@ -4156,223 +4160,263 @@ class MainViewModel(
             suspend fun runRound(messages: List<ConversationMessage>): TurnOutcome {
                 completedMessage = null
                 failure = null
-                agent.run(
-                    request = AgentRunRequest(
-                        conversationId = conversationId,
-                        messages = messages,
-                        identity = BramDefaults.IDENTITY,
-                        maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
-                        sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
-                        profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
-                    ),
-                    runtime = selection.runtime,
-                ).collect { event ->
-                    when (event) {
-                        is AgentEvent.Status -> {
-                            mutableState.update { it.copy(status = event.text) }
-                            // Preparation labels only before the first token: a status event that
-                            // mentions "prompt" or "context" mid-turn (memory recall, a tool
-                            // retry) must not flip an already-writing turn back to "System prompt".
-                            val preparing = assistantText.isEmpty() && (
-                                event.text.contains("context", ignoreCase = true) ||
-                                    event.text.contains("prompt", ignoreCase = true) ||
-                                    event.text.contains("prepar", ignoreCase = true)
-                                )
-                            pushModelStatus(if (preparing) ModelPhase.PREPARING else ModelPhase.GENERATING)
-                        }
-                        is AgentEvent.Reasoning -> reasoningFormat = event.format
-                        is AgentEvent.ReasoningDelta -> {
-                            val now = System.currentTimeMillis()
-                            if (remoteReasoning.isEmpty()) {
-                                thinkingStartedAt = now
-                                thinking = true
-                                pushModelStatus(ModelPhase.THINKING)
-                            }
-                            remoteReasoning.append(event.text)
-                            mutableState.update {
-                                it.copy(
-                                    messages = requestMessages + inFlightMessage(
-                                        assistantText,
-                                        activity + AgentActivity.Thinking(
-                                            text = remoteReasoning.toString(),
-                                            durationMillis = now - thinkingStartedAt,
-                                            inProgress = true,
-                                        ),
-                                    ),
-                                )
+                val stall = TurnStallWatchdog()
+                var toolsInFlight = 0
+                try {
+                    coroutineScope {
+                        val monitor = launch {
+                            while (true) {
+                                delay(TURN_STALL_CHECK_MILLIS)
+                                val paused = toolsInFlight > 0 ||
+                                    container.approvalGate.pending.value != null ||
+                                    container.runtimePermissionBroker.pendingPermission.value != null
+                                if (stall.stalled(paused)) throw TurnStalledException()
                             }
                         }
-                        is AgentEvent.ToolsSelected -> {
-                            android.util.Log.d("BramTools", "offering ${event.names.size} tools: ${event.names.joinToString()}")
-                        }
-                        is AgentEvent.ContextPrepared -> mutableState.update {
-                            it.copy(
-                                lastContextTokens = event.estimatedInputTokens,
-                                sessionInputTokens = it.sessionInputTokens + event.estimatedInputTokens,
-                                status = buildString {
-                                    append("Context: ${event.estimatedInputTokens} tokens")
-                                    if (event.omittedMessageCount > 0) {
-                                        append(" · ${event.omittedMessageCount} older messages omitted")
+                        try {
+                            agent.run(
+                                request = AgentRunRequest(
+                                    conversationId = conversationId,
+                                    messages = messages,
+                                    identity = BramDefaults.IDENTITY,
+                                    maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
+                                    sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
+                                    profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
+                                ),
+                                runtime = selection.runtime,
+                            ).collect { event ->
+                                stall.onEvent(event)
+                                when (event) {
+                                    is AgentEvent.Status -> {
+                                        mutableState.update { it.copy(status = event.text) }
+                                        // Preparation labels only before the first token: a status event that
+                                        // mentions "prompt" or "context" mid-turn (memory recall, a tool
+                                        // retry) must not flip an already-writing turn back to "System prompt".
+                                        val preparing = assistantText.isEmpty() && (
+                                            event.text.contains("context", ignoreCase = true) ||
+                                                event.text.contains("prompt", ignoreCase = true) ||
+                                                event.text.contains("prepar", ignoreCase = true)
+                                            )
+                                        pushModelStatus(if (preparing) ModelPhase.PREPARING else ModelPhase.GENERATING)
                                     }
-                                },
-                            )
-                        }
-                        is AgentEvent.TextDelta -> {
-                            val rateNow = android.os.SystemClock.elapsedRealtime()
-                            if (decodeStartedAt == 0L) {
-                                decodeStartedAt = rateNow
-                                // The first token is writing, whatever the last status event
-                                // said: a late "…prompt…" status used to strand the phase here
-                                // while the reply streamed under a "System prompt" label.
-                                if (mutableState.value.modelPhase == ModelPhase.PREPARING) {
-                                    pushModelStatus(ModelPhase.GENERATING)
+                                    is AgentEvent.Reasoning -> reasoningFormat = event.format
+                                    is AgentEvent.ReasoningDelta -> {
+                                        val now = System.currentTimeMillis()
+                                        if (remoteReasoning.isEmpty()) {
+                                            thinkingStartedAt = now
+                                            thinking = true
+                                            pushModelStatus(ModelPhase.THINKING)
+                                        }
+                                        remoteReasoning.append(event.text)
+                                        mutableState.update {
+                                            it.copy(
+                                                messages = requestMessages + inFlightMessage(
+                                                    assistantText,
+                                                    activity + AgentActivity.Thinking(
+                                                        text = remoteReasoning.toString(),
+                                                        durationMillis = now - thinkingStartedAt,
+                                                        inProgress = true,
+                                                    ),
+                                                ),
+                                            )
+                                        }
+                                    }
+                                    is AgentEvent.ToolsSelected -> {
+                                        android.util.Log.d("BramTools", "offering ${event.names.size} tools: ${event.names.joinToString()}")
+                                    }
+                                    is AgentEvent.ContextPrepared -> mutableState.update {
+                                        it.copy(
+                                            lastContextTokens = event.estimatedInputTokens,
+                                            sessionInputTokens = it.sessionInputTokens + event.estimatedInputTokens,
+                                            status = buildString {
+                                                append("Context: ${event.estimatedInputTokens} tokens")
+                                                if (event.omittedMessageCount > 0) {
+                                                    append(" · ${event.omittedMessageCount} older messages omitted")
+                                                }
+                                            },
+                                        )
+                                    }
+                                    is AgentEvent.TextDelta -> {
+                                        val rateNow = android.os.SystemClock.elapsedRealtime()
+                                        if (decodeStartedAt == 0L) {
+                                            decodeStartedAt = rateNow
+                                            // The first token is writing, whatever the last status event
+                                            // said: a late "…prompt…" status used to strand the phase here
+                                            // while the reply streamed under a "System prompt" label.
+                                            if (mutableState.value.modelPhase == ModelPhase.PREPARING) {
+                                                pushModelStatus(ModelPhase.GENERATING)
+                                            }
+                                        }
+                                        // Local runtimes emit one delta per decoded token. Remote providers
+                                        // generally do the same, making this a useful live estimate until their
+                                        // authoritative metrics arrive at the end of the turn.
+                                        streamedTokens += 1
+                                        if (rateNow - lastRateUpdateAt >= 200L) {
+                                            val elapsed = (rateNow - decodeStartedAt).coerceAtLeast(1L)
+                                            val liveRate = streamedTokens * 1_000.0 / elapsed
+                                            mutableState.update { it.copy(liveDecodeTokensPerSecond = liveRate) }
+                                            lastRateUpdateAt = rateNow
+                                        }
+                                        assistantText += event.text
+                                        roundText += event.text
+                                        val streaming = streamingReply(roundText, reasoningFormat)
+                                        val now = System.currentTimeMillis()
+                                        // A block that has just closed keeps the time it actually took; leaving
+                                        // it on the running clock would have every finished block claim the
+                                        // duration of the whole turn.
+                                        while (roundReasoningRecorded < streaming.closedReasoning.size) {
+                                            val index = roundReasoningRecorded
+                                            val took = if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
+                                            // An empty block is not a thought: a model that writes
+                                            // ` thinking</think>` around nothing used to add a blank
+                                            // "Thought for 0s" row to the transcript.
+                                            val text = streaming.closedReasoning[index]
+                                            if (text.isNotBlank()) {
+                                                // Appended to the same list the tool calls go into, so the rows read
+                                                // in the order the model did things: thought, called, thought again.
+                                                activity += AgentActivity.Thinking(
+                                                    text = text,
+                                                    durationMillis = took,
+                                                    inProgress = false,
+                                                )
+                                                thinkingMillisTotal += took
+                                            }
+                                            roundReasoningRecorded += 1
+                                            thinkingStartedAt = 0L
+                                        }
+                                        // Say "Thinking…" while the block is still open rather than waiting for
+                                        // it to close. On a slow device that wait is long, and a blank reply
+                                        // with no explanation looks like a stall.
+                                        val inFlight = streaming.openReasoning?.let { reasoning ->
+                                            if (thinkingStartedAt == 0L) thinkingStartedAt = now
+                                            AgentActivity.Thinking(
+                                                text = reasoning,
+                                                durationMillis = now - thinkingStartedAt,
+                                                inProgress = true,
+                                            )
+                                        }
+                                        if (inFlight != null && !thinking) {
+                                            thinking = true
+                                            pushModelStatus(ModelPhase.THINKING)
+                                        } else if (inFlight == null && thinking) {
+                                            thinking = false
+                                            pushModelStatus(ModelPhase.GENERATING)
+                                        }
+                                        mutableState.update {
+                                            it.copy(
+                                                messages = requestMessages + ConversationMessage(
+                                                    role = MessageRole.ASSISTANT,
+                                                    content = (visibleParts + streaming.visibleText).joinToString("").trim(),
+                                                    activity = activity + listOfNotNull(inFlight),
+                                                ),
+                                            )
+                                        }
+                                    }
+                                    is AgentEvent.ToolStarted -> {
+                                        toolsInFlight += 1
+                                        // The round that produced this call is over. Keep whatever prose it
+                                        // wrote, drop the call itself — the row below says it better than
+                                        // `[web_fetch(url='…')]` sitting in the middle of the answer does.
+                                        val finished = streamingReply(roundText, reasoningFormat)
+                                        stripBareCalls(finished.visibleText, event.call.name).takeIf(String::isNotBlank)
+                                            ?.let { visibleParts += it }
+                                        roundText = ""
+                                        roundReasoningRecorded = 0
+                                        // Remote reasoning for this round closes here, so the rows read in the
+                                        // order the model did things: thought, called, thought again.
+                                        if (remoteReasoning.isNotBlank()) {
+                                            val took = if (thinkingStartedAt > 0) System.currentTimeMillis() - thinkingStartedAt else 0L
+                                            activity += AgentActivity.Thinking(text = remoteReasoning.toString(), durationMillis = took)
+                                            thinkingMillisTotal += took
+                                            remoteReasoning.clear()
+                                            thinkingStartedAt = 0L
+                                            thinking = false
+                                        }
+                                        activity += AgentActivity.ToolInvocation(
+                                            id = event.call.id,
+                                            name = event.call.name,
+                                            argumentsJson = event.call.argumentsJson,
+                                        )
+                                        mutableState.update {
+                                            it.copy(
+                                                status = "Running ${event.call.name}…",
+                                                messages = requestMessages + inFlightMessage(
+                                                    (visibleParts + streamingReply(roundText, reasoningFormat).visibleText)
+                                                        .joinToString("").trim(),
+                                                    activity,
+                                                ),
+                                            )
+                                        }
+                                        pushModelStatus(ModelPhase.CALLING_TOOL)
+                                    }
+                                    is AgentEvent.ToolFinished -> {
+                                        toolsInFlight -= 1
+                                        val index = activity.indexOfLast { entry ->
+                                            entry is AgentActivity.ToolInvocation && entry.id == event.call.id
+                                        }
+                                        if (index >= 0) {
+                                            val started = activity[index] as AgentActivity.ToolInvocation
+                                            activity[index] = started.copy(result = event.result)
+                                        }
+                                        mutableState.update {
+                                            it.copy(
+                                                status = null,
+                                                messages = requestMessages + inFlightMessage(
+                                                    (visibleParts + streamingReply(roundText, reasoningFormat).visibleText)
+                                                        .joinToString("").trim(),
+                                                    activity,
+                                                ),
+                                            )
+                                        }
+                                        pushModelStatus(ModelPhase.GENERATING)
+                                        // A proposed skill is persisted the moment the tool returns; refresh so the
+                                        // draft shows in Settings without waiting for an app restart.
+                                        if (event.call.name == "propose_skill") {
+                                            refreshSkills()
+                                            // A draft is untrusted text, so it must not wait unseen: nudge the
+                                            // user to review it when they are not already watching the turn.
+                                            if (!appForeground) maybePostSkillDraftNotification(event.call.argumentsJson, event.result)
+                                        }
+                                    }
+                                    is AgentEvent.Usage -> mutableState.update { it.copy(lastUsage = event.usage) }
+                                    is AgentEvent.Metrics -> mutableState.update {
+                                        it.copy(
+                                            lastMetrics = event.metrics,
+                                            liveDecodeTokensPerSecond = event.metrics.decodeTokensPerSecond,
+                                            sessionOutputTokens = it.sessionOutputTokens + event.metrics.outputTokens,
+                                        )
+                                    }
+                                    is AgentEvent.Completed -> {
+                                        completedMessage = event.message
+                                        truncated = event.truncated
+                                        // Extraction runs in the orchestrator just before Completed, so the new
+                                        // memory is already stored — refresh so the browser reflects it live.
+                                        refreshMemories()
+                                    }
+                                    is AgentEvent.Failed -> failure = event.message
                                 }
                             }
-                            // Local runtimes emit one delta per decoded token. Remote providers
-                            // generally do the same, making this a useful live estimate until their
-                            // authoritative metrics arrive at the end of the turn.
-                            streamedTokens += 1
-                            if (rateNow - lastRateUpdateAt >= 200L) {
-                                val elapsed = (rateNow - decodeStartedAt).coerceAtLeast(1L)
-                                val liveRate = streamedTokens * 1_000.0 / elapsed
-                                mutableState.update { it.copy(liveDecodeTokensPerSecond = liveRate) }
-                                lastRateUpdateAt = rateNow
-                            }
-                            assistantText += event.text
-                            roundText += event.text
-                            val streaming = streamingReply(roundText, reasoningFormat)
-                            val now = System.currentTimeMillis()
-                            // A block that has just closed keeps the time it actually took; leaving
-                            // it on the running clock would have every finished block claim the
-                            // duration of the whole turn.
-                            while (roundReasoningRecorded < streaming.closedReasoning.size) {
-                                val index = roundReasoningRecorded
-                                val took = if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
-                                // An empty block is not a thought: a model that writes
-                                // ` thinking</think>` around nothing used to add a blank
-                                // "Thought for 0s" row to the transcript.
-                                val text = streaming.closedReasoning[index]
-                                if (text.isNotBlank()) {
-                                    // Appended to the same list the tool calls go into, so the rows read
-                                    // in the order the model did things: thought, called, thought again.
-                                    activity += AgentActivity.Thinking(
-                                        text = text,
-                                        durationMillis = took,
-                                        inProgress = false,
-                                    )
-                                    thinkingMillisTotal += took
-                                }
-                                roundReasoningRecorded += 1
-                                thinkingStartedAt = 0L
-                            }
-                            // Say "Thinking…" while the block is still open rather than waiting for
-                            // it to close. On a slow device that wait is long, and a blank reply
-                            // with no explanation looks like a stall.
-                            val inFlight = streaming.openReasoning?.let { reasoning ->
-                                if (thinkingStartedAt == 0L) thinkingStartedAt = now
-                                AgentActivity.Thinking(
-                                    text = reasoning,
-                                    durationMillis = now - thinkingStartedAt,
-                                    inProgress = true,
-                                )
-                            }
-                            if (inFlight != null && !thinking) {
-                                thinking = true
-                                pushModelStatus(ModelPhase.THINKING)
-                            } else if (inFlight == null && thinking) {
-                                thinking = false
-                                pushModelStatus(ModelPhase.GENERATING)
-                            }
-                            mutableState.update {
-                                it.copy(
-                                    messages = requestMessages + ConversationMessage(
-                                        role = MessageRole.ASSISTANT,
-                                        content = (visibleParts + streaming.visibleText).joinToString("").trim(),
-                                        activity = activity + listOfNotNull(inFlight),
-                                    ),
-                                )
-                            }
+                        } finally {
+                            monitor.cancel()
                         }
-                        is AgentEvent.ToolStarted -> {
-                            // The round that produced this call is over. Keep whatever prose it
-                            // wrote, drop the call itself — the row below says it better than
-                            // `[web_fetch(url='…')]` sitting in the middle of the answer does.
-                            val finished = streamingReply(roundText, reasoningFormat)
-                            stripBareCalls(finished.visibleText, event.call.name).takeIf(String::isNotBlank)
-                                ?.let { visibleParts += it }
-                            roundText = ""
-                            roundReasoningRecorded = 0
-                            // Remote reasoning for this round closes here, so the rows read in the
-                            // order the model did things: thought, called, thought again.
-                            if (remoteReasoning.isNotBlank()) {
-                                val took = if (thinkingStartedAt > 0) System.currentTimeMillis() - thinkingStartedAt else 0L
-                                activity += AgentActivity.Thinking(text = remoteReasoning.toString(), durationMillis = took)
-                                thinkingMillisTotal += took
-                                remoteReasoning.clear()
-                                thinkingStartedAt = 0L
-                                thinking = false
-                            }
-                            activity += AgentActivity.ToolInvocation(
-                                id = event.call.id,
-                                name = event.call.name,
-                                argumentsJson = event.call.argumentsJson,
-                            )
-                            mutableState.update {
-                                it.copy(
-                                    status = "Running ${event.call.name}…",
-                                    messages = requestMessages + inFlightMessage(
-                                        (visibleParts + streamingReply(roundText, reasoningFormat).visibleText)
-                                            .joinToString("").trim(),
-                                        activity,
-                                    ),
-                                )
-                            }
-                            pushModelStatus(ModelPhase.CALLING_TOOL)
-                        }
-                        is AgentEvent.ToolFinished -> {
-                            val index = activity.indexOfLast { entry ->
-                                entry is AgentActivity.ToolInvocation && entry.id == event.call.id
-                            }
-                            if (index >= 0) {
-                                val started = activity[index] as AgentActivity.ToolInvocation
-                                activity[index] = started.copy(result = event.result)
-                            }
-                            mutableState.update {
-                                it.copy(
-                                    status = null,
-                                    messages = requestMessages + inFlightMessage(
-                                        (visibleParts + streamingReply(roundText, reasoningFormat).visibleText)
-                                            .joinToString("").trim(),
-                                        activity,
-                                    ),
-                                )
-                            }
-                            pushModelStatus(ModelPhase.GENERATING)
-                            // A proposed skill is persisted the moment the tool returns; refresh so the
-                            // draft shows in Settings without waiting for an app restart.
-                            if (event.call.name == "propose_skill") {
-                                refreshSkills()
-                                // A draft is untrusted text, so it must not wait unseen: nudge the
-                                // user to review it when they are not already watching the turn.
-                                if (!appForeground) maybePostSkillDraftNotification(event.call.argumentsJson, event.result)
-                            }
-                        }
-                        is AgentEvent.Usage -> mutableState.update { it.copy(lastUsage = event.usage) }
-                        is AgentEvent.Metrics -> mutableState.update {
-                            it.copy(
-                                lastMetrics = event.metrics,
-                                liveDecodeTokensPerSecond = event.metrics.decodeTokensPerSecond,
-                                sessionOutputTokens = it.sessionOutputTokens + event.metrics.outputTokens,
-                            )
-                        }
-                        is AgentEvent.Completed -> {
-                            completedMessage = event.message
-                            truncated = event.truncated
-                            // Extraction runs in the orchestrator just before Completed, so the new
-                            // memory is already stored — refresh so the browser reflects it live.
-                            refreshMemories()
-                        }
-                        is AgentEvent.Failed -> failure = event.message
+                    }
+                } catch (stalled: TurnStalledException) {
+                    // A stall after the model wrote something keeps the partial answer (and
+                    // any tool side-effects already applied); a stall with nothing settles
+                    // as a failure so the fallback loop can pick another runtime.
+                    return if (stallProducedOutput(
+                        hasCompletedMessage = completedMessage != null,
+                        hasAssistantText = assistantText.isNotBlank(),
+                        hasActivity = activity.isNotEmpty(),
+                        hasRemoteReasoning = remoteReasoning.isNotBlank(),
+                    )) {
+                        TurnOutcome.Completed
+                    } else {
+                        TurnOutcome.Failed(
+                            stalled.message ?: "The model stopped responding.",
+                            selection.isLocal,
+                            selection.localModel?.id?.value ?: selection.litertlmModel?.id?.value,
+                        )
                     }
                 }
                 val failureMessage = failure
@@ -5032,3 +5076,66 @@ internal fun withTruncationNotice(visible: String, truncated: Boolean): String =
     visible.isBlank() -> TRUNCATION_NOTICE
     else -> visible + "\n\n" + TRUNCATION_NOTICE
 }
+
+// How long a turn may go without a non-Status event before it counts as stalled. Five minutes
+// is 3x the slowest observed local reload (~90s) and matches the candidate-benchmark hang
+// bound; the phone once sat on PREPARING for 21 minutes with zero events, so the threshold
+// only has to be short enough to catch that while staying clear of prompt eval, a 384-token
+// compaction window, and tool silence that the in-flight pause already covers.
+internal const val TURN_STALL_TIMEOUT_MILLIS = 5 * 60 * 1_000L
+
+// How often the stall monitor re-checks. Frequent enough that a stall surfaces within one
+// check of its deadline; cheap because the check is a clock read and three null compares.
+internal const val TURN_STALL_CHECK_MILLIS = 15_000L
+
+/**
+ * Detects a turn that has gone silent: no agent event worth counting for [TURN_STALL_TIMEOUT_MILLIS].
+ *
+ * [onEvent] refreshes the clock for every event except [AgentEvent.Status], which is narration —
+ * compaction and reload labels can cycle while the run is wedged underneath them, and the observed
+ * 21-minute hang may have done exactly that. [stalled] is polled by the monitor in `runRound`;
+ * while it reports paused (a tool in flight, approval gate, or runtime-permission ask) the clock
+ * is refreshed each tick instead, so a legitimate wait never expires.
+ */
+internal class TurnStallWatchdog(
+    private val timeoutMillis: Long = TURN_STALL_TIMEOUT_MILLIS,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    private val lastEventAt = AtomicLong(clock())
+
+    fun onEvent(event: AgentEvent) {
+        if (event !is AgentEvent.Status) lastEventAt.set(clock())
+    }
+
+    fun stalled(paused: Boolean): Boolean {
+        if (paused) {
+            lastEventAt.set(clock())
+            return false
+        }
+        return clock() - lastEventAt.get() >= timeoutMillis
+    }
+}
+
+/**
+ * Thrown when [TurnStallWatchdog] fires. A plain [Exception], deliberately *not* a
+ * [CancellationException]: the outer turn catch maps cancellation to `Cancelled`, which stops the
+ * fallback loop, while a stall must settle as `Failed` (or keep partial output as `Completed`)
+ * so another runtime can still answer.
+ */
+internal class TurnStalledException : Exception(
+    "The model stopped responding with no output for ${TURN_STALL_TIMEOUT_MILLIS / 60_000} minutes.",
+)
+
+/**
+ * Whether a stalled turn already produced something worth keeping.
+ *
+ * Side-effecting tools have run and their rows are in [hasActivity], so settling as `Completed`
+ * avoids re-running them on fallback; extraction's silent window ends at `Completed`, so a hang
+ * in the tail still keeps the reply.
+ */
+internal fun stallProducedOutput(
+    hasCompletedMessage: Boolean,
+    hasAssistantText: Boolean,
+    hasActivity: Boolean,
+    hasRemoteReasoning: Boolean,
+): Boolean = hasCompletedMessage || hasAssistantText || hasActivity || hasRemoteReasoning
