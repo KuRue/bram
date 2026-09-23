@@ -34,6 +34,7 @@ model-cache/
 # Logs and scratch output
 *.log
 tmp/
+__pycache__/
 
 # Pulled from a device to satisfy the linker for BRAM_OPENCL builds. Qualcomm's binary, and
 # device-specific, so it is not ours to redistribute; the CMake says how to obtain it.

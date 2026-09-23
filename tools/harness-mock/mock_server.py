@@ -23,6 +23,10 @@ TRUNCATED_PARTIAL_TEXT = "The answer so far is forty-two, and the reasoning was 
 TRUNCATION_NUDGE_MARKER = "length limit"
 OVERSIZED_TEXT_CHARS = 200_000
 SLOW_SECONDS = 10.0
+# Long enough that a turn sent into this scenario is still silent well past the checks a device
+# test makes, and past the point where a premature stall verdict would show: the mock must not
+# answer before the test has had a chance to stop the turn.
+STALL_SECONDS = 120.0
 SCENARIOS = (
     "text",
     "stream_chat",
@@ -33,6 +37,7 @@ SCENARIOS = (
     "malformed_args",
     "http_500",
     "slow_response",
+    "stall_response",
     "oversized_result",
     "status_failed",
     "truncated_then_answer",
@@ -368,6 +373,8 @@ def respond(path, payload, scenario):
         return 500, SCRIPTED_SERVER_ERROR
     if scenario == "slow_response":
         time.sleep(SLOW_SECONDS)
+    if scenario == "stall_response":
+        time.sleep(STALL_SECONDS)
     if scenario == "history_check":
         missing = history_error(path, payload)
         if missing:

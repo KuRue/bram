@@ -351,6 +351,18 @@ class MockServerTest(unittest.TestCase):
         self.assertEqual(body["choices"][0]["message"]["content"], FINAL_TEXT)
         self.assertGreaterEqual(elapsed, 0.2)
 
+    def test_stall_response_stays_silent_then_answers(self):
+        original = mock_server.STALL_SECONDS
+        mock_server.STALL_SECONDS = 0.5
+        self.addCleanup(setattr, mock_server, "STALL_SECONDS", original)
+        self.arm("stall_response")
+        started = time.monotonic()
+        status, body = self.chat([{"role": "user", "content": USER_MESSAGE}])
+        elapsed = time.monotonic() - started
+        self.assertEqual(status, 200)
+        self.assertEqual(body["choices"][0]["message"]["content"], FINAL_TEXT)
+        self.assertGreaterEqual(elapsed, 0.45)
+
     def test_invalid_json_body(self):
         status, _ = self.post_raw(CHAT_PATH, b"{not json")
         self.assertEqual(status, 400)
