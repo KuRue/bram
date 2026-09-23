@@ -829,6 +829,9 @@ class MainViewModel(
             ConversationMessage(role = MessageRole.ASSISTANT, content = text),
         )
         runCatching { container.conversationStore.save(task.conversationId, messages, title = task.displayName) }
+            .onFailure { error ->
+                android.util.Log.w("BramPersist", "task save failed for ${task.conversationId.value}", error)
+            }
         return TaskOutcome.Succeeded(text, activity)
     }
 
@@ -901,15 +904,29 @@ class MainViewModel(
                     val snapshot = mutableState.value
                     if (snapshot.permissionMode != PermissionMode.AUTO) {
                         runCatching { container.conversationStore.setPermissionMode(summary.id, snapshot.permissionMode) }
+                            .onFailure { error ->
+                                android.util.Log.w("BramPersist", "permission-mode save failed for ${summary.id.value}", error)
+                            }
                     }
                     if (snapshot.privacyClass != PrivacyClass.STANDARD) {
                         runCatching { container.conversationStore.setPrivacyClass(summary.id, snapshot.privacyClass) }
+                            .onFailure { error ->
+                                android.util.Log.w("BramPersist", "privacy-class save failed for ${summary.id.value}", error)
+                            }
                     }
                     val summaries = runCatching { container.conversationStore.list() }
+                        .onFailure { error ->
+                            android.util.Log.w("BramPersist", "conversation list failed after save", error)
+                        }
                         .getOrDefault(listOf(summary))
                     mutableState.update {
                         it.copy(conversations = summaries, activeConversationId = summary.id.value)
                     }
+                }
+                .onFailure { error ->
+                    // A swallowed save looked exactly like "the turn never persisted" in the field;
+                    // without this line there is no logcat evidence the write was even attempted.
+                    android.util.Log.w("BramPersist", "save failed for ${conversationId.value}", error)
                 }
         }
     }
