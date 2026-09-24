@@ -17,6 +17,7 @@ import org.json.JSONObject
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.BeforeClass
@@ -63,6 +64,7 @@ class TruncationContinuationOnDeviceTest {
         // survives other classes' entries in the shared log.
         val before = loggedChatCompletions().count { it.isTruncationTurnRequest() }
         send(ASK)
+        awaitTurnReachedMock("truncated_then_answer", before)
         // The scripted answer goes only to a request carrying the nudge, so seeing it at all is
         // the continuation having run; the log check below pins how.
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(TRUNCATED_FINAL_TEXT) }
@@ -86,6 +88,7 @@ class TruncationContinuationOnDeviceTest {
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Mock endpoint") }
         val before = loggedChatCompletions().count { it.optString("scenario") == "truncated_partial" && it.carriesUserAsk() }
         send(ASK)
+        awaitTurnReachedMock("truncated_partial", before)
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(TRUNCATED_PARTIAL_TEXT) }
         composeRule.waitUntil(TIMEOUT_MILLIS) { countText(NOTICE_MARKER) >= 1 }
 
@@ -102,6 +105,36 @@ class TruncationContinuationOnDeviceTest {
     private fun send(text: String) {
         composeRule.onNodeWithTag("composer-field").performTextInput(text)
         composeRule.onNodeWithTag("send-button").performClick()
+    }
+
+    /**
+     * Waits for this test's own turn to reach the mock, counted from [before].
+     *
+     * Every other wait in this class is on screen text, so when the suite runs end to end a turn that
+     * never leaves the device looks exactly like a turn that reached the mock and then failed to
+     * continue — a bare 120s `ComposeTimeoutException` on the answer, naming neither. This check
+     * splits those apart using the mock's own request log, which is out of band and unaffected by how
+     * fast the UI moves: if the request never appears, the fault is in routing or request
+     * construction; if it appears and the answer still does not, the fault is in the continuation.
+     *
+     * An earlier attempt asserted on the "Writing" phase instead, and that proved racy — these turns
+     * are quick enough for the phase to pass entirely between Compose polls, which turned a passing
+     * test into a failing one. The log cannot be missed that way.
+     */
+    private fun awaitTurnReachedMock(scenario: String, before: Int) {
+        val deadline = System.currentTimeMillis() + TIMEOUT_MILLIS
+        while (System.currentTimeMillis() < deadline) {
+            val mine = loggedChatCompletions()
+                .drop(before)
+                .count { it.optString("scenario") == scenario && it.carriesUserAsk() }
+            if (mine >= 1) return
+            Thread.sleep(500)
+        }
+        fail(
+            "the turn never reached the mock: no $scenario request carrying the user's ask was logged " +
+                "in ${TIMEOUT_MILLIS}ms. That is routing or request construction, not the " +
+                "continuation path — do not debug the continuation until this passes."
+        )
     }
 
     private fun hasText(text: String): Boolean =
