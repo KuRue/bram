@@ -5113,10 +5113,15 @@ internal const val TURN_STALL_CHECK_MILLIS = 15_000L
  * 21-minute hang may have done exactly that. [stalled] is polled by the monitor in `runRound`;
  * while it reports paused (a tool in flight, approval gate, or runtime-permission ask) the clock
  * is refreshed each tick instead, so a legitimate wait never expires.
+ *
+ * The default source is [android.os.SystemClock.elapsedRealtime], not the wall clock: this measures
+ * a duration, and Android moves the wall clock for NTP corrections and user edits. [stalled] also
+ * rebases on a backwards step, so a caller that supplies a non-monotonic source gets a restarted
+ * budget rather than a watchdog that can no longer fire.
  */
 internal class TurnStallWatchdog(
     private val timeoutMillis: Long = TURN_STALL_TIMEOUT_MILLIS,
-    private val clock: () -> Long = System::currentTimeMillis,
+    private val clock: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
     private val lastEventAt = AtomicLong(clock())
 
@@ -5125,11 +5130,17 @@ internal class TurnStallWatchdog(
     }
 
     fun stalled(paused: Boolean): Boolean {
-        if (paused) {
-            lastEventAt.set(clock())
+        val now = clock()
+        val last = lastEventAt.get()
+        if (paused || now < last) {
+            // A source that moved backwards says nothing about how long the run was quiet, so the
+            // budget restarts from the new reading. Reading the negative span as silence instead
+            // would leave the watchdog unable to fire for the rest of the turn — the one failure it
+            // exists to prevent.
+            lastEventAt.set(now)
             return false
         }
-        return clock() - lastEventAt.get() >= timeoutMillis
+        return now - last >= timeoutMillis
     }
 }
 
