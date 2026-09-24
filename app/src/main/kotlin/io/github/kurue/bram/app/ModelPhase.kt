@@ -14,3 +14,13 @@ enum class ModelPhase(val wire: String, val label: String) {
     THINKING("thinking", "Thinking"),
     CALLING_TOOL("tool", "Running a tool"),
 }
+
+/**
+ * Whether a turn is in flight, which is what the composer's button keys off to offer Stop.
+ *
+ * The phases are the right source because they are the ones the screen renders as an in-turn state
+ * ("System prompt", "Writing", "Thinking", "Using tool") instead of the idle "Ready" label. Keying the
+ * button off a separate `isGenerating` flag instead let the two disagree: during a silent remote turn
+ * the screen said "Writing…" while the button was disabled, so Stop could not be invoked at all.
+ */
+internal fun ModelPhase.hasTurnRunning(): Boolean = this != ModelPhase.IDLE
