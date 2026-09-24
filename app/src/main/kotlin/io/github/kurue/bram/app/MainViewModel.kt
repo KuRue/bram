@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.kurue.bram.core.domain.AcceleratorAgreement
 import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.AgentEvent
+import io.github.kurue.bram.core.domain.AgentOrchestrator
 import io.github.kurue.bram.core.domain.AgentRunRequest
 import io.github.kurue.bram.core.domain.Automation
 import io.github.kurue.bram.core.domain.ConversationId
@@ -632,6 +633,15 @@ class MainViewModel(
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var conversationId = ConversationId(UUID.randomUUID().toString())
     private var generationJob: Job? = null
+
+    /**
+     * The orchestrator driving the turn in flight, so a stop can reach the runtime underneath it.
+     *
+     * Cancelling [generationJob] is not enough on its own: a runtime parked in a blocking read may
+     * not notice the cancellation, and the turn then hangs. The orchestrator knows the request id
+     * that only it minted, so this is the only handle that can.
+     */
+    private var activeAgent: AgentOrchestrator? = null
     /** Whether the app is what the user is looking at. Gates the completion alert. */
     private var appForeground = true
     /**
@@ -3916,6 +3926,10 @@ class MainViewModel(
         if (!mutableState.value.isGenerating) return
         // Stopping is an intent to halt, so anything waiting in the queue goes with it.
         mutableState.update { it.copy(queuedMessages = emptyList(), status = "Stopping…") }
+        // First the runtime itself, then the coroutine: cancelling the job only unwinds the
+        // collectors, and a runtime parked in a blocking read has to be cancelled directly or the
+        // turn keeps going until its own timeout.
+        activeAgent?.let { agent -> viewModelScope.launch { runCatching { agent.cancel() } } }
         generationJob?.cancel(CancellationException("Stopped by user"))
     }
 
@@ -4141,6 +4155,7 @@ class MainViewModel(
         // stopped again in the finally. Either way the notification says what is happening.
         pushModelStatus(ModelPhase.PREPARING)
         val agent = container.agent()
+        activeAgent = agent
         // Reported by the runtime before any text arrives, since only it knows what the loaded
         // chat template uses. Until it does, an empty format leaves the stream alone rather
         // than splitting it on tags that may not be this model's.

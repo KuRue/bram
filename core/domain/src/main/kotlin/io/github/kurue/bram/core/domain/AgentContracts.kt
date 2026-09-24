@@ -250,6 +250,16 @@ sealed interface AgentEvent {
 
 interface AgentOrchestrator {
     fun run(request: AgentRunRequest, runtime: ModelRuntime): Flow<AgentEvent>
+
+    /**
+     * Cancels the run in flight, if there is one.
+     *
+     * Cancelling the collecting coroutine is not always enough: a runtime parked in a blocking read
+     * may not notice, and the turn then hangs until its own timeout. This reaches the runtime's own
+     * cancellation, which is what actually closes the underlying work — the remote call's socket, or
+     * the local inference request. Implementations with nothing in flight do nothing.
+     */
+    suspend fun cancel() {}
 }
 
 enum class AutomationScheduleKind {
