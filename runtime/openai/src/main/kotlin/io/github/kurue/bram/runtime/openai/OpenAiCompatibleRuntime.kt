@@ -16,6 +16,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -23,15 +24,39 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class OpenAiCompatibleRuntime(
     private val endpoint: RemoteEndpoint,
     private val credentialResolver: EndpointCredentialResolver,
 ) : ModelRuntime {
     override val model = endpoint.asModelDescriptor()
-    private val activeConnections = ConcurrentHashMap<String, HttpURLConnection>()
+    private val activeConnections = ConcurrentHashMap<String, Call>()
+
+    /**
+     * One client for the process. `readTimeout` is deliberately zero: OkHttp treats it as no
+     * read timeout, and the stall watchdog in the ViewModel is what bounds a silent peer. A
+     * non-zero value here would reintroduce the same "hang until the timeout" behaviour the
+     * watchdog exists to replace, one layer down.
+     */
+    private val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(CONNECT_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+            .writeTimeout(READ_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
 
     override suspend fun availability(): RuntimeAvailability {
         val uri = runCatching { URI(endpoint.baseUrl) }.getOrNull()
@@ -83,15 +108,36 @@ class OpenAiCompatibleRuntime(
     }.flowOn(Dispatchers.IO)
 
     override suspend fun cancel(requestId: String) {
-        activeConnections.remove(requestId)?.disconnect()
+        activeConnections.remove(requestId)?.cancel()
+    }
+
+    /**
+     * Awaits the response head, keeping the call cancellable for its whole life.
+     *
+     * `invokeOnCancellation` is the hook that matters: it fires when cancellation is *requested*,
+     * not when the coroutine finishes, so cancelling a turn closes the socket while the body read is
+     * still parked in it.
+     */
+    private suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation ->
+        enqueue(
+            object : Callback {
+                override fun onFailure(call: Call, e: java.io.IOException) {
+                    if (!continuation.isCancelled) continuation.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    continuation.resume(response)
+                }
+            },
+        )
+        continuation.invokeOnCancellation { cancel() }
     }
 
     /** Chat Completions SSE: `choices[0].delta` fragments per chunk, `data: [DONE]` at the end. */
     private suspend fun streamChat(request: GenerationRequest, out: FlowCollector<GenerationEvent>) {
         val connection = openWithRetry(request)
-        activeConnections[request.requestId] = connection
         try {
-            if (!connection.isEventStream()) {
+            if (!connection.isEventStream) {
                 emitWholeChatResponse(request, connection, out)
                 return
             }
@@ -147,7 +193,7 @@ class OpenAiCompatibleRuntime(
             out.emit(GenerationEvent.Finished(finishReason))
         } finally {
             activeConnections.remove(request.requestId)
-            connection.disconnect()
+            connection.close()
         }
     }
 
@@ -158,9 +204,8 @@ class OpenAiCompatibleRuntime(
      */
     private suspend fun streamResponses(request: GenerationRequest, out: FlowCollector<GenerationEvent>) {
         val connection = openWithRetry(request)
-        activeConnections[request.requestId] = connection
         try {
-            if (!connection.isEventStream()) {
+            if (!connection.isEventStream) {
                 emitWholeResponsesResponse(request, connection, out)
                 return
             }
@@ -213,13 +258,13 @@ class OpenAiCompatibleRuntime(
             }
         } finally {
             activeConnections.remove(request.requestId)
-            connection.disconnect()
+            connection.close()
         }
     }
 
     private suspend fun emitWholeChatResponse(
         request: GenerationRequest,
-        connection: HttpURLConnection,
+        connection: RemoteResponse,
         out: FlowCollector<GenerationEvent>,
     ) {
         val parsed = request.parseApiResponse(readWholeBody(connection))
@@ -232,7 +277,7 @@ class OpenAiCompatibleRuntime(
 
     private suspend fun emitWholeResponsesResponse(
         request: GenerationRequest,
-        connection: HttpURLConnection,
+        connection: RemoteResponse,
         out: FlowCollector<GenerationEvent>,
     ) {
         val parsed = request.parseApiResponse(readWholeBody(connection))
@@ -243,39 +288,10 @@ class OpenAiCompatibleRuntime(
         out.emit(GenerationEvent.Finished(parsed.finishReason))
     }
 
-    private fun readWholeBody(connection: HttpURLConnection): JSONObject {
-        val body = connection.inputStream.bufferedReader().use { it.readText() }
+    private fun readWholeBody(connection: RemoteResponse): JSONObject {
+        val body = connection.readWholeBody()
         return runCatching { JSONObject(body) }.getOrElse {
             throw RemoteEndpointException(200, "The server answered with something that is not a JSON object")
-        }
-    }
-
-    private fun HttpURLConnection.isEventStream(): Boolean =
-        contentType?.lowercase()?.contains("text/event-stream") == true
-
-    /** Reads `data:` frames, calling [onData] for each; returning false stops reading. */
-    private suspend fun HttpURLConnection.readSseLines(onData: suspend (String) -> Boolean) {
-        inputStream.bufferedReader().use { reader ->
-            val data = StringBuilder()
-            while (true) {
-                val line = reader.readLine() ?: break
-                when {
-                    line.isEmpty() -> {
-                        if (data.isNotEmpty()) {
-                            val dispatch = onData(data.toString())
-                            data.clear()
-                            if (!dispatch) return
-                        }
-                    }
-                    line.startsWith("data:") -> {
-                        if (data.isNotEmpty()) data.append('\n')
-                        data.append(line.removePrefix("data:").trim())
-                    }
-                    // `event:` names, comments (`:`), and other fields are not needed by either
-                    // wire kind: the payload carries its own type.
-                }
-            }
-            if (data.isNotEmpty()) onData(data.toString())
         }
     }
 
@@ -289,22 +305,21 @@ class OpenAiCompatibleRuntime(
      * hide a broken endpoint, so they carry [EndpointConfigurationException], which the flow
      * reports as unrecoverable.
      */
-    private suspend fun openWithRetry(request: GenerationRequest): HttpURLConnection {
+    private suspend fun openWithRetry(request: GenerationRequest): RemoteResponse {
         var attempt = 0
         while (true) {
             attempt++
             val connection = openConnection(request)
             try {
-                val status = connection.responseCode
+                val status = connection.statusCode
                 if (status in 200..299) return connection
                 // Some servers deliver an error body on the input stream rather than the error
                 // stream; read whichever one carries it.
-                val errorStream = connection.errorStream ?: runCatching { connection.inputStream }.getOrNull()
-                val body = errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val body = runCatching { connection.readWholeBody() }.getOrDefault("")
                 val message = extractErrorMessage(body, status)
                 val retryable = status == 408 || status == 429 || status in 500..599
                 if (retryable && attempt <= MAX_ATTEMPTS - 1) {
-                    connection.disconnect()
+                    connection.close()
                     delay(RETRY_BACKOFF_MILLIS * attempt)
                     continue
                 }
@@ -314,7 +329,7 @@ class OpenAiCompatibleRuntime(
                     EndpointConfigurationException("Endpoint error ($status): $message")
                 }
             } catch (io: java.io.IOException) {
-                connection.disconnect()
+                connection.close()
                 if (attempt <= MAX_ATTEMPTS - 1) {
                     delay(RETRY_BACKOFF_MILLIS * attempt)
                     continue
@@ -330,16 +345,54 @@ class OpenAiCompatibleRuntime(
             .takeUnless { it.isNullOrBlank() }
             ?: body.take(4_096).ifBlank { "HTTP $status" }
 
-    private suspend fun openConnection(request: GenerationRequest): HttpURLConnection {
+    private suspend fun openConnection(request: GenerationRequest): RemoteResponse {
+        if (RemoteClientMode.useLegacyHttpUrlConnection) {
+            return LegacyHttpUrlConnectionResponse(openLegacyConnection(request))
+        }
+        val call = client.newCall(buildRequest(request))
+        // Registered here rather than by each caller, so the explicit-stop path always has the call
+        // that is actually reading the response.
+        activeConnections[request.requestId] = call
+        val response = call.await()
+        return OkHttpRemoteResponse(call, response)
+    }
+
+    private suspend fun buildRequest(request: GenerationRequest): Request {
+        val apiKey = credentialResolver.resolve(endpoint.id, endpoint.credentialAlias).orEmpty()
+        val builder = Request.Builder()
+            .url(targetUrl())
+            .post(request.toApiJson().toString().toRequestBody(JSON_MEDIA_TYPE))
+            .header("Content-Type", "application/json")
+            // Both are accepted: the request asks for a stream, but a server that answers a single
+            // JSON body is still understood.
+            .header("Accept", "application/json, text/event-stream")
+            .header("User-Agent", "Bram-Android/0.1")
+        if (apiKey.isNotBlank()) builder.header("Authorization", "Bearer $apiKey")
+        val provider = ProviderProfile.forBaseUrl(endpoint.baseUrl)
+        endpoint.customHeaders.forEach { (name, value) ->
+            if (!name.equals("authorization", ignoreCase = true)) {
+                builder.header(name, value.replace("{session_id}", request.sessionId.orEmpty()))
+            }
+        }
+        provider?.sessionHeader?.let { header ->
+            request.sessionId?.let { builder.header(header, it) }
+        }
+        return builder.build()
+    }
+
+    /**
+     * The pre-migration reader, reachable only behind [RemoteClientMode.useLegacyHttpUrlConnection]
+     * for one slice. Kept byte-for-byte in behaviour so the flag is a real rollback.
+     */
+    @Suppress("DEPRECATION")
+    private suspend fun openLegacyConnection(request: GenerationRequest): HttpURLConnection {
         val apiKey = credentialResolver.resolve(endpoint.id, endpoint.credentialAlias).orEmpty()
         return (URL(targetUrl()).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 15_000
+            connectTimeout = CONNECT_TIMEOUT_MILLIS
             readTimeout = READ_TIMEOUT_MILLIS
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
-            // Both are accepted: the request asks for a stream, but a server that answers a single
-            // JSON body is still understood.
             setRequestProperty("Accept", "application/json, text/event-stream")
             setRequestProperty("User-Agent", "Bram-Android/0.1")
             if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
@@ -370,9 +423,15 @@ class OpenAiCompatibleRuntime(
     }
 
     private companion object {
+        /** How long establishing the connection may take before the endpoint counts as unreachable. */
+        const val CONNECT_TIMEOUT_MILLIS = 15_000
+
         /**
-         * How long a streamed body may go quiet before the read fails. Not zero: a streamed turn
-         * can legitimately pause between chunks, but a hung connection must not pin the run.
+         * The legacy reader's read timeout, still used by the rollback path.
+         *
+         * The OkHttp client deliberately sets no read timeout: a silent peer is the stall watchdog's
+         * problem to bound, and a socket read timeout here would reintroduce the same wait-the-timeout
+         * behaviour one layer down.
          */
         const val READ_TIMEOUT_MILLIS = 120_000
 
@@ -380,6 +439,8 @@ class OpenAiCompatibleRuntime(
         const val MAX_ATTEMPTS = 3
 
         const val RETRY_BACKOFF_MILLIS = 750L
+
+        val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 
     private fun parseChatUsage(usage: JSONObject): TokenUsage = TokenUsage(

@@ -28,7 +28,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -588,21 +587,14 @@ class OpenAiCompatibleRuntimeTest {
         ),
     ).toList()
 
-    @Ignore(
-        "Blocked on a cancellable HTTP client. The read is a blocking readLine() on a socket, and " +
-            "cancelling a coroutine cannot interrupt a thread parked in one, so a stopped turn " +
-            "waits out READ_TIMEOUT_MILLIS (120s). Closing the connection on cancellation does NOT " +
-            "help: measured against a peer that announces an event stream and stays silent, " +
-            "HttpURLConnection.disconnect() left the read parked and it returned only on its own " +
-            "20s read timeout, and InputStream.close() was no better. See HANDOFF-internal.md.",
-    )
     @Test
     fun `cancelling a silent stream ends the turn instead of waiting out the read timeout`() = runBlocking {
         // Seen on the phone: a turn was stopped while the provider had gone quiet, and the app sat
-        // on "Stopping…" long past the tap. The read is a blocking `readLine()` on Dispatchers.IO,
-        // and cancelling a coroutine cannot interrupt a thread blocked on a socket, so the turn
-        // used to end only when the peer answered or READ_TIMEOUT_MILLIS (120s) expired. A stop
-        // must close the connection instead of waiting that out.
+        // on "Stopping…" long past the tap. HttpURLConnection parks a thread in a socket read that
+        // cancelling a coroutine cannot interrupt, so the turn ended only when the peer answered or
+        // READ_TIMEOUT_MILLIS (120s) expired — `disconnect()` left the read parked and it returned
+        // only on its own 20s read timeout. This is the gate for the OkHttp migration: a stop must
+        // close the connection instead of waiting that out.
         silentSse = true
         val runtime = runtime(RemoteApiKind.CHAT_COMPLETIONS)
         val turn = launch(Dispatchers.Default) {
