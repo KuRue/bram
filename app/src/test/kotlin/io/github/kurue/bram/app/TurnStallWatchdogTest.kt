@@ -63,6 +63,23 @@ class TurnStallWatchdogTest {
     }
 
     @Test
+    fun `a backwards clock jump restarts the budget instead of suppressing the stall`() {
+        // A source that moved backwards says nothing about elapsed time. Reading the negative
+        // span as silence would leave the watchdog unable to fire for the rest of the turn —
+        // the one failure it exists to prevent — so the budget must restart from the new reading
+        // rather than pin or trip.
+        now = 299_000L
+        assertFalse(watchdog.stalled(paused = false))
+        now = -3_600_000L
+        assertFalse(watchdog.stalled(paused = false))
+        // A full budget of forward time after the jump, measured from the jump.
+        now = -3_300_001L
+        assertFalse(watchdog.stalled(paused = false))
+        now = -3_300_000L
+        assertTrue(watchdog.stalled(paused = false))
+    }
+
+    @Test
     fun `any produced output keeps the turn`() {
         assertTrue(stallProducedOutput(hasCompletedMessage = true, hasAssistantText = false, hasActivity = false, hasRemoteReasoning = false))
         assertTrue(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = true, hasActivity = false, hasRemoteReasoning = false))
