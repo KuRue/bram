@@ -494,6 +494,14 @@ class MockRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/chat/completions" and self._scenario() == "stream_chat":
             self._send_sse(stream_chat_frames())
             return
+        if self._scenario() == "stall_response":
+            # Headers first, then silence. A peer that sends nothing at all blocks the client
+            # waiting for a response, which is a different (and much easier) failure than a peer
+            # that answers and then goes quiet mid-answer. This mirrors the staySilent fixture in
+            # OpenAiCompatibleRuntimeTest so the device test exercises the same body read the
+            # runtime gate covers.
+            self._send_sse([])
+            return
         status, body = respond(path, payload, self._scenario())
         self._send_json(status, body)
 
@@ -506,6 +514,13 @@ class MockRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
+        if not frames:
+            # Headers are out; hold the response open with no frame at all, which is what leaves a
+            # client parked in its body read. Sleeping here (rather than before the headers) is the
+            # whole point: a silent *body*, not a silent connection.
+            time.sleep(STALL_SECONDS)
+            self.close_connection = True
+            return
         for frame in frames:
             self.wfile.write((frame + "\n\n").encode("utf-8"))
             self.wfile.flush()

@@ -89,6 +89,18 @@ class MockServerTest(unittest.TestCase):
         request = urllib.request.Request(self.base + path, data=body, method="POST")
         return open_request(request)
 
+    def chat_raw(self, messages, tools=CHAT_TOOLS):
+        # Returns the body as text with its content type, for responses that are not JSON — the
+        # stall scenario sends event-stream headers and then no frames at all.
+        request = urllib.request.Request(
+            self.base + CHAT_PATH,
+            data=json.dumps({"model": MODEL_ID, "messages": messages, "tools": tools}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            return response.status, response.read().decode("utf-8"), response.headers.get("Content-Type", "")
+
     def arm(self, scenario):
         status, body = self.post(f"/__scenario/{scenario}", {})
         self.assertEqual(status, 200)
@@ -351,16 +363,20 @@ class MockServerTest(unittest.TestCase):
         self.assertEqual(body["choices"][0]["message"]["content"], FINAL_TEXT)
         self.assertGreaterEqual(elapsed, 0.2)
 
-    def test_stall_response_stays_silent_then_answers(self):
+    def test_stall_response_answers_headers_then_says_nothing(self):
+        # The point of this scenario is a silent *body*, not a silent connection: the client gets
+        # its 200 and its event-stream headers, then parks in its read. A peer that never answers
+        # would block on the response instead, which is a different failure to reproduce.
         original = mock_server.STALL_SECONDS
         mock_server.STALL_SECONDS = 0.5
         self.addCleanup(setattr, mock_server, "STALL_SECONDS", original)
         self.arm("stall_response")
         started = time.monotonic()
-        status, body = self.chat([{"role": "user", "content": USER_MESSAGE}])
+        status, body, content_type = self.chat_raw([{"role": "user", "content": USER_MESSAGE}])
         elapsed = time.monotonic() - started
         self.assertEqual(status, 200)
-        self.assertEqual(body["choices"][0]["message"]["content"], FINAL_TEXT)
+        self.assertIn("text/event-stream", content_type)
+        self.assertEqual(body, "")
         self.assertGreaterEqual(elapsed, 0.45)
 
     def test_invalid_json_body(self):

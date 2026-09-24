@@ -34,13 +34,16 @@ import org.junit.Test
  * run — is `TurnStallWatchdogTest`'s subject and would cost five minutes of wall clock per run;
  * what this pins is the wiring around it.
  *
- * Known gap this test deliberately does not assert: a stopped turn does not *settle* promptly
- * against a silent peer. `OpenAiCompatibleRuntime.readSseLines` blocks in `readLine()` on
- * `Dispatchers.IO`, and cancelling a coroutine cannot interrupt a thread blocked on a socket, so
- * the run returns only when the peer answers or `READ_TIMEOUT_MILLIS` (120 s) expires. Observed
- * on `bram_api35`: after Stop the status sits at "Stopping…" for the duration. Fixing that means
- * either disconnecting the connection on cancellation or settling the UI independently of the
- * job's unwinding — a product decision, not a test one.
+ * The second half is the stop path. It used to stop the *turn* only on paper: the remote read was a
+ * blocking socket read that a coroutine cancellation could not interrupt, so after Stop the phase
+ * stayed on "Writing…" until the peer answered or the 120s read timeout expired. Cancelling the
+ * OkHttp call closes the socket, so the parked read now fails at once and the turn settles — which
+ * is what `STOP_BUDGET_MILLIS` holds this to.
+ *
+ * The mock's `stall_response` answers with SSE headers and then stays silent, so the turn is parked
+ * in its *body read* — the same place the runtime-level gate in `OpenAiCompatibleRuntimeTest`
+ * parks, and the harder of the two. A peer that never answered at all would block on the response
+ * instead and would not exercise this path.
  *
  * Preconditions, checked with an assumption so the suite skips cleanly without them:
  *   py -3 tools/harness-mock/mock_server.py --port 8099
@@ -79,12 +82,13 @@ class TurnStallOnDeviceTest {
 
         // With a blank composer the same button is Stop, so this only acts on a live run.
         composeRule.onNodeWithTag("send-button").performClick()
-        // The stop must register on screen even though the turn cannot finish unwinding yet: the
-        // remote read is a blocking socket read (OpenAiCompatibleRuntime.readSseLines) that a
-        // coroutine cancellation cannot interrupt, so the run only returns when the peer answers
-        // or the 120s read timeout expires. What is pinned here is that the user is not left
-        // looking at a still-running turn; making the unwinding itself prompt is a separate fix.
-        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(STOPPING) }
+        // The stop must now *settle* the turn, not merely register on screen. It used not to: the
+        // remote read was a blocking socket read that a coroutine cancellation could not interrupt,
+        // so the run waited out the provider's silence and the phase stayed on "Writing…".
+        // Cancelling the OkHttp call closes the socket, so the parked read fails at once and the
+        // phase returns to idle. A budget well under the old timeout, far above a local close.
+        composeRule.waitUntil(STOP_BUDGET_MILLIS) { hasText(IDLE_PHASE) }
+        assertFalse("the turn should be settled, not still writing", hasText(WRITING_PHASE))
     }
 
     private fun hasText(text: String): Boolean =
@@ -93,13 +97,25 @@ class TurnStallOnDeviceTest {
     companion object {
         private const val TIMEOUT_MILLIS = 60_000L
         private const val SILENCE_MILLIS = 25_000L
+
+        /**
+         * How long a stopped turn may take to settle. Far above a local socket close, and far below
+         * the 120s read timeout the old reader waited out — so a regression to that behaviour fails
+         * here instead of passing slowly.
+         */
+        private const val STOP_BUDGET_MILLIS = 20_000L
+
+        /** The idle model phase, shown once a turn has settled and the runtime is not writing. */
+        private const val IDLE_PHASE = "Ready"
+
+        /** The phase shown while a turn is streaming; must be gone once the stop has settled it. */
+        private const val WRITING_PHASE = "Writing"
         private const val ENDPOINTS_PREFS = "bram.remote_endpoints"
         private const val ENDPOINTS_KEY = "endpoints.v1"
         private const val ROUTING_PREFS = "bram-routing-v1"
         private const val MOCK_ENDPOINT_ID = "mock"
         private const val ASK = "tell me the answer"
         private const val STALL_FAILURE = "stopped responding with no output"
-        private const val STOPPING = "Stopping"
         private const val MOCK_ENDPOINT_JSON =
             """{"id":"mock","displayName":"Mock endpoint","baseUrl":"http://127.0.0.1:8099/v1",""" +
                 """"modelName":"mock-small","apiKind":"CHAT_COMPLETIONS","contextWindowTokens":8192,""" +
