@@ -1287,11 +1287,22 @@ class MainViewModel(
 
     fun selectLocalModel(modelId: String) {
         mutableState.update { it.copy(selectedRuntimeId = modelId, error = null) }
+        viewModelScope.launch { runtimeChoice.onChoiceSelected(modelId) }
     }
 
     fun selectEndpoint(endpointId: String) {
-        mutableState.update { it.copy(selectedRuntimeId = remoteRuntimeId(endpointId), error = null) }
+        val runtimeId = remoteRuntimeId(endpointId)
+        mutableState.update { it.copy(selectedRuntimeId = runtimeId, error = null) }
+        // Persisted so the choice survives a relaunch. It used to live only here, in memory, which is
+        // why a remote pick reverted to a local model on the next launch.
+        viewModelScope.launch { runtimeChoice.onChoiceSelected(runtimeId) }
     }
+
+    /** The user's explicit runtime choice, persisted; see [RuntimeChoiceCoordinator]. */
+    private val runtimeChoice = RuntimeChoiceCoordinator(
+        loadPersistedChoice = { container.routingSettings.selectedRuntimeId() },
+        savePersistedChoice = { container.routingSettings.setSelectedRuntimeId(it) },
+    )
 
     fun importModel(uri: Uri) = importModels(listOf(uri))
 
@@ -4683,6 +4694,18 @@ class MainViewModel(
             val lastProfileId = runCatching { container.modelProfileStore.lastUsedProfileId() }
                 .getOrNull()
             val profile = current.profiles.firstOrNull { it.id == lastProfileId }
+            // One precedence for the whole app: an explicit choice first, then the profile, then a
+            // default. With nothing persisted this resolves exactly as it did before the key existed,
+            // so an install that never chose a runtime keeps restoring its profile unchanged.
+            val profileRuntimeId = profile?.modelId?.value
+            val explicitChoice = runCatching { runtimeChoice.resolveOnLaunch(
+                profileRuntimeId = profileRuntimeId,
+                defaultRuntimeId = current.localModels.firstOrNull()?.id?.value,
+            ) }.getOrNull()
+            if (explicitChoice != null && explicitChoice.startsWith(REMOTE_PREFIX)) {
+                mutableState.update { it.copy(selectedRuntimeId = explicitChoice) }
+                return@launch
+            }
             if (profile != null) {
                 selectLocalModel(profile.modelId.value)
                 loadProfile(profile.id)

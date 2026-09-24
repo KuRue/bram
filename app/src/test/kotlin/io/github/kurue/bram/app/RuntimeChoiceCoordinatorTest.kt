@@ -15,6 +15,19 @@ import org.junit.Test
  */
 class RuntimeChoiceCoordinatorTest {
     @Test
+    fun clearingAChoicePersistsTheAbsenceRatherThanLeavingAStaleValue() = runTest {
+        var stored: String? = "local:old"
+        val coordinator = RuntimeChoiceCoordinator(
+            loadPersistedChoice = { stored },
+            savePersistedChoice = { stored = it },
+        )
+
+        coordinator.onChoiceSelected(null)
+
+        assertEquals(null, stored)
+    }
+
+    @Test
     fun selectingARemoteEndpointPersistsIt() = runTest {
         var stored: String? = null
         val coordinator = RuntimeChoiceCoordinator(
@@ -38,6 +51,23 @@ class RuntimeChoiceCoordinatorTest {
         coordinator.onChoiceSelected("local:abc")
 
         assertEquals("local:abc", stored)
+    }
+
+    @Test
+    fun anExplicitLocalChoiceAlsoBeatsTheProfileDerivedRuntime() = runTest {
+        // The symmetric case of the remote one: selecting a local model explicitly must stick too,
+        // or `selectLocalModel` would save a choice the restore path then throws away.
+        val coordinator = RuntimeChoiceCoordinator(
+            loadPersistedChoice = { "local:chosen" },
+            savePersistedChoice = {},
+        )
+
+        val resolved = coordinator.resolveOnLaunch(
+            profileRuntimeId = "local:abc",
+            defaultRuntimeId = "local:first",
+        )
+
+        assertEquals("local:chosen", resolved)
     }
 
     @Test
