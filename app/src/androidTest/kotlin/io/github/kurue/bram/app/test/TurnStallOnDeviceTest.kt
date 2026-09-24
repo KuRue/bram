@@ -78,6 +78,13 @@ class TurnStallOnDeviceTest {
         // reached the provider (bad endpoint, auth, connection refused) settles on its own, and then
         // the Stop below is a no-op and `waitUntil(IDLE_PHASE)` returns instantly — a vacuous pass.
         // This gate must only ever report a Stop that had something to stop.
+        //
+        // The live signal is GENERATING ("Writing"). This was briefly changed to PREPARING on the
+        // assumption that a peer which sends headers and then nothing never reaches GENERATING — a
+        // device trace disproved it: the phase goes PREPARING -> GENERATING about 0.4s in, on the
+        // headers themselves, and then simply stays there through the silence. "Ready" is the idle
+        // label, and the label function shows it whenever an endpoint is merely selected
+        // (BramApp.kt:620), so "Ready" means "not in a turn" and GENERATING means a live one.
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(WRITING_PHASE) }
         assertFalse(
             "the turn must not have settled before Stop was pressed",
@@ -125,6 +132,11 @@ class TurnStallOnDeviceTest {
 
         /** The phase shown while a turn is streaming; must be gone once the stop has settled it. */
         private const val WRITING_PHASE = "Writing"
+
+
+        /** `RoutingSettingsStore.SELECTED_RUNTIME_KEY` — the persisted chat-runtime choice. */
+        private const val SELECTED_RUNTIME_KEY = "selectedRuntimeId"
+
         private const val ENDPOINTS_PREFS = "bram.remote_endpoints"
         private const val ENDPOINTS_KEY = "endpoints.v1"
         private const val ROUTING_PREFS = "bram-routing-v1"
@@ -140,6 +152,7 @@ class TurnStallOnDeviceTest {
         private var previousEndpoints: String? = null
         private var previousRoutingMode: String? = null
         private var previousPrimaryTarget: String? = null
+        private var previousSelectedRuntime: String? = null
 
         @BeforeClass
         @JvmStatic
@@ -158,6 +171,17 @@ class TurnStallOnDeviceTest {
             routingPrefs.edit()
                 .putString("routingMode", "remote_only")
                 .putString("primaryTargetId", "remote:$MOCK_ENDPOINT_ID")
+                .commit()
+
+            // Seeding the routing mode and pool was not enough to make the turn use the mock. The
+            // chat runtime is chosen from `selectedRuntimeId`, and on a device that has a local model
+            // the profile restore wins and a local turn runs instead — so on Ku's phone this gate was
+            // quietly testing nothing, while on the AVD (no local models) it looked fine. Writing the
+            // persisted choice the app now honours makes the route authoritative on any device, and
+            // is what Phase 2 of the routing fix is required to satisfy. Restored below.
+            previousSelectedRuntime = routingPrefs.getString(SELECTED_RUNTIME_KEY, null)
+            routingPrefs.edit()
+                .putString(SELECTED_RUNTIME_KEY, "remote:$MOCK_ENDPOINT_ID")
                 .commit()
         }
 
@@ -179,6 +203,7 @@ class TurnStallOnDeviceTest {
                 .also { editor ->
                     if (previousRoutingMode == null) editor.remove("routingMode") else editor.putString("routingMode", previousRoutingMode)
                     if (previousPrimaryTarget == null) editor.remove("primaryTargetId") else editor.putString("primaryTargetId", previousPrimaryTarget)
+                    if (previousSelectedRuntime == null) editor.remove(SELECTED_RUNTIME_KEY) else editor.putString(SELECTED_RUNTIME_KEY, previousSelectedRuntime)
                 }
                 .commit()
         }
