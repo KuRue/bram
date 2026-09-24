@@ -1,11 +1,12 @@
 package io.github.kurue.bram.runtime.openai
 
 import io.github.kurue.bram.core.domain.ProviderProfile
-import java.net.HttpURLConnection
 import java.net.URI
-import java.net.URL
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -17,6 +18,19 @@ data class RemoteModelInfo(
 )
 
 class RemoteModelCatalog {
+
+    /**
+     * Short, bounded reads: a catalog fetch has no stream to hold open, so unlike the generation
+     * path it keeps a real read timeout. The read timeout is per-read rather than per-body, so a
+     * slow provider still fails instead of hanging.
+     */
+    private val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .build()
+    }
+
     suspend fun list(baseUrl: String, apiKey: String = ""): List<RemoteModelInfo> = withContext(Dispatchers.IO) {
         var lastFailure: Throwable? = null
         for (candidate in modelUrls(baseUrl)) {
@@ -30,19 +44,17 @@ class RemoteModelCatalog {
         throw lastFailure ?: IllegalArgumentException("No model catalog URL could be derived")
     }
 
-    private fun fetch(url: String, apiKey: String): List<RemoteModelInfo> {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "Bram-Android/0.1")
-            if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
-        }
-        try {
-            val status = connection.responseCode
-            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+    private suspend fun fetch(url: String, apiKey: String): List<RemoteModelInfo> {
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .header("Accept", "application/json")
+            .header("User-Agent", "Bram-Android/0.1")
+            .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
+            .build()
+        client.newCall(request).await().use { response ->
+            val status = response.code
+            val body = response.body?.string().orEmpty()
             if (status !in 200..299) {
                 val message = runCatching { JSONObject(body).optJSONObject("error")?.optString("message") }
                     .getOrNull().takeUnless { it.isNullOrBlank() }
@@ -68,12 +80,10 @@ class RemoteModelCatalog {
                     }
                 }
             }.distinctBy { it.id }.sortedBy { it.id }
-        } finally {
-            connection.disconnect()
         }
     }
 
-    private fun enrichOpenCodeGo(models: List<RemoteModelInfo>): List<RemoteModelInfo> = runCatching {
+    private suspend fun enrichOpenCodeGo(models: List<RemoteModelInfo>): List<RemoteModelInfo> = runCatching {
         val root = JSONObject(readUrl("https://models.dev/api.json"))
         val catalog = root.optJSONObject("opencode-go")?.optJSONObject("models") ?: return@runCatching models
         models.map { model ->
@@ -93,18 +103,16 @@ class RemoteModelCatalog {
         }
     }.getOrDefault(models)
 
-    private fun readUrl(url: String): String {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "Bram-Android/0.1")
-        }
-        return try {
-            if (connection.responseCode !in 200..299) error("Metadata lookup failed")
-            connection.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            connection.disconnect()
+    private suspend fun readUrl(url: String): String {
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .header("Accept", "application/json")
+            .header("User-Agent", "Bram-Android/0.1")
+            .build()
+        return client.newCall(request).await().use { response ->
+            if (response.code !in 200..299) error("Metadata lookup failed")
+            response.body?.string().orEmpty()
         }
     }
 }

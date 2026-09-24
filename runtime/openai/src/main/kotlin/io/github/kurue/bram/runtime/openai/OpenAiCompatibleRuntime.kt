@@ -111,28 +111,6 @@ class OpenAiCompatibleRuntime(
         activeConnections.remove(requestId)?.cancel()
     }
 
-    /**
-     * Awaits the response head, keeping the call cancellable for its whole life.
-     *
-     * `invokeOnCancellation` is the hook that matters: it fires when cancellation is *requested*,
-     * not when the coroutine finishes, so cancelling a turn closes the socket while the body read is
-     * still parked in it.
-     */
-    private suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation ->
-        enqueue(
-            object : Callback {
-                override fun onFailure(call: Call, e: java.io.IOException) {
-                    if (!continuation.isCancelled) continuation.resumeWithException(e)
-                }
-
-                override fun onResponse(call: Call, response: Response) {
-                    continuation.resume(response)
-                }
-            },
-        )
-        continuation.invokeOnCancellation { cancel() }
-    }
-
     /** Chat Completions SSE: `choices[0].delta` fragments per chunk, `data: [DONE]` at the end. */
     private suspend fun streamChat(request: GenerationRequest, out: FlowCollector<GenerationEvent>) {
         val connection = openWithRetry(request)

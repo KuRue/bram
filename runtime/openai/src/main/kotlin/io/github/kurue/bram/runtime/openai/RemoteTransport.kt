@@ -5,8 +5,12 @@ import java.net.HttpURLConnection
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.Response
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * One remote response the runtime can read, whichever client opened it.
@@ -95,6 +99,28 @@ internal class OkHttpRemoteResponse(
         response.close()
         call.cancel()
     }
+}
+
+/**
+ * Awaits the response head, keeping the call cancellable.
+ *
+ * `invokeOnCancellation` is the hook that matters: it fires when cancellation is *requested*, not
+ * when the coroutine finishes, so a cancelled turn can close the socket while the body read is still
+ * parked in it.
+ */
+internal suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation ->
+    enqueue(
+        object : Callback {
+            override fun onFailure(call: Call, e: java.io.IOException) {
+                if (!continuation.isCancelled) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                continuation.resume(response)
+            }
+        },
+    )
+    continuation.invokeOnCancellation { cancel() }
 }
 
 /**
