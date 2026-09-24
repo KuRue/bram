@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.kurue.bram.core.domain.AcceleratorAgreement
 import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.AgentEvent
+import io.github.kurue.bram.core.domain.AgentOrchestrator
 import io.github.kurue.bram.core.domain.AgentRunRequest
 import io.github.kurue.bram.core.domain.Automation
 import io.github.kurue.bram.core.domain.ConversationId
@@ -632,6 +633,15 @@ class MainViewModel(
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var conversationId = ConversationId(UUID.randomUUID().toString())
     private var generationJob: Job? = null
+
+    /**
+     * The orchestrator driving the turn in flight, so a stop can reach the runtime underneath it.
+     *
+     * Cancelling [generationJob] is not enough on its own: a runtime parked in a blocking read may
+     * not notice the cancellation, and the turn then hangs. The orchestrator knows the request id
+     * that only it minted, so this is the only handle that can.
+     */
+    private var activeAgent: AgentOrchestrator? = null
     /** Whether the app is what the user is looking at. Gates the completion alert. */
     private var appForeground = true
     /**
@@ -1277,11 +1287,22 @@ class MainViewModel(
 
     fun selectLocalModel(modelId: String) {
         mutableState.update { it.copy(selectedRuntimeId = modelId, error = null) }
+        viewModelScope.launch { runtimeChoice.onChoiceSelected(modelId) }
     }
 
     fun selectEndpoint(endpointId: String) {
-        mutableState.update { it.copy(selectedRuntimeId = remoteRuntimeId(endpointId), error = null) }
+        val runtimeId = remoteRuntimeId(endpointId)
+        mutableState.update { it.copy(selectedRuntimeId = runtimeId, error = null) }
+        // Persisted so the choice survives a relaunch. It used to live only here, in memory, which is
+        // why a remote pick reverted to a local model on the next launch.
+        viewModelScope.launch { runtimeChoice.onChoiceSelected(runtimeId) }
     }
+
+    /** The user's explicit runtime choice, persisted; see [RuntimeChoiceCoordinator]. */
+    private val runtimeChoice = RuntimeChoiceCoordinator(
+        loadPersistedChoice = { container.routingSettings.selectedRuntimeId() },
+        savePersistedChoice = { container.routingSettings.setSelectedRuntimeId(it) },
+    )
 
     fun importModel(uri: Uri) = importModels(listOf(uri))
 
@@ -3913,9 +3934,13 @@ class MainViewModel(
     fun clearChat() = startNewConversation()
 
     fun stopGeneration() {
-        if (!mutableState.value.isGenerating) return
+        if (!canStop(mutableState.value.modelPhase)) return
         // Stopping is an intent to halt, so anything waiting in the queue goes with it.
         mutableState.update { it.copy(queuedMessages = emptyList(), status = "Stopping…") }
+        // First the runtime itself, then the coroutine: cancelling the job only unwinds the
+        // collectors, and a runtime parked in a blocking read has to be cancelled directly or the
+        // turn keeps going until its own timeout.
+        activeAgent?.let { agent -> viewModelScope.launch { runCatching { agent.cancel() } } }
         generationJob?.cancel(CancellationException("Stopped by user"))
     }
 
@@ -4141,6 +4166,7 @@ class MainViewModel(
         // stopped again in the finally. Either way the notification says what is happening.
         pushModelStatus(ModelPhase.PREPARING)
         val agent = container.agent()
+        activeAgent = agent
         // Reported by the runtime before any text arrives, since only it knows what the loaded
         // chat template uses. Until it does, an empty format leaves the stream alone rather
         // than splitting it on tags that may not be this model's.
@@ -4541,8 +4567,12 @@ class MainViewModel(
                     // A loaded model keeps the status service alive; the turn just went idle.
                     pushModelStatus(ModelPhase.IDLE)
                 } else {
-                    // A remote turn holds the service only for its own duration.
+                    // A remote turn holds the service only for its own duration. It must still leave
+                    // the generating phase: nothing else resets it for a remote turn, and while it
+                    // stays GENERATING the label reads "Writing…" forever — the composer never offers
+                    // a settled turn again, and a completed remote answer looks like a hung one.
                     AgentTaskService.stop(container.appContext)
+                    pushModelStatus(ModelPhase.IDLE)
                 }
                 if (!appForeground && container.notificationSettings.completionAlertsEnabled()) {
                     val turnName = selection.localModel?.displayName
@@ -4668,6 +4698,18 @@ class MainViewModel(
             val lastProfileId = runCatching { container.modelProfileStore.lastUsedProfileId() }
                 .getOrNull()
             val profile = current.profiles.firstOrNull { it.id == lastProfileId }
+            // One precedence for the whole app: an explicit choice first, then the profile, then a
+            // default. With nothing persisted this resolves exactly as it did before the key existed,
+            // so an install that never chose a runtime keeps restoring its profile unchanged.
+            val profileRuntimeId = profile?.modelId?.value
+            val explicitChoice = runCatching { runtimeChoice.resolveOnLaunch(
+                profileRuntimeId = profileRuntimeId,
+                defaultRuntimeId = current.localModels.firstOrNull()?.id?.value,
+            ) }.getOrNull()
+            if (explicitChoice != null && explicitChoice.startsWith(REMOTE_PREFIX)) {
+                mutableState.update { it.copy(selectedRuntimeId = explicitChoice) }
+                return@launch
+            }
             if (profile != null) {
                 selectLocalModel(profile.modelId.value)
                 loadProfile(profile.id)

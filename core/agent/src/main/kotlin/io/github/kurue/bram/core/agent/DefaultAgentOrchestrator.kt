@@ -30,6 +30,7 @@ import io.github.kurue.bram.core.domain.ToolSelector
 import io.github.kurue.bram.core.domain.AllToolsSelector
 import io.github.kurue.bram.core.domain.toRecord
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -48,6 +49,19 @@ class DefaultAgentOrchestrator(
     private val memoryExtractor: MemoryExtractor = NoopMemoryExtractor,
     private val toolSelector: ToolSelector = AllToolsSelector,
 ) : AgentOrchestrator {
+
+    /**
+     * The runtime call currently in flight, so a stop can reach it.
+     *
+     * The request id is minted here, per run, and never leaves this class otherwise — which is why
+     * cancelling the collecting coroutine was the only lever a caller had, and why a runtime parked in
+     * a blocking read could not be stopped. Holding the pair here gives [cancel] something to act on.
+     */
+    private val inFlight = AtomicReference<Pair<ModelRuntime, String>?>(null)
+
+    override suspend fun cancel() {
+        inFlight.getAndSet(null)?.let { (runtime, requestId) -> runCatching { runtime.cancel(requestId) } }
+    }
 
     override fun run(request: AgentRunRequest, runtime: ModelRuntime): Flow<AgentEvent> = flow {
         val availability = runtime.availability()
@@ -168,13 +182,18 @@ class DefaultAgentOrchestrator(
             var failure: GenerationEvent.Failed? = null
             var finishReason: String? = null
 
+            // Minted here and published while the call is live, so cancel() can reach this exact
+            // request rather than guessing at one. Left set if the run throws, which is harmless:
+            // cancelling a finished request is a no-op on every runtime.
+            val generationRequestId = UUID.randomUUID().toString()
+            inFlight.set(runtime to generationRequestId)
             runtime.generate(
                 GenerationRequest(
                     messages = context.messages,
                     tools = selectedTools,
                     maxOutputTokens = request.maxOutputTokens,
                     sampler = request.sampler,
-                    requestId = UUID.randomUUID().toString(),
+                    requestId = generationRequestId,
                     sessionId = request.conversationId.value,
                 ),
             ).collect { event ->

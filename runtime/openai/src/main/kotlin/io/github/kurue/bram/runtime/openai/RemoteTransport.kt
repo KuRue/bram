@@ -2,8 +2,10 @@ package io.github.kurue.bram.runtime.openai
 
 import java.io.Closeable
 import java.net.HttpURLConnection
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.coroutineScope
+import java.io.BufferedReader
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
@@ -62,34 +64,32 @@ internal class OkHttpRemoteResponse(
 
     override suspend fun readSseLines(onData: suspend (String) -> Boolean) {
         val body = response.body ?: return
-        call.cancellableWhile {
-            // Read through `charStream()` rather than `source()`: with this OkHttp/Okio pair a
-            // `source()` on a chunked response hands back an already-exhausted source (measured —
-            // `charStream()` and `byteStream()` return the whole body, `source()` returns none),
-            // and a BufferedReader is the same shape the previous reader used, so the frame parser
-            // below is unchanged.
-            body.charStream().buffered().use { reader ->
-                val data = StringBuilder()
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    when {
-                        line.isEmpty() -> {
-                            if (data.isNotEmpty()) {
-                                val dispatch = onData(data.toString())
-                                data.clear()
-                                if (!dispatch) return@use
-                            }
+        // Read through `charStream()` rather than `source()`: with this OkHttp/Okio pair a
+        // `source()` on a chunked response hands back an already-exhausted source (measured —
+        // `charStream()` and `byteStream()` return the whole body, `source()` returns none),
+        // and a BufferedReader is the same shape the previous reader used, so the frame parser
+        // below is unchanged.
+        body.charStream().buffered().use { reader ->
+            val data = StringBuilder()
+            while (true) {
+                val line = reader.nextLine(call) ?: break
+                when {
+                    line.isEmpty() -> {
+                        if (data.isNotEmpty()) {
+                            val dispatch = onData(data.toString())
+                            data.clear()
+                            if (!dispatch) return@use
                         }
-                        line.startsWith("data:") -> {
-                            if (data.isNotEmpty()) data.append('\n')
-                            data.append(line.removePrefix("data:").trim())
-                        }
-                        // `event:` names, comments (`:`), and other fields are not needed by either
-                        // wire kind: the payload carries its own type.
                     }
+                    line.startsWith("data:") -> {
+                        if (data.isNotEmpty()) data.append('\n')
+                        data.append(line.removePrefix("data:").trim())
+                    }
+                    // `event:` names, comments (`:`), and other fields are not needed by either
+                    // wire kind: the payload carries its own type.
                 }
-                if (data.isNotEmpty()) onData(data.toString())
             }
+            if (data.isNotEmpty()) onData(data.toString())
         }
     }
 
@@ -123,26 +123,35 @@ internal suspend fun Call.await(): Response = suspendCancellableCoroutine { cont
     continuation.invokeOnCancellation { cancel() }
 }
 
+private val bodyReads = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
 /**
- * Runs [block] with the call cancellable: when the surrounding coroutine is cancelled, the call is
- * cancelled too, which closes the socket and makes a parked read fail at once.
+ * Reads one line, detaching from the read itself when the caller is cancelled.
+ *
+ * Only the blocking read is decoupled. The frame parsing and the `onData` emit stay in the caller's
+ * own coroutine: a flow may only be emitted from its own context, and hoisting the emit breaks the
+ * invariant, which is what silently emptied every streaming transcript in an earlier attempt.
+ *
+ * The read is launched outside the caller's scope because a coroutine that owns it cannot escape it
+ * — `coroutineScope`, `withContext` and `select` all *join* a block rather than abandon it. On
+ * cancellation the continuation resumes at once, so the turn settles without waiting for the socket,
+ * and [call] is closed so the parked thread has somewhere to go.
  */
-private suspend fun <T> Call.cancellableWhile(block: suspend () -> T): T = coroutineScope {
-    val watcher = launch {
-        try {
-            awaitCancellation()
-        } finally {
-            // Explicit: an unqualified `cancel()` here would resolve to the coroutine scope's, not
-            // the call's, and the socket would never be closed.
-            this@cancellableWhile.cancel()
+private suspend fun BufferedReader.nextLine(call: Call): String? =
+    suspendCancellableCoroutine { continuation ->
+        bodyReads.launch {
+            runCatching { readLine() }.fold(
+                onSuccess = { line -> if (continuation.isActive) continuation.resume(line) },
+                onFailure = { error ->
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                },
+            )
+        }
+        continuation.invokeOnCancellation {
+            // Explicit: an unqualified cancel() would hit the continuation, not the call.
+            call.cancel()
         }
     }
-    try {
-        block()
-    } finally {
-        watcher.cancel()
-    }
-}
 
 /**
  * The reader being replaced, kept for one slice behind [RemoteClientMode].

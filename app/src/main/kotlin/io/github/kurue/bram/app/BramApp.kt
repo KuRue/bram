@@ -1087,7 +1087,11 @@ private fun ChatComposer(
                 // While a turn runs the button stays a send (queue) as long as there is text to
                 // send; clearing the field brings back Stop, so both actions stay one tap away.
                 SendButton(
-                    generating = state.isGenerating && input.isBlank(),
+                    // Stop is offered from the phase, the same signal the screen shows and the
+                    // device gate waits on. It used to come from `isGenerating`, which can disagree
+                    // with the phase during a turn and leaves the button disabled — so a user has no
+                    // working Stop, and the gate could never press one.
+                    generating = state.modelPhase.hasTurnRunning() && input.isBlank(),
                     enabled = input.isNotBlank() && !state.routingPool.isEmpty,
                     onSend = {
                         onSend(input)

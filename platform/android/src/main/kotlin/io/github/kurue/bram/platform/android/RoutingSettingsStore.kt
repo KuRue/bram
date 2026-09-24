@@ -49,6 +49,23 @@ class RoutingSettingsStore(
         }.apply()
     }
 
+    /**
+     * The runtime the user last chose, local or remote.
+     *
+     * This is the missing fact behind the routing defect: an explicit endpoint pick used to be kept
+     * only in memory, so a relaunch fell back to restoring the last-used profile and quietly moved
+     * the user back onto a local model. `null` means the user has never chosen, which is the state of
+     * every pre-existing install — callers must treat it as "no opinion" and keep the old behaviour
+     * rather than inventing a default here.
+     */
+    suspend fun selectedRuntimeId(): String? = withContext(Dispatchers.IO) {
+        preferences.getString(SELECTED_RUNTIME_KEY, null)
+    }
+
+    suspend fun setSelectedRuntimeId(runtimeId: String?) = withContext(Dispatchers.IO) {
+        preferences.edit().apply { putOrRemove(SELECTED_RUNTIME_KEY, runtimeId) }.apply()
+    }
+
     private fun android.content.SharedPreferences.Editor.putOrRemove(key: String, value: String?) {
         if (value == null) remove(key) else putString(key, value)
     }
@@ -60,5 +77,6 @@ class RoutingSettingsStore(
         const val PRIMARY_TARGET_KEY = "primaryTargetId"
         const val POWER_TARGET_KEY = "powerTargetId"
         const val REMOTE_OFFLOAD_TARGET_KEY = "remoteOffloadTargetId"
+        const val SELECTED_RUNTIME_KEY = "selectedRuntimeId"
     }
 }
