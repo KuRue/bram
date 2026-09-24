@@ -4567,8 +4567,12 @@ class MainViewModel(
                     // A loaded model keeps the status service alive; the turn just went idle.
                     pushModelStatus(ModelPhase.IDLE)
                 } else {
-                    // A remote turn holds the service only for its own duration.
+                    // A remote turn holds the service only for its own duration. It must still leave
+                    // the generating phase: nothing else resets it for a remote turn, and while it
+                    // stays GENERATING the label reads "Writing…" forever — the composer never offers
+                    // a settled turn again, and a completed remote answer looks like a hung one.
                     AgentTaskService.stop(container.appContext)
+                    pushModelStatus(ModelPhase.IDLE)
                 }
                 if (!appForeground && container.notificationSettings.completionAlertsEnabled()) {
                     val turnName = selection.localModel?.displayName
