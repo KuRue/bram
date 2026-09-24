@@ -29,4 +29,22 @@ class TurnActivityTest {
         assertTrue(ModelPhase.THINKING.hasTurnRunning())
         assertTrue(ModelPhase.CALLING_TOOL.hasTurnRunning())
     }
+
+    @Test
+    fun aTurnInAnyNonIdlePhaseIsStoppable() {
+        // The half of the defect the button fix did not cover: `stopGeneration()` also guarded on
+        // `isGenerating`, which is false during a remote turn even though the phase is GENERATING.
+        // The device trace caught it exactly there —
+        // `stopGeneration enter isGenerating=false phase=GENERATING agent=true` — so the request
+        // died at the guard with a perfectly good agent in hand.
+        assertTrue(canStop(ModelPhase.GENERATING))
+        assertTrue(canStop(ModelPhase.PREPARING))
+        assertTrue(canStop(ModelPhase.THINKING))
+        assertTrue(canStop(ModelPhase.CALLING_TOOL))
+    }
+
+    @Test
+    fun anIdleScreenOffersNothingToStop() {
+        assertFalse(canStop(ModelPhase.IDLE))
+    }
 }

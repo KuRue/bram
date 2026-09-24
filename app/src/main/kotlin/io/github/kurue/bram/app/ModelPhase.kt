@@ -24,3 +24,14 @@ enum class ModelPhase(val wire: String, val label: String) {
  * the screen said "Writing…" while the button was disabled, so Stop could not be invoked at all.
  */
 internal fun ModelPhase.hasTurnRunning(): Boolean = this != ModelPhase.IDLE
+
+/**
+ * Whether a Stop request should be honoured.
+ *
+ * This is deliberately the same predicate as [hasTurnRunning] and not a separate `isGenerating`
+ * flag. They can disagree — during a remote turn the phase is `GENERATING` while `isGenerating` is
+ * false — and when they did, `stopGeneration()` returned at its guard with an orchestrator in hand
+ * and the turn simply ran on. Keying both the button and the guard to the phase keeps a stop from
+ * being offered in one place and refused in the other.
+ */
+internal fun canStop(phase: ModelPhase): Boolean = phase.hasTurnRunning()

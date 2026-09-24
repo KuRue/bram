@@ -3934,7 +3934,7 @@ class MainViewModel(
     fun clearChat() = startNewConversation()
 
     fun stopGeneration() {
-        if (!mutableState.value.isGenerating) return
+        if (!canStop(mutableState.value.modelPhase)) return
         // Stopping is an intent to halt, so anything waiting in the queue goes with it.
         mutableState.update { it.copy(queuedMessages = emptyList(), status = "Stopping…") }
         // First the runtime itself, then the coroutine: cancelling the job only unwinds the
