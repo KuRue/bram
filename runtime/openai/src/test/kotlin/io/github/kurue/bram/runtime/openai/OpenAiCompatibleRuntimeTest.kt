@@ -587,6 +587,20 @@ class OpenAiCompatibleRuntimeTest {
         ),
     ).toList()
 
+    /**
+     * The silent-stream bug, pinned at its source.
+     *
+     * The client is built with a comment saying the read timeout is deliberately zero because the
+     * stall watchdog bounds a silent peer — but the builder never set it, and OkHttp's default is 10
+     * seconds. On the Galaxy S25 Ultra a `stall_response` turn was thrown off the wire at 10.02 s with
+     * `SocketTimeoutException`, which unwound the stream while the phase was still GENERATING and left
+     * the turn orphaned. A comment is not a setting; this asserts the setting.
+     */
+    @Test
+    fun `the generation client has no read timeout`() {
+        assertEquals(0, runtime(RemoteApiKind.CHAT_COMPLETIONS).configuredReadTimeoutMillis())
+    }
+
     @Test
     fun `cancelling a silent stream ends the turn instead of waiting out the read timeout`() = runBlocking {
         // Seen on the phone: a turn was stopped while the provider had gone quiet, and the app sat

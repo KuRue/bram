@@ -54,9 +54,16 @@ class OpenAiCompatibleRuntime(
         OkHttpClient.Builder()
             .connectTimeout(CONNECT_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
             .writeTimeout(READ_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+            // OkHttp defaults this to 10 seconds, and leaving it alone is what killed silent streams:
+            // the stall watchdog is supposed to bound a silent peer, but the read timed out first and
+            // unwound the turn while the phase was still GENERATING. Zero means "no read timeout".
+            .readTimeout(0, TimeUnit.MILLISECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }
+
+    /** Exposed so the "no read timeout" intent is asserted rather than only commented. */
+    internal fun configuredReadTimeoutMillis(): Int = client.readTimeoutMillis
 
     override suspend fun availability(): RuntimeAvailability {
         val uri = runCatching { URI(endpoint.baseUrl) }.getOrNull()
