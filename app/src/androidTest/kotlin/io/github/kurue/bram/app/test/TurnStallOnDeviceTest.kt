@@ -14,6 +14,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.AfterClass
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.BeforeClass
@@ -73,12 +74,26 @@ class TurnStallOnDeviceTest {
         composeRule.onNodeWithTag("composer-field").performTextInput(ASK)
         composeRule.onNodeWithTag("send-button").performClick()
 
+        // Prove the turn is actually live and writing before anything else. A turn that never
+        // reached the provider (bad endpoint, auth, connection refused) settles on its own, and then
+        // the Stop below is a no-op and `waitUntil(IDLE_PHASE)` returns instantly — a vacuous pass.
+        // This gate must only ever report a Stop that had something to stop.
+        composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(WRITING_PHASE) }
+        assertFalse(
+            "the turn must not have settled before Stop was pressed",
+            hasText(IDLE_PHASE),
+        )
+
         // Well inside the five-minute stall budget, and long past the point where a premature
         // verdict would have settled the turn: neither a stop nor a stall failure may be on
         // screen while the run is still silent.
         Thread.sleep(SILENCE_MILLIS)
         assertFalse("the turn must not have settled while the run is still silent", hasText("Generation stopped"))
         assertFalse("a silent turn must not be failed before its budget", hasText(STALL_FAILURE))
+        assertTrue(
+            "the silent turn must still be in flight when Stop is pressed; a settled turn proves nothing",
+            hasText(WRITING_PHASE),
+        )
 
         // With a blank composer the same button is Stop, so this only acts on a live run.
         composeRule.onNodeWithTag("send-button").performClick()
