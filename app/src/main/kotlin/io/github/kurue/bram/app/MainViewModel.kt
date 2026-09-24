@@ -4424,7 +4424,7 @@ class MainViewModel(
                     return if (stallProducedOutput(
                         hasCompletedMessage = completedMessage != null,
                         hasAssistantText = assistantText.isNotBlank(),
-                        hasActivity = activity.isNotEmpty(),
+                        activity = activity,
                         hasRemoteReasoning = remoteReasoning.isNotBlank(),
                     )) {
                         TurnOutcome.Completed
@@ -5157,13 +5157,18 @@ internal class TurnStalledException : Exception(
 /**
  * Whether a stalled turn already produced something worth keeping.
  *
- * Side-effecting tools have run and their rows are in [hasActivity], so settling as `Completed`
- * avoids re-running them on fallback; extraction's silent window ends at `Completed`, so a hang
- * in the tail still keeps the reply.
+ * A tool call counts: its side effects are already applied, and settling as `Failed` would run
+ * them again on the fallback. Reasoning does not — a Thinking row is the transcript of a model
+ * that spent its budget thinking and produced no answer, which is exactly the turn a stall should
+ * hand to a fallback rather than settle as a success with nothing to read. Extraction's silent
+ * window ends at `Completed`, so a hang in that tail still keeps the reply.
  */
 internal fun stallProducedOutput(
     hasCompletedMessage: Boolean,
     hasAssistantText: Boolean,
-    hasActivity: Boolean,
+    activity: List<AgentActivity>,
     hasRemoteReasoning: Boolean,
-): Boolean = hasCompletedMessage || hasAssistantText || hasActivity || hasRemoteReasoning
+): Boolean = hasCompletedMessage ||
+    hasAssistantText ||
+    hasRemoteReasoning ||
+    activity.any { it is AgentActivity.ToolInvocation }
