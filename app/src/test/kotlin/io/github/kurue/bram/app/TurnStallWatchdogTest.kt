@@ -1,5 +1,6 @@
 package io.github.kurue.bram.app
 
+import io.github.kurue.bram.core.domain.AgentActivity
 import io.github.kurue.bram.core.domain.AgentEvent
 import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertFalse
@@ -15,6 +16,11 @@ import org.junit.Test
  * it throws must settle as a failure (not a cancellation) so the fallback loop still runs.
  */
 class TurnStallWatchdogTest {
+
+    private companion object {
+        private val TOOL_ROW =
+            AgentActivity.ToolInvocation(id = "call_1", name = "write_note", argumentsJson = "{}")
+    }
 
     private var now = 0L
     private val watchdog = TurnStallWatchdog(timeoutMillis = 300_000L, clock = { now })
@@ -81,15 +87,31 @@ class TurnStallWatchdogTest {
 
     @Test
     fun `any produced output keeps the turn`() {
-        assertTrue(stallProducedOutput(hasCompletedMessage = true, hasAssistantText = false, hasActivity = false, hasRemoteReasoning = false))
-        assertTrue(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = true, hasActivity = false, hasRemoteReasoning = false))
-        assertTrue(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = false, hasActivity = true, hasRemoteReasoning = false))
-        assertTrue(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = false, hasActivity = false, hasRemoteReasoning = true))
+        assertTrue(stallProducedOutput(hasCompletedMessage = true, hasAssistantText = false, activity = emptyList(), hasRemoteReasoning = false))
+        assertTrue(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = true, activity = emptyList(), hasRemoteReasoning = false))
+        assertTrue(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = false, activity = listOf(TOOL_ROW), hasRemoteReasoning = false))
+        assertTrue(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = false, activity = emptyList(), hasRemoteReasoning = true))
+    }
+
+    @Test
+    fun `thinking rows alone are not output`() {
+        // The failure this whole path exists for: a reasoning model that spent its budget inside
+        // an unclosed thinking block left rows and no answer. Counting that row as output would
+        // settle the stall as a success — still no answer on screen, and no fallback left to
+        // provide one.
+        assertFalse(
+            stallProducedOutput(
+                hasCompletedMessage = false,
+                hasAssistantText = false,
+                activity = listOf(AgentActivity.Thinking(text = "a long chain of thought", durationMillis = 39_000L)),
+                hasRemoteReasoning = false,
+            ),
+        )
     }
 
     @Test
     fun `a stall with nothing produced settles as a failure`() {
-        assertFalse(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = false, hasActivity = false, hasRemoteReasoning = false))
+        assertFalse(stallProducedOutput(hasCompletedMessage = false, hasAssistantText = false, activity = emptyList(), hasRemoteReasoning = false))
     }
 
     @Test
