@@ -12,8 +12,15 @@ import io.github.kurue.bram.core.domain.RemoteEndpoint
 import io.github.kurue.bram.core.domain.ToolCall
 import io.github.kurue.bram.core.domain.ToolDefinition
 import java.net.InetSocketAddress
+import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -21,6 +28,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -41,9 +49,15 @@ class OpenAiCompatibleRuntimeTest {
     /** When set, the server answers `text/event-stream` with these frames instead of a JSON body. */
     private var sseFrames: List<String>? = null
 
-    /** Answers this many requests with the configured failure before succeeding (retry tests). */
+    /** When set, the server answers this many requests with the configured failure before succeeding (retry tests). */
     private var failuresBeforeSuccess = 0
     private var requestCount = 0
+
+    /**
+     * When set, the server announces an event stream and then says nothing, holding the response
+     * open. This is the silent peer a stalled turn looks like from the app's side.
+     */
+    private var silentSse = false
 
     @Before
     fun setUp() {
@@ -58,6 +72,7 @@ class OpenAiCompatibleRuntimeTest {
             capturedBody = runCatching { JSONObject(body) }.getOrNull()
             val frames = sseFrames
             when {
+                silentSse -> staySilent(exchange)
                 failuresBeforeSuccess > 0 -> {
                     failuresBeforeSuccess--
                     respond(exchange, responseStatus, responseBody)
@@ -573,6 +588,48 @@ class OpenAiCompatibleRuntimeTest {
         ),
     ).toList()
 
+    @Ignore(
+        "Blocked on a cancellable HTTP client. The read is a blocking readLine() on a socket, and " +
+            "cancelling a coroutine cannot interrupt a thread parked in one, so a stopped turn " +
+            "waits out READ_TIMEOUT_MILLIS (120s). Closing the connection on cancellation does NOT " +
+            "help: measured against a peer that announces an event stream and stays silent, " +
+            "HttpURLConnection.disconnect() left the read parked and it returned only on its own " +
+            "20s read timeout, and InputStream.close() was no better. See HANDOFF-internal.md.",
+    )
+    @Test
+    fun `cancelling a silent stream ends the turn instead of waiting out the read timeout`() = runBlocking {
+        // Seen on the phone: a turn was stopped while the provider had gone quiet, and the app sat
+        // on "Stopping…" long past the tap. The read is a blocking `readLine()` on Dispatchers.IO,
+        // and cancelling a coroutine cannot interrupt a thread blocked on a socket, so the turn
+        // used to end only when the peer answered or READ_TIMEOUT_MILLIS (120s) expired. A stop
+        // must close the connection instead of waiting that out.
+        silentSse = true
+        val runtime = runtime(RemoteApiKind.CHAT_COMPLETIONS)
+        val turn = launch(Dispatchers.Default) {
+            runtime.generate(
+                GenerationRequest(
+                    messages = listOf(ConversationMessage(role = MessageRole.USER, content = "hi")),
+                    maxOutputTokens = 8,
+                    requestId = "req-silent",
+                ),
+            ).collect()
+        }
+        // Let the request reach the server so the client is genuinely blocked mid-read, not still
+        // connecting: otherwise this would pass without ever exercising the blocked read.
+        withTimeout(REQUEST_TIMEOUT_MILLIS) {
+            while (requestCount == 0) delay(20)
+        }
+        delay(250)
+
+        val elapsed = measureTimeMillis {
+            withTimeout(CANCEL_BUDGET_MILLIS) { turn.cancelAndJoin() }
+        }
+        assertTrue(
+            "cancellation took ${elapsed}ms; it must not wait out the 120s read timeout",
+            elapsed < CANCEL_BUDGET_MILLIS,
+        )
+    }
+
     private fun runtime(
         apiKind: RemoteApiKind,
         url: String = baseUrl,
@@ -635,6 +692,17 @@ class OpenAiCompatibleRuntimeTest {
         }
     }
 
+    /**
+     * Announces an event stream and then holds the response open without writing a frame, so the
+     * client blocks mid-read exactly as it does against a peer that has gone quiet mid-answer.
+     */
+    private fun staySilent(exchange: HttpExchange) {
+        exchange.responseHeaders.add("Content-Type", "text/event-stream")
+        exchange.sendResponseHeaders(200, 0)
+        // No body writes, and the exchange is left open on purpose: closing it would let the read
+        // return immediately, which is the opposite of what this fixture is for.
+    }
+
     private fun chatChunk(delta: JSONObject, finishReason: String? = null): String = "data: " + JSONObject()
         .put(
             "choices",
@@ -649,4 +717,12 @@ class OpenAiCompatibleRuntimeTest {
         "event: $type\ndata: " + JSONObject().put("type", type).apply {
             payload.keys().forEach { key -> put(key, payload.get(key)) }
         }
+
+    private companion object {
+        /** Generous: it only has to outlast a local connect, not assert anything about latency. */
+        const val REQUEST_TIMEOUT_MILLIS = 10_000L
+
+        /** Far below the runtime's 120s read timeout, and far above a local socket close. */
+        const val CANCEL_BUDGET_MILLIS = 5_000L
+    }
 }
