@@ -42,11 +42,14 @@ SCENARIOS = (
     "status_failed",
     "truncated_then_answer",
     "truncated_partial",
+    "tap_own_ui",
 )
 DEFAULT_SCENARIO = "happy_tool_call"
-TOOL_SCENARIOS = ("happy_tool_call", "history_check", "read_file_oversized", "parallel_calls", "malformed_args", "oversized_result")
+TOOL_SCENARIOS = ("happy_tool_call", "history_check", "read_file_oversized", "parallel_calls", "malformed_args", "oversized_result", "tap_own_ui")
 SCENARIO_TOOLS = {
     "read_file_oversized": (READ_FILE_TOOL, READ_FILE_ARGUMENTS),
+    # Asks the agent to press Bram's own permission-mode control, which the screen tools must refuse.
+    "tap_own_ui": ("tap", '{"text":"Ask before tools"}'),
 }
 
 
