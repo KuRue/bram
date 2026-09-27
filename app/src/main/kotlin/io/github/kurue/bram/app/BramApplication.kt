@@ -111,6 +111,8 @@ class AppContainer(application: Application) {
     val llamaCppClient = LlamaCppServiceClient(application)
     val deviceProfiler = AndroidDeviceProfiler(application)
     val deviceBenchStore = DeviceBenchStore(application)
+    val benchHistoryStore = BenchHistoryStore(application)
+    val energySampler = EnergySampler(application)
     val conversationStore = ConversationStore(application)
     /**
      * The one Termux bridge, held so a chat turn can bind its conversation as the active shell

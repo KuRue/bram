@@ -52,6 +52,16 @@ class InferenceProcessService : Service() {
 
         override fun devices(): String = runSerialized { bridge.devices() }
 
+        override fun benchmark(requestJson: String?): String = runSerialized {
+            val request = JSONObject(requestJson.orEmpty())
+            bridge.benchmark(
+                if (request.optString("kind") == "tg") 1 else 0,
+                request.optInt("n", 128).coerceIn(1, 8_192),
+                request.optInt("depth", 0).coerceIn(0, 1_048_576),
+                request.optInt("repetitions", 3).coerceIn(1, 20),
+            )
+        }
+
         // Serialized like everything else: a model decoding at the same time would share the
         // memory bus and halve the number.
         override fun memoryBandwidth(requestJson: String?): String = runSerialized {

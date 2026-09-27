@@ -21,4 +21,5 @@ interface IInferenceService {
     // the wire contract, and inserting in the middle would shift them for older clients.
     String quantize(String requestJson);
     String memoryBandwidth(String requestJson);
+    String benchmark(String requestJson);
 }

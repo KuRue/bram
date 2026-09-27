@@ -499,6 +499,12 @@ data class AppUiState(
     val bandwidthError: String? = null,
     /** CPU cluster core counts, most capable first, e.g. [2, 6]. */
     val cpuClusters: List<Int> = emptyList(),
+    /** The profile a benchmark is running for, or null. */
+    val benchmarkingProfileId: String? = null,
+    /** The live step of a running benchmark ("tg128@4096 (3/3)…"). */
+    val benchmarkStatus: String? = null,
+    /** Every recorded benchmark run, newest first. */
+    val benchRuns: List<io.github.kurue.bram.core.domain.BenchRun> = emptyList(),
     /** A quant conversion in flight, so the card can show which model is being converted. */
     val convertingProfileId: String? = null,
     /** Present while auto-configure runs. The dialog is shown for exactly as long as this is. */
@@ -1127,7 +1133,97 @@ class MainViewModel(
                 ),
                 cpuClusters = io.github.kurue.bram.platform.android.CpuTopology.clusters(),
                 memoryBandwidth = it.memoryBandwidth ?: container.deviceBenchStore.load(),
+                benchRuns = it.benchRuns.ifEmpty { container.benchHistoryStore.runs() },
             )
+        }
+    }
+
+    /**
+     * Runs the standard benchmark pass on a profile and records it in the history.
+     *
+     * Loads the profile exactly as chat would (same backend, threads, batch, KV settings), holds
+     * the turn lock so a message sent meanwhile waits instead of sharing the CPU with the timing,
+     * and samples battery power around each test when the phone is unplugged. Refuses while
+     * anything else is measuring, loading, or generating, and under memory pressure.
+     */
+    fun runBenchmark(profileId: String) {
+        val snapshot = mutableState.value
+        val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
+        if (snapshot.isGenerating || snapshot.isLoadingModel || snapshot.isValidatingAccelerator ||
+            snapshot.tuningProfileId != null || snapshot.batchTuneProfileId != null ||
+            snapshot.benchmarkingProfileId != null || snapshot.measuringBandwidth
+        ) {
+            return
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            mutableState.update { it.copy(benchmarkingProfileId = profileId, benchmarkStatus = "Preparing…", error = null) }
+            try {
+                sweepGate()?.let { reason ->
+                    mutableState.update { it.copy(error = reason) }
+                    return@launch
+                }
+                container.turnMutex.withLock {
+                    refreshMeasurementFingerprint()
+                    if (!prepareLocalProfile(profileId)) {
+                        mutableState.update { it.copy(error = "Could not load ${profile.name} to benchmark it.") }
+                        return@withLock
+                    }
+                    val plan = io.github.kurue.bram.core.domain.BenchPlan.standard(profile.contextTokens)
+                    mutableState.update { it.copy(benchmarkStatus = "Measuring idle power…") }
+                    val baseline = container.energySampler.baseline()
+                    val results = plan.mapIndexed { index, test ->
+                        mutableState.update { it.copy(benchmarkStatus = "${test.label} (${index + 1}/${plan.size})…") }
+                        refreshDeviceProfile()
+                        val thermalBefore = mutableState.value.deviceProfile?.thermalStatus.orEmpty()
+                        val (json, energy) = container.energySampler.measure(baseline) {
+                            container.llamaCppClient.benchmark(
+                                kind = test.kind.wire,
+                                n = test.tokens,
+                                depth = test.depth,
+                                repetitions = test.repetitions,
+                            )
+                        }
+                        refreshDeviceProfile()
+                        val rates = json.optJSONArray("tokPerSec")
+                        io.github.kurue.bram.core.domain.BenchResult(
+                            test = test,
+                            tokPerSec = (0 until (rates?.length() ?: 0)).map { rates!!.getDouble(it) },
+                            skipped = json.optString("skipped").takeIf(String::isNotEmpty),
+                            // A depth test's power window also covers its untimed prefill (minutes
+                            // of prompt processing before a few seconds of decode), so its joules
+                            // cannot be divided by the decode rate. Only single-kind tests keep one.
+                            energy = energy.takeIf { test.depth == 0 },
+                            thermalBefore = thermalBefore,
+                            thermalAfter = mutableState.value.deviceProfile?.thermalStatus.orEmpty(),
+                        )
+                    }
+                    val run = io.github.kurue.bram.core.domain.BenchRun(
+                        id = UUID.randomUUID().toString(),
+                        profileId = profile.id,
+                        profileName = profile.name,
+                        backend = resolveLoadBackend(profile.backendId).label,
+                        startedAtEpochMillis = System.currentTimeMillis(),
+                        fingerprint = mutableState.value.measurementFingerprint,
+                        results = results,
+                    )
+                    container.benchHistoryStore.add(run)
+                    android.util.Log.i(
+                        "BramBench",
+                        "run ${profile.name} on ${run.backend}: " + results.joinToString { r ->
+                            "${r.test.label}=${"%.1f".format(r.mean)}±${"%.1f".format(r.stdDev)}" +
+                                (r.joulesPerToken?.let { " %.3fJ/tok".format(it) } ?: "") +
+                                (r.skipped?.let { " skipped" } ?: "")
+                        },
+                    )
+                    mutableState.update { it.copy(benchRuns = container.benchHistoryStore.runs()) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(error = "Benchmark failed: ${error.message ?: error::class.java.simpleName}") }
+            } finally {
+                mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
+            }
         }
     }
 

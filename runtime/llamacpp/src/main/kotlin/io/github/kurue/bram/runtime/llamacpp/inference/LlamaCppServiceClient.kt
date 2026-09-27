@@ -78,6 +78,20 @@ class LlamaCppServiceClient(context: Context) : Closeable {
     }
 
     /**
+     * Runs one benchmark test on the loaded model ([kind] "pp" or "tg"). Occupies the inference
+     * process and drops the chat's prompt cache; see the native benchmark for what is timed.
+     */
+    suspend fun benchmark(kind: String, n: Int, depth: Int, repetitions: Int): JSONObject =
+        withContext(Dispatchers.IO) {
+            val request = JSONObject()
+                .put("kind", kind)
+                .put("n", n)
+                .put("depth", depth)
+                .put("repetitions", repetitions)
+            JSONObject(requireService().benchmark(request.toString()))
+        }
+
+    /**
      * Measures DRAM read bandwidth in the inference process. Takes a few seconds and holds the
      * process, so it waits behind (and blocks) generation like any other native call.
      */

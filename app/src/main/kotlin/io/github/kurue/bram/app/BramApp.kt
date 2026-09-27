@@ -374,6 +374,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onAutoConfigure = viewModel::autoConfigure,
+                                onBenchmark = viewModel::runBenchmark,
                                 onTuneBatch = viewModel::tuneBatch,
                                 onTuneDimension = viewModel::tuneDimension,
                                 tuningDimension = state.tuningDimension,
@@ -1180,6 +1181,7 @@ private fun ModelsScreen(
     onTuneDimension: (String, TuningDimension) -> Unit,
     /** The dimension being measured right now, so its row can say "Tuning…". */
     tuningDimension: TuningDimension?,
+    onBenchmark: (String) -> Unit = {},
     /** Starts a quant conversion for a profile's file. */
     onConvertQuant: (String, String) -> Unit,
     sheetReadyToScroll: Boolean,
@@ -1283,6 +1285,11 @@ private fun ModelsScreen(
                     onDeleteProfile = { onDeleteProfile(profile.id) },
                     onDuplicate = { onCreateProfile(model) },
                     onAutoConfigure = { onAutoConfigure(profile.id) },
+                    onBenchmark = { onBenchmark(profile.id) },
+                    benchmarking = state.benchmarkingProfileId == profile.id,
+                    benchmarkStatus = state.benchmarkStatus.takeIf { state.benchmarkingProfileId == profile.id },
+                    benchRuns = state.benchRuns.filter { it.profileId == profile.id },
+                    currentFingerprint = state.measurementFingerprint,
                     onTuneBatch = { onTuneBatch(profile.id) },
                     onTuneDimension = { dimension -> onTuneDimension(profile.id, dimension) },
                     tuningDimension = tuningDimension,
@@ -1725,6 +1732,13 @@ private fun ProfileCard(
     onDeleteProfile: () -> Unit,
     onDuplicate: () -> Unit,
     onAutoConfigure: () -> Unit,
+    onBenchmark: () -> Unit = {},
+    /** True while this profile's benchmark runs; [benchmarkStatus] is its live step. */
+    benchmarking: Boolean = false,
+    benchmarkStatus: String? = null,
+    /** This profile's recorded runs, newest first. */
+    benchRuns: List<io.github.kurue.bram.core.domain.BenchRun> = emptyList(),
+    currentFingerprint: String = "",
     onTuneBatch: () -> Unit,
     onTuneDimension: (TuningDimension) -> Unit,
     /** The dimension being measured right now, so its row can say "Tuning…". */
@@ -1892,6 +1906,16 @@ private fun ProfileCard(
                 Button(onClick = onAutoConfigure, enabled = !measuring, modifier = Modifier.fillMaxWidth()) {
                     Text("Auto-configure")
                 }
+                // Measures the configuration as it stands, rather than choosing one: the numbers
+                // chat will actually get, kept as a history so a change can be compared.
+                OutlinedButton(
+                    onClick = onBenchmark,
+                    enabled = !measuring && !benchmarking,
+                    modifier = Modifier.fillMaxWidth().testTag("benchmark-profile"),
+                ) {
+                    Text(if (benchmarking) benchmarkStatus ?: "Benchmarking…" else "Benchmark")
+                }
+                BenchRunSummary(benchRuns, currentFingerprint, model, memoryBandwidth)
 
                 Row(
                     Modifier
@@ -2387,6 +2411,50 @@ private fun ProfilePerformancePill(profile: ModelProfile) {
         "${measurement.label} ${measurement.promptTokPerSec.toInt()}/${measurement.decodeTokPerSec.toInt()}",
         emphasized = true,
     )
+}
+
+/**
+ * The latest benchmark run for a profile, one row per test, with the previous comparable run's
+ * number beside it so a change reads as a change. Energy shows only when the run was on battery,
+ * and decode rows show their share of the bandwidth ceiling for dense models.
+ */
+@Composable
+private fun BenchRunSummary(
+    runs: List<io.github.kurue.bram.core.domain.BenchRun>,
+    currentFingerprint: String,
+    model: LocalModelRecord,
+    bandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth?,
+) {
+    val latest = runs.firstOrNull() ?: return
+    // Only a run from the same device and build is a fair "before".
+    val previous = runs.drop(1).firstOrNull { it.fingerprint == latest.fingerprint }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        val stale = currentFingerprint.isNotBlank() && latest.fingerprint.isNotBlank() && latest.fingerprint != currentFingerprint
+        Text(
+            "Benchmark · ${latest.backend}" + if (stale) " · from another build" else "",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        latest.results.forEach { result ->
+            val before = previous?.results?.firstOrNull { it.test == result.test && it.skipped == null }
+            val value = when {
+                result.skipped != null -> "skipped"
+                else -> buildString {
+                    append("%.1f ± %.1f tok/s".format(result.mean, result.stdDev))
+                    before?.let { append(" (was %.1f)".format(it.mean)) }
+                    if (result.test.kind == io.github.kurue.bram.core.domain.BenchTest.Kind.GENERATION && bandwidth != null &&
+                        io.github.kurue.bram.core.domain.MemoryCeiling.appliesTo(model.architecture)
+                    ) {
+                        io.github.kurue.bram.core.domain.MemoryCeiling
+                            .forDenseModel(model.fileSizeBytes, result.mean, bandwidth)
+                            ?.let { append(" · %.0f%%".format(it.share * 100)) }
+                    }
+                    result.joulesPerToken?.let { append(" · %.2f J/tok".format(it)) }
+                }
+            }
+            MetricRow(result.test.label, value)
+        }
+    }
 }
 
 /**
