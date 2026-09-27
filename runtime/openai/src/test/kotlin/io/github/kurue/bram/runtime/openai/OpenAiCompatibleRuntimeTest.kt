@@ -454,6 +454,50 @@ class OpenAiCompatibleRuntimeTest {
     }
 
     @Test
+    fun `a refused connection is retried with backoff before failing`() = runBlocking {
+        // OkHttp connects inside await(), so a refused connection throws while opening — which sat
+        // outside the retry and failed on the first attempt, despite the promised retries.
+        val deadUrl = "http://127.0.0.1:${unusedPort()}/v1"
+
+        val elapsed = measureTimeMillis {
+            val events = generate(apiKind = RemoteApiKind.CHAT_COMPLETIONS, url = deadUrl)
+            val failed = events.filterIsInstance<GenerationEvent.Failed>().single()
+            assertTrue("a network failure stays recoverable", failed.recoverable)
+        }
+
+        // Two backoffs (750 ms, then 1500 ms) separate the three attempts.
+        assertTrue("failed after ${elapsed}ms, so it was never retried", elapsed >= 2_000)
+    }
+
+    @Test
+    fun `a stop during retry backoff ends the request instead of trying again`() = runBlocking {
+        val deadUrl = "http://127.0.0.1:${unusedPort()}/v1"
+        val runtime = runtime(RemoteApiKind.CHAT_COMPLETIONS, url = deadUrl)
+        var events: List<GenerationEvent> = emptyList()
+
+        val elapsed = measureTimeMillis {
+            val turn = launch(Dispatchers.Default) {
+                events = runtime.generate(
+                    GenerationRequest(
+                        messages = listOf(ConversationMessage(role = MessageRole.USER, content = "hi")),
+                        maxOutputTokens = 8,
+                        requestId = "req-stop",
+                    ),
+                ).toList()
+            }
+            delay(200) // inside the first 750 ms backoff
+            runtime.cancel("req-stop")
+            withTimeout(REQUEST_TIMEOUT_MILLIS) { turn.join() }
+        }
+
+        assertTrue("took ${elapsed}ms; a stop must not sit through every retry", elapsed < 1_500)
+        val failed = events.filterIsInstance<GenerationEvent.Failed>().single()
+        assertTrue("message was: ${failed.message}", failed.message.contains("stopped"))
+    }
+
+    private fun unusedPort(): Int = java.net.ServerSocket(0).use { it.localPort }
+
+    @Test
     fun `an auth failure is not retried and is unrecoverable`() = runBlocking {
         // 403 rather than 401: the JDK's HttpURLConnection special-cases 401 (it drops the error
         // body when no Authenticator is set), and the taxonomy under test is "any other 4xx".
