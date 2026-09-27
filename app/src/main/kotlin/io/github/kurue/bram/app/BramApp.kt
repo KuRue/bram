@@ -374,6 +374,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onBenchmarkLiteRt = viewModel::runLiteRtBenchmark,
+                                onUnloadModel = viewModel::unloadModel,
                                 onRemoveLiteRt = viewModel::removeLiteRt,
                                 onAutoConfigure = viewModel::autoConfigure,
                                 onBenchmark = { id -> viewModel.runBenchmark(id) },
@@ -1180,6 +1181,7 @@ private fun ModelsScreen(
     onDiscoverRemoteModels: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
     onBenchmarkLiteRt: (String) -> Unit = {},
+    onUnloadModel: () -> Unit = {},
     onRemoveLiteRt: (String) -> Unit = {},
     onAutoConfigure: (String) -> Unit,
     onTuneBatch: (String) -> Unit,
@@ -1293,6 +1295,7 @@ private fun ModelsScreen(
                     onAutoConfigure = { onAutoConfigure(profile.id) },
                     onBenchmark = { onBenchmark(profile.id) },
                     onSustainedBenchmark = { onSustainedBenchmark(profile.id) },
+                    onUnload = onUnloadModel,
                     benchmarking = state.benchmarkingProfileId == profile.id,
                     benchmarkStatus = state.benchmarkStatus.takeIf { state.benchmarkingProfileId == profile.id },
                     benchRuns = state.benchRuns.filter { it.profileId == profile.id },
@@ -1754,6 +1757,8 @@ private fun ProfileCard(
     onAutoConfigure: () -> Unit,
     onBenchmark: () -> Unit = {},
     onSustainedBenchmark: () -> Unit = {},
+    /** Releases the loaded model, which is what unlocks its load-time settings. */
+    onUnload: () -> Unit = {},
     /** True while this profile's benchmark runs; [benchmarkStatus] is its live step. */
     benchmarking: Boolean = false,
     benchmarkStatus: String? = null,
@@ -1924,6 +1929,24 @@ private fun ProfileCard(
                 // The pills above are the argument for this button: re-measuring is how the choice
                 // of backend changes, and the manual controls sit behind an expander so the card
                 // stays short until someone actually wants to turn a dial.
+                // Load-time settings (backend, context, threads…) are locked while this profile is
+                // the loaded one. There was no way out short of loading another model, so say why
+                // and offer the way.
+                if (loaded && !loading) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Loaded — unload to change backend, context, or threads.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = onUnload,
+                            enabled = !busy,
+                            modifier = Modifier.testTag("unload-profile"),
+                        ) { Text("Unload") }
+                    }
+                }
                 Button(onClick = onAutoConfigure, enabled = !measuring, modifier = Modifier.fillMaxWidth()) {
                     Text("Auto-configure")
                 }
