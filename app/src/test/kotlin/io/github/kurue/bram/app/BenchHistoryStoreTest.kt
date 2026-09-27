@@ -24,6 +24,9 @@ class BenchHistoryStoreTest {
                 energy = EnergySample(6.0, 1.5, 12),
                 thermalBefore = "none",
                 thermalAfter = "light",
+                batteryTempBefore = 31.5,
+                batteryTempAfter = 34.0,
+                cooldownMillis = 12_000,
             ),
             BenchResult(
                 test = BenchTest(BenchTest.Kind.GENERATION, 128, depth = 16_384, repetitions = 2),
@@ -31,6 +34,8 @@ class BenchHistoryStoreTest {
                 skipped = "depth does not fit",
             ),
         ),
+        sustained = true,
+        config = "CPU · 6/4 threads · batch 256/128",
     )
 
     @Test

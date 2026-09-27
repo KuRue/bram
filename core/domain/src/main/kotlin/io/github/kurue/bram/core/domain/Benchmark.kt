@@ -44,6 +44,11 @@ data class BenchResult(
     val energy: EnergySample? = null,
     val thermalBefore: String = "",
     val thermalAfter: String = "",
+    /** Battery temperature (°C) before and after: the skin-heat proxy throttling follows. */
+    val batteryTempBefore: Double? = null,
+    val batteryTempAfter: Double? = null,
+    /** How long the run waited for the phone to cool before this test, in milliseconds. */
+    val cooldownMillis: Long = 0,
 ) {
     val mean: Double get() = if (tokPerSec.isEmpty()) 0.0 else tokPerSec.average()
 
@@ -70,7 +75,45 @@ data class BenchRun(
     /** [MeasurementFingerprint] key: a run from another device or build does not compare. */
     val fingerprint: String,
     val results: List<BenchResult>,
-)
+    /**
+     * True for a sustained run: [results] are consecutive decode tests with no cooldown between
+     * them, in order, so the list is the throttling curve rather than independent measurements.
+     */
+    val sustained: Boolean = false,
+    /**
+     * What was measured, in short: backend, prompt/decode threads, batch. Two runs compare as a
+     * before/after only when this matches; otherwise the difference is the configuration.
+     */
+    val config: String = "",
+) {
+    /** For a sustained run: how far decode fell from the first test to the last (0.25 = -25%). */
+    val sustainedDrop: Double?
+        get() {
+            if (!sustained) return null
+            val rates = results.filter { it.skipped == null && it.mean > 0.0 }
+            val first = rates.firstOrNull()?.mean ?: return null
+            val last = rates.lastOrNull()?.mean ?: return null
+            return ((first - last) / first).coerceAtLeast(0.0)
+        }
+}
+
+object BenchConfig {
+    /** "CPU · 6/4 threads · batch 256/128", or "NPU · 4 threads · batch 256/128". */
+    fun label(backend: String, threads: Int, decodeThreads: Int, batch: Int, ubatch: Int): String {
+        val threadPart = if (decodeThreads > 0 && decodeThreads != threads) "$threads/$decodeThreads threads" else "$threads threads"
+        return "$backend · $threadPart · batch $batch/$ubatch"
+    }
+}
+
+object Cooldown {
+    /**
+     * Whether a test may start: the battery is back within [slackCelsius] of where the run began,
+     * so every test starts from the same thermal state instead of inheriting the last one's heat.
+     * A missing reading never blocks — the thermal status gate still applies.
+     */
+    fun ready(currentCelsius: Double?, runStartCelsius: Double?, slackCelsius: Double = 1.0): Boolean =
+        currentCelsius == null || runStartCelsius == null || currentCelsius <= runStartCelsius + slackCelsius
+}
 
 object BenchPlan {
     /**

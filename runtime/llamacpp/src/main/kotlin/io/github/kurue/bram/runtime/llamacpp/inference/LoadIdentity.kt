@@ -35,6 +35,8 @@ data class LoadIdentity(
     val streamDenseAnon: Boolean,
     val streamOverlap: Boolean,
     val streamOverlapLanes: Int,
+    /** Decode threads, or 0 for the same as [threads]. */
+    val decodeThreads: Int = 0,
 ) {
     /** A stable string for the flag combination, so environment comparisons are exact. */
     val hexKey: String
@@ -79,6 +81,7 @@ data class LoadIdentity(
                 streamDenseAnon = request.optBoolean("streamDenseAnon", false),
                 streamOverlap = request.optBoolean("streamOverlap", false),
                 streamOverlapLanes = request.optInt("streamOverlapLanes", 0).coerceIn(0, 16),
+                decodeThreads = request.optInt("decodeThreads", 0).let { if (it <= 0) 0 else it.coerceIn(1, cores) },
             )
         }
     }

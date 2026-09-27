@@ -374,7 +374,8 @@ fun BramApp(viewModel: MainViewModel) {
                                 onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onAutoConfigure = viewModel::autoConfigure,
-                                onBenchmark = viewModel::runBenchmark,
+                                onBenchmark = { id -> viewModel.runBenchmark(id) },
+                                onSustainedBenchmark = viewModel::runSustainedBenchmark,
                                 onTuneBatch = viewModel::tuneBatch,
                                 onTuneDimension = viewModel::tuneDimension,
                                 tuningDimension = state.tuningDimension,
@@ -1182,6 +1183,7 @@ private fun ModelsScreen(
     /** The dimension being measured right now, so its row can say "Tuning…". */
     tuningDimension: TuningDimension?,
     onBenchmark: (String) -> Unit = {},
+    onSustainedBenchmark: (String) -> Unit = {},
     /** Starts a quant conversion for a profile's file. */
     onConvertQuant: (String, String) -> Unit,
     sheetReadyToScroll: Boolean,
@@ -1286,6 +1288,7 @@ private fun ModelsScreen(
                     onDuplicate = { onCreateProfile(model) },
                     onAutoConfigure = { onAutoConfigure(profile.id) },
                     onBenchmark = { onBenchmark(profile.id) },
+                    onSustainedBenchmark = { onSustainedBenchmark(profile.id) },
                     benchmarking = state.benchmarkingProfileId == profile.id,
                     benchmarkStatus = state.benchmarkStatus.takeIf { state.benchmarkingProfileId == profile.id },
                     benchRuns = state.benchRuns.filter { it.profileId == profile.id },
@@ -1733,6 +1736,7 @@ private fun ProfileCard(
     onDuplicate: () -> Unit,
     onAutoConfigure: () -> Unit,
     onBenchmark: () -> Unit = {},
+    onSustainedBenchmark: () -> Unit = {},
     /** True while this profile's benchmark runs; [benchmarkStatus] is its live step. */
     benchmarking: Boolean = false,
     benchmarkStatus: String? = null,
@@ -1908,12 +1912,24 @@ private fun ProfileCard(
                 }
                 // Measures the configuration as it stands, rather than choosing one: the numbers
                 // chat will actually get, kept as a history so a change can be compared.
-                OutlinedButton(
-                    onClick = onBenchmark,
-                    enabled = !measuring && !benchmarking,
-                    modifier = Modifier.fillMaxWidth().testTag("benchmark-profile"),
-                ) {
-                    Text(if (benchmarking) benchmarkStatus ?: "Benchmarking…" else "Benchmark")
+                if (benchmarking) {
+                    OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth()) {
+                        Text(benchmarkStatus ?: "Benchmarking…")
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = onBenchmark,
+                            enabled = !measuring,
+                            modifier = Modifier.weight(1f).testTag("benchmark-profile"),
+                        ) { Text("Benchmark") }
+                        // Back-to-back decode for five minutes: the speed a long run settles at.
+                        OutlinedButton(
+                            onClick = onSustainedBenchmark,
+                            enabled = !measuring,
+                            modifier = Modifier.weight(1f).testTag("benchmark-sustained"),
+                        ) { Text("Sustained 5 min") }
+                    }
                 }
                 BenchRunSummary(benchRuns, currentFingerprint, model, memoryBandwidth)
 
@@ -2161,6 +2177,23 @@ private fun ProfileCard(
                         onDefault = { onUpdateProfile(profile.copy(threads = 0)) },
                         onTune = { onTuneDimension(TuningDimension.THREADS) },
                     )
+                    // Decode can use fewer threads than prompt processing: it stops gaining sooner,
+                    // so extra threads there mostly cost energy. Benchmark to compare.
+                    SectionLabel("Decode threads")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        val cores = Runtime.getRuntime().availableProcessors()
+                        (listOf(0) + listOf(2, 3, 4, 5, 6, 8).filter { it <= cores }).forEach { count ->
+                            FilterChip(
+                                selected = profile.decodeThreads == count,
+                                onClick = { onUpdateProfile(profile.copy(decodeThreads = count)) },
+                                enabled = !locked,
+                                label = { Text(if (count == 0) "Same" else "$count") },
+                            )
+                        }
+                    }
                     TuningDimensionRow(
                         label = "CPU mask",
                         isDefault = profile.cpuMask.isEmpty(),
@@ -2425,13 +2458,32 @@ private fun BenchRunSummary(
     model: LocalModelRecord,
     bandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth?,
 ) {
-    val latest = runs.firstOrNull() ?: return
-    // Only a run from the same device and build is a fair "before".
-    val previous = runs.drop(1).firstOrNull { it.fingerprint == latest.fingerprint }
+    val standard = runs.filter { !it.sustained }
+    val sustained = runs.firstOrNull { it.sustained }
+    val latest = standard.firstOrNull()
+    // Only a run from the same device and build is a fair "before". A different configuration is
+    // still shown, but named, so a threads change is not read as a regression or a speedup.
+    val previous = latest?.let { l -> standard.drop(1).firstOrNull { it.fingerprint == l.fingerprint } }
+    val previousDiffers = previous != null && latest != null && previous.config != latest.config
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        sustained?.let { run ->
+            val rates = run.results.filter { it.skipped == null && it.mean > 0.0 }
+            val first = rates.firstOrNull()
+            val last = rates.lastOrNull()
+            if (first != null && last != null) {
+                val temps = listOfNotNull(first.batteryTempBefore, last.batteryTempAfter)
+                MetricRow(
+                    "Sustained",
+                    "%.1f → %.1f tok/s".format(first.mean, last.mean) +
+                        (run.sustainedDrop?.let { " (−%.0f%%)".format(it * 100) } ?: "") +
+                        if (temps.size == 2) " · %.0f→%.0f°C".format(temps[0], temps[1]) else "",
+                )
+            }
+        }
+        if (latest == null) return@Column
         val stale = currentFingerprint.isNotBlank() && latest.fingerprint.isNotBlank() && latest.fingerprint != currentFingerprint
         Text(
-            "Benchmark · ${latest.backend}" + if (stale) " · from another build" else "",
+            "Benchmark · " + latest.config.ifBlank { latest.backend } + if (stale) " · from another build" else "",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -2441,7 +2493,11 @@ private fun BenchRunSummary(
                 result.skipped != null -> "skipped"
                 else -> buildString {
                     append("%.1f ± %.1f tok/s".format(result.mean, result.stdDev))
-                    before?.let { append(" (was %.1f)".format(it.mean)) }
+                    before?.let {
+                        append(" (was %.1f".format(it.mean))
+                        if (previousDiffers) previous?.config?.takeIf(String::isNotBlank)?.let { c -> append(" at $c") }
+                        append(")")
+                    }
                     if (result.test.kind == io.github.kurue.bram.core.domain.BenchTest.Kind.GENERATION && bandwidth != null &&
                         io.github.kurue.bram.core.domain.MemoryCeiling.appliesTo(model.architecture)
                     ) {

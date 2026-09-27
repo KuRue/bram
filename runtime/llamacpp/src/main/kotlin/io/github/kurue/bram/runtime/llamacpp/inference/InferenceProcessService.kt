@@ -400,6 +400,7 @@ class InferenceProcessService : Service() {
                     streamDenseAnon = identity.streamDenseAnon,
                     streamOverlap = identity.streamOverlap,
                     streamOverlapLanes = identity.streamOverlapLanes,
+                    decodeThreads = identity.decodeThreads,
                 ),
             )
             val validation = JSONObject(bridge.selfTest())

@@ -49,4 +49,26 @@ class BenchmarkTest {
         assertNull(BatteryPower.watts(Long.MIN_VALUE, 4_000))
         assertNull(BatteryPower.watts(1_200, 0))
     }
+
+    @Test
+    fun `a sustained run reports how far decode fell`() {
+        fun tg(rate: Double) = BenchResult(BenchTest(BenchTest.Kind.GENERATION, 128, repetitions = 1), listOf(rate))
+        val run = BenchRun("r", "p", "n", "CPU", 0, "f", listOf(tg(24.0), tg(21.0), tg(18.0)), sustained = true)
+        assertEquals(0.25, run.sustainedDrop!!, 1e-9)
+        assertNull("an ordinary run has no curve", run.copy(sustained = false).sustainedDrop)
+    }
+
+    @Test
+    fun `a test waits until the phone is back near the starting temperature`() {
+        assertEquals(true, Cooldown.ready(currentCelsius = 31.5, runStartCelsius = 31.0))
+        assertEquals(false, Cooldown.ready(currentCelsius = 33.0, runStartCelsius = 31.0))
+        assertEquals("no reading never blocks", true, Cooldown.ready(null, 31.0))
+    }
+
+    @Test
+    fun `a config label names the prompt and decode threads only when they differ`() {
+        assertEquals("CPU · 6/4 threads · batch 256/128", BenchConfig.label("CPU", 6, 4, 256, 128))
+        assertEquals("NPU · 4 threads · batch 256/128", BenchConfig.label("NPU", 4, 4, 256, 128))
+        assertEquals("CPU · 4 threads · batch 512/128", BenchConfig.label("CPU", 4, 0, 512, 128))
+    }
 }
