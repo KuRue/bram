@@ -61,21 +61,23 @@ class TruncationContinuationOnDeviceTest {
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Mock endpoint") }
         // The scenario is stamped on every logged request, so counting this test's own requests
         // survives other classes' entries in the shared log.
-        val before = loggedChatCompletions().count { it.isTruncationTurnRequest() }
+        // Counted by sequence number, not list length: the mock's log is capped and drops old
+        // entries, so after a long day of runs a length difference reads as zero.
+        val before = lastSeq()
         send(ASK)
         // The scripted answer goes only to a request carrying the nudge, so seeing it at all is
         // the continuation having run; the log check below pins how.
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(TRUNCATED_FINAL_TEXT) }
         composeRule.onNodeWithText(TRUNCATED_FINAL_TEXT).assertIsDisplayed()
 
-        val mine = loggedChatCompletions().filter { it.isTruncationTurnRequest() }
+        val mine = loggedChatCompletions().filter { it.optLong("seq") > before && it.isTruncationTurnRequest() }
         assertTrue(
-            "expected the truncated round and its continuation, saw ${mine.size - before}",
-            mine.size - before >= 2,
+            "expected the truncated round and its continuation, saw ${mine.size}",
+            mine.size >= 2,
         )
         assertTrue(
             "the continuation request must carry the nudge as its last message",
-            mine.drop(before).any { it.endsWithSystemMessage() },
+            mine.any { it.endsWithSystemMessage() },
         )
     }
 
@@ -84,7 +86,7 @@ class TruncationContinuationOnDeviceTest {
         assumeTrue("could not arm the truncated_partial scenario", postScenario("truncated_partial"))
         composeRule.onNodeWithTag("new-chat").performClick()
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Mock endpoint") }
-        val before = loggedChatCompletions().count { it.optString("scenario") == "truncated_partial" && it.carriesUserAsk() }
+        val before = lastSeq()
         send(ASK)
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(TRUNCATED_PARTIAL_TEXT) }
         composeRule.waitUntil(TIMEOUT_MILLIS) { countText(NOTICE_MARKER) >= 1 }
@@ -95,7 +97,9 @@ class TruncationContinuationOnDeviceTest {
         assertEquals(
             "a cut-off reply that exists must not be run again",
             1,
-            loggedChatCompletions().count { it.optString("scenario") == "truncated_partial" && it.carriesUserAsk() } - before,
+            loggedChatCompletions().count {
+                it.optLong("seq") > before && it.optString("scenario") == "truncated_partial" && it.carriesUserAsk()
+            },
         )
     }
 
@@ -194,6 +198,9 @@ class TruncationContinuationOnDeviceTest {
         }
 
         private fun targetContext(): Context = InstrumentationRegistry.getInstrumentation().targetContext
+
+        /** The newest sequence number in the mock's log, or 0 when it is empty or unreachable. */
+        private fun lastSeq(): Long = loggedChatCompletions().maxOfOrNull { it.optLong("seq") } ?: 0L
 
         /** Every chat completion the mock has logged so far, oldest first. */
         private fun loggedChatCompletions(): List<JSONObject> = runCatching {
