@@ -4804,6 +4804,7 @@ class MainViewModel(
         snapshot: AppUiState,
         privacyClass: PrivacyClass,
         preferQuality: Boolean = false,
+        ignoreEndpointHealth: Boolean = false,
     ): List<RuntimeSelection> {
         val assignedTargets = snapshot.routingPool.targetIds
         val assignedLocalModels = snapshot.profiles
@@ -4845,7 +4846,10 @@ class MainViewModel(
                         localModel = null,
                         routingLabel = endpoint.displayName,
                         endpointId = endpoint.id,
-                    ) to RoutingEstimates.remoteCandidate(endpoint, available = EndpointHealth.isReachable(endpoint.id)),
+                    ) to RoutingEstimates.remoteCandidate(
+                        endpoint,
+                        available = ignoreEndpointHealth || EndpointHealth.isReachable(endpoint.id),
+                    ),
                 )
             }
         }
@@ -4882,6 +4886,15 @@ class MainViewModel(
                     candidates.firstOrNull { it.second.model.id == fallback.model.id }?.let { add(it.first) }
                 }
             }
+        }
+        // Health demotes an endpoint; it must not make a turn impossible. When the cooldown has
+        // taken out every runnable candidate — the only endpoint configured, or the one the user
+        // picked — refusing outright answered "No profile is ready" for a full minute after one
+        // failed turn. Trying the endpoint anyway costs one round trip and is what the user asked.
+        if (ordered.isEmpty() && !ignoreEndpointHealth &&
+            snapshot.endpoints.any { !EndpointHealth.isReachable(it.id) }
+        ) {
+            return routeSelection(snapshot, privacyClass, preferQuality, ignoreEndpointHealth = true)
         }
         val label = ordered.firstOrNull()?.routingLabel
         if (label != null) {

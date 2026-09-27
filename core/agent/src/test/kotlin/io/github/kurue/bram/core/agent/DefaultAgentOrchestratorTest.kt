@@ -273,6 +273,45 @@ class DefaultAgentOrchestratorTest {
     }
 
     @Test
+    fun `allow always does not widen to the whole tool for the rest of the run`() = runBlocking {
+        // "Always" is scoped by the gate (one host, one folder, one exact command). The loop must
+        // keep asking the gate, which decides per scope, rather than waving the tool name through.
+        var gateCalls = 0
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(NoopHandler("asked_about"))),
+            approvalGate = object : ToolApprovalGate {
+                override suspend fun decide(
+                    tool: ToolDefinition,
+                    argumentsJson: String,
+                    recovered: Boolean,
+                    untrustedContext: Boolean,
+                ): ToolApprovalDecision {
+                    gateCalls++
+                    return ToolApprovalDecision.ALLOW_ALWAYS
+                }
+            },
+        )
+
+        orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("always"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool twice")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = RepeatingToolRuntime("asked_about", times = 2),
+        ).toList()
+
+        assertEquals("every call must reach the scope-aware gate", 2, gateCalls)
+    }
+
+    @Test
     fun `an oversized tool result reaches the transcript bounded and marked`() = runBlocking {
         val runtime = ToolResultCapturingRuntime(contextWindowTokens = 8_192)
         val orchestrator = DefaultAgentOrchestrator(
@@ -375,6 +414,39 @@ class DefaultAgentOrchestratorTest {
         assertTrue("the turn must still complete", events.any { it is AgentEvent.Completed })
         val result = events.filterIsInstance<AgentEvent.ToolFinished>().single().result
         assertTrue(result.contains("\"code\":\"tool_timeout\""))
+    }
+
+    @Test
+    fun `a tool stuck in blocking io is abandoned at its deadline`() = runBlocking {
+        // Real handlers block inside withContext(Dispatchers.IO), which a timeout cannot
+        // interrupt; delay() in the test above would hide that. The turn must not wait it out.
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(BlockingHandler("asked_about", timeoutMillis = 40))),
+            approvalGate = ReadOnlyApprovalGate(),
+        )
+
+        val started = System.nanoTime()
+        val events = orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("blocking-timeout"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = ToolCallingRuntime(),
+        ).toList()
+        val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+
+        assertTrue("waited ${elapsedMillis}ms for a 40ms deadline", elapsedMillis < 2_000)
+        val result = events.filterIsInstance<AgentEvent.ToolFinished>().single().result
+        assertTrue(result.contains("\"code\":\"tool_timeout\""))
+        assertTrue(events.any { it is AgentEvent.Completed })
     }
 
     @Test
@@ -651,6 +723,22 @@ private class SlowHandler(name: String, timeoutMillis: Long) : ToolHandler {
         delay(30_000)
         return "{}"
     }
+}
+
+/** Blocks a thread the way real I/O handlers do; cancellation cannot interrupt it. */
+private class BlockingHandler(name: String, timeoutMillis: Long) : ToolHandler {
+    override val definition = ToolDefinition(
+        name = name,
+        description = name,
+        inputSchemaJson = "{}",
+        timeoutMillis = timeoutMillis,
+    )
+
+    override suspend fun execute(argumentsJson: String): String =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            Thread.sleep(10_000)
+            "{}"
+        }
 }
 
 /** Records whether another handler was running at the same time; both must overlap. */
