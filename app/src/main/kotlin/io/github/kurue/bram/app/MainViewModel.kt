@@ -491,6 +491,14 @@ data class AppUiState(
      * somewhere else and the card says so.
      */
     val measurementFingerprint: String = "",
+    /** The device's measured DRAM read bandwidth, the ceiling decode is judged against. */
+    val memoryBandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth? = null,
+    /** True while the bandwidth measurement runs. */
+    val measuringBandwidth: Boolean = false,
+    /** Why the last bandwidth measurement could not run, if it could not. */
+    val bandwidthError: String? = null,
+    /** CPU cluster core counts, most capable first, e.g. [2, 6]. */
+    val cpuClusters: List<Int> = emptyList(),
     /** A quant conversion in flight, so the card can show which model is being converted. */
     val convertingProfileId: String? = null,
     /** Present while auto-configure runs. The dialog is shown for exactly as long as this is. */
@@ -1117,7 +1125,48 @@ class MainViewModel(
                     cpuValidated = current.cpuValidated,
                     runtimeBackends = runtimeBackends,
                 ),
+                cpuClusters = io.github.kurue.bram.platform.android.CpuTopology.clusters(),
+                memoryBandwidth = it.memoryBandwidth ?: container.deviceBenchStore.load(),
             )
+        }
+    }
+
+    /**
+     * Measures the device's DRAM read bandwidth in the inference process and stores it under the
+     * current measurement fingerprint. Refused mid-turn (the model would share the bus) and under
+     * memory pressure (the buffer would push the system into swapping, and so would the number).
+     */
+    fun measureMemoryBandwidth() {
+        val current = mutableState.value
+        if (current.isGenerating || current.measuringBandwidth) return
+        viewModelScope.launch {
+            mutableState.update { it.copy(measuringBandwidth = true, bandwidthError = null) }
+            try {
+                sweepGate()?.let { reason ->
+                    mutableState.update { it.copy(bandwidthError = reason) }
+                    return@launch
+                }
+                refreshMeasurementFingerprint()
+                val raw = container.llamaCppClient.memoryBandwidth()
+                val result = DeviceBenchStore.fromNativeJson(
+                    raw,
+                    measuredAtEpochMillis = System.currentTimeMillis(),
+                    fingerprint = mutableState.value.measurementFingerprint,
+                )
+                if (result == null) {
+                    mutableState.update { it.copy(bandwidthError = "The measurement returned no usable result.") }
+                } else {
+                    container.deviceBenchStore.save(result)
+                    android.util.Log.i("BramBench", "memory bandwidth ${raw}")
+                    mutableState.update { it.copy(memoryBandwidth = result) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(bandwidthError = error.message ?: error::class.java.simpleName) }
+            } finally {
+                mutableState.update { it.copy(measuringBandwidth = false) }
+            }
         }
     }
 

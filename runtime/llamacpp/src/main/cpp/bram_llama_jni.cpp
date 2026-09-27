@@ -8,6 +8,7 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "expert_stream.h"
+#include "mem_bench.h"
 #include <deque>
 
 #include <algorithm>
@@ -1542,6 +1543,19 @@ extern "C" JNIEXPORT void JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_cancel(
     JNIEnv *, jobject) {
     g_cancelled.store(true, std::memory_order_relaxed);
+}
+
+// Measures the device's DRAM read bandwidth: the ceiling decode speed is judged against. Needs no
+// model; the buffer is freed before returning.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_memoryBandwidth(
+    JNIEnv * env, jobject, jint buffer_mb, jint max_threads, jint passes) {
+    return guarded_string(env, [buffer_mb, max_threads, passes] {
+        return bram::measure_read_bandwidth(
+            static_cast<size_t>(std::max(16, static_cast<int>(buffer_mb))) << 20,
+            static_cast<int>(max_threads),
+            static_cast<int>(passes));
+    });
 }
 
 // Enumerates the ggml backend devices this build can actually see, so accelerator capability is

@@ -446,6 +446,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onBack = { panel = AppPanel.SETTINGS },
                                 onRefreshDiagnostics = viewModel::refreshDeviceProfile,
+                                onMeasureBandwidth = viewModel::measureMemoryBandwidth,
                             )
                             AppPanel.SESSION -> SessionScreen(
                                 state = state,
@@ -1285,6 +1286,7 @@ private fun ModelsScreen(
                     onTuneBatch = { onTuneBatch(profile.id) },
                     onTuneDimension = { dimension -> onTuneDimension(profile.id, dimension) },
                     tuningDimension = tuningDimension,
+                    memoryBandwidth = state.memoryBandwidth,
                     staleMeasurement = state.measurementFingerprint.isNotBlank() &&
                         profile.measuredFingerprint.isNotBlank() &&
                         profile.measuredFingerprint != state.measurementFingerprint,
@@ -1729,6 +1731,8 @@ private fun ProfileCard(
     tuningDimension: TuningDimension?,
     /** True when the profile's measurements were recorded under a different device/build. */
     staleMeasurement: Boolean = false,
+    /** The device's measured bandwidth, for the decode-ceiling pill; null when not measured. */
+    memoryBandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth? = null,
     /** A quant conversion of this profile's file in flight. */
     converting: Boolean = false,
     /** Starts a quant conversion of this profile's file to the given ggml type ("q4_0"). */
@@ -1838,6 +1842,7 @@ private fun ProfileCard(
                         )
                     }
                     ProfilePerformancePill(profile)
+                    ProfileCeilingPill(profile, model, memoryBandwidth)
                 }
             }
 
@@ -2382,6 +2387,31 @@ private fun ProfilePerformancePill(profile: ModelProfile) {
         "${measurement.label} ${measurement.promptTokPerSec.toInt()}/${measurement.decodeTokPerSec.toInt()}",
         emphasized = true,
     )
+}
+
+/**
+ * How close the chosen backend's decode comes to the device's bandwidth ceiling, e.g. "62% of
+ * ceiling". Shown only for dense models with a measured decode and a measured bandwidth: a MoE
+ * reads only its active experts per token, so the file-size ceiling would mislead.
+ */
+@Composable
+private fun ProfileCeilingPill(
+    profile: ModelProfile,
+    model: LocalModelRecord,
+    bandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth?,
+) {
+    bandwidth ?: return
+    if (!io.github.kurue.bram.core.domain.MemoryCeiling.appliesTo(model.architecture)) return
+    val chosenId = profile.backendId.ifBlank { "" }
+    val measurement = profile.measurements.firstOrNull { it.backendId == chosenId }
+        ?: profile.measurements.firstOrNull { it.isReference && chosenId.isBlank() }
+        ?: return
+    val ceiling = io.github.kurue.bram.core.domain.MemoryCeiling.forDenseModel(
+        weightBytes = model.fileSizeBytes,
+        decodeTokPerSec = measurement.decodeTokPerSec,
+        bandwidth = bandwidth,
+    ) ?: return
+    ProfilePill("%.0f%% of %.0f tok/s ceiling".format(ceiling.share * 100, ceiling.ceilingTokPerSec))
 }
 
 /**
@@ -3680,7 +3710,12 @@ private fun MemoriesScreen(
 }
 
 @Composable
-private fun SystemScreen(state: AppUiState, onBack: () -> Unit, onRefreshDiagnostics: () -> Unit) {
+private fun SystemScreen(
+    state: AppUiState,
+    onBack: () -> Unit,
+    onRefreshDiagnostics: () -> Unit,
+    onMeasureBandwidth: () -> Unit = {},
+) {
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
             .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
@@ -3693,7 +3728,7 @@ private fun SystemScreen(state: AppUiState, onBack: () -> Unit, onRefreshDiagnos
             TextButton(onClick = onRefreshDiagnostics) { Text("Refresh") }
         }
         state.deviceProfile?.let { profile ->
-            DeviceSummaryCard(profile)
+            DeviceSummaryCard(profile, state, onMeasureBandwidth)
         } ?: CircularProgressIndicator()
         SectionHeader("Agent foundation")
         GlassSurface(Modifier.fillMaxWidth()) {
@@ -4161,7 +4196,11 @@ private fun activityTarget(entry: AgentActivity): String {
 }
 
 @Composable
-private fun DeviceSummaryCard(profile: DeviceProfile) {
+private fun DeviceSummaryCard(
+    profile: DeviceProfile,
+    state: AppUiState,
+    onMeasureBandwidth: () -> Unit,
+) {
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Text("${profile.manufacturer} ${profile.model}", style = MaterialTheme.typography.titleMedium)
@@ -4169,9 +4208,44 @@ private fun DeviceSummaryCard(profile: DeviceProfile) {
             HorizontalDivider()
             MetricRow("RAM available", "${formatBytes(profile.availableRamBytes)} / ${formatBytes(profile.totalRamBytes)}")
             MetricRow("Storage free", "${formatBytes(profile.freeStorageBytes)} / ${formatBytes(profile.totalStorageBytes)}")
-            MetricRow("CPU", "${profile.cpuCoreCount} cores · ${profile.appAbi}")
+            // Cluster shape (most capable first) is what threads and masks get tuned against.
+            val clusters = state.cpuClusters.takeIf { it.size > 1 }?.joinToString("+", prefix = " (", postfix = ")").orEmpty()
+            MetricRow("CPU", "${profile.cpuCoreCount} cores$clusters · ${profile.appAbi}")
             MetricRow("Thermals", profile.thermalStatus)
+            HorizontalDivider()
+            MemoryBandwidthRow(state, onMeasureBandwidth)
         }
+    }
+}
+
+/**
+ * The measured DRAM read bandwidth: the ceiling every dense model's decode speed is judged
+ * against. Stale once the device or build changes, and says so instead of quietly trusting it.
+ */
+@Composable
+private fun MemoryBandwidthRow(state: AppUiState, onMeasure: () -> Unit) {
+    val bandwidth = state.memoryBandwidth
+    val stale = bandwidth != null && state.measurementFingerprint.isNotBlank() &&
+        bandwidth.fingerprint.isNotBlank() && bandwidth.fingerprint != state.measurementFingerprint
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Memory bandwidth", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val detail = when {
+                state.measuringBandwidth -> "Measuring…"
+                bandwidth == null -> "Not measured — the ceiling for decode speed"
+                else -> "%.1f GB/s peak at %d threads".format(bandwidth.peakGbPerSecond, bandwidth.peakThreads) +
+                    if (stale) " · measured on another build, re-measure" else ""
+            }
+            Text(detail, fontWeight = FontWeight.Medium)
+            state.bandwidthError?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+        }
+        TextButton(
+            onClick = onMeasure,
+            enabled = !state.measuringBandwidth && !state.isGenerating,
+            modifier = Modifier.testTag("measure-bandwidth"),
+        ) { Text(if (bandwidth == null) "Measure" else "Re-measure") }
     }
 }
 

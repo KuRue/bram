@@ -8,6 +8,8 @@ internal fun interface NativeTokenSink {
 internal class NativeLlamaBridge {
     external fun probe(): String
     external fun devices(): String
+    /** DRAM read bandwidth sweep; see mem_bench.h for the JSON shape. */
+    external fun memoryBandwidth(bufferMb: Int, maxThreads: Int, passes: Int): String
     external fun quantize(modelPath: String, outPath: String, ftype: String): String
     external fun load(
         modelPath: String,

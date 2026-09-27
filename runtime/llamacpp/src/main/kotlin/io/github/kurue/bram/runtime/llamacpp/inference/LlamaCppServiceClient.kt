@@ -78,6 +78,15 @@ class LlamaCppServiceClient(context: Context) : Closeable {
     }
 
     /**
+     * Measures DRAM read bandwidth in the inference process. Takes a few seconds and holds the
+     * process, so it waits behind (and blocks) generation like any other native call.
+     */
+    suspend fun memoryBandwidth(bufferMb: Int = 256, passes: Int = 5): JSONObject = withContext(Dispatchers.IO) {
+        val request = JSONObject().put("bufferMb", bufferMb).put("passes", passes)
+        JSONObject(requireService().memoryBandwidth(request.toString()))
+    }
+
+    /**
      * Converts a GGUF to another quant on the device. Long-running: it occupies the inference
      * process for the duration, and the app should show progress while it runs.
      */
