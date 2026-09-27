@@ -56,8 +56,34 @@ sealed interface ScreenActionResult {
     data object NotInteractive : ScreenActionResult
     data object StaleSnapshot : ScreenActionResult
     data object NoWindow : ScreenActionResult
+
+    /** The window in front is one the agent may read but never operate; see [isProtectedWindow]. */
+    data object Protected : ScreenActionResult
     data class Failed(val message: String) : ScreenActionResult
 }
+
+/**
+ * Windows the agent can read but never act on: the screens that hold the user's consent.
+ *
+ * Bram's own UI carries the permission mode, the approval card, and the grants list, so a tap
+ * there lets a run approve itself or switch itself to auto-approve. The permission controller's
+ * dialogs are Android's own "Allow", which would turn an `os_permission_denied` into a grant nobody
+ * made, and the package installer confirms an install. `read_screen` returns content other apps
+ * wrote, so a steered run could otherwise reach every one of these; the approval card for the tap
+ * itself is not enough, because "For this run" covers every later tap without asking.
+ *
+ * System Settings stays reachable on purpose: "turn on Wi-Fi" is a legitimate task, and each change
+ * there still passes the gate.
+ */
+internal fun isProtectedWindow(packageName: String, ownPackage: String): Boolean =
+    packageName == ownPackage || packageName in PROTECTED_PACKAGES
+
+private val PROTECTED_PACKAGES = setOf(
+    "com.android.permissioncontroller",
+    "com.google.android.permissioncontroller",
+    "com.android.packageinstaller",
+    "com.google.android.packageinstaller",
+)
 
 /**
  * Reading and acting on the screen, behind an interface so the tools are testable without a device.
@@ -181,6 +207,7 @@ class TapTool(
                 )
                 ScreenActionResult.StaleSnapshot -> staleScreenError()
                 ScreenActionResult.NoWindow -> noWindowError()
+                ScreenActionResult.Protected -> protectedWindowError()
                 is ScreenActionResult.Failed -> toolError("action_failed", result.message)
             }
         }
@@ -246,6 +273,7 @@ class TypeTextTool(
                 )
                 ScreenActionResult.StaleSnapshot -> staleScreenError()
                 ScreenActionResult.NoWindow -> noWindowError()
+                ScreenActionResult.Protected -> protectedWindowError()
                 is ScreenActionResult.Failed -> toolError("action_failed", result.message)
             }
         }
@@ -313,6 +341,7 @@ class ScrollTool(
                 )
                 ScreenActionResult.StaleSnapshot -> staleScreenError()
                 ScreenActionResult.NoWindow -> noWindowError()
+                ScreenActionResult.Protected -> protectedWindowError()
                 is ScreenActionResult.Failed -> toolError("action_failed", result.message)
             }
         }
@@ -450,6 +479,12 @@ internal fun screenStartingError(): String = toolError(
 private fun staleScreenError(): String = toolError(
     "stale_snapshot",
     "The screen changed since read_screen. Call read_screen again, then use the new index or target.",
+)
+
+private fun protectedWindowError(): String = toolError(
+    "protected_screen",
+    "The screen in front is Bram itself or an Android permission or install prompt. The agent " +
+        "can read it but never act on it; ask the user to do this step themselves.",
 )
 
 private fun noWindowError(): String = toolError(

@@ -206,6 +206,7 @@ private class ServiceScreenSession(private val service: BramAccessibilityService
                 Resolved.NotFound -> return@withContext ScreenActionResult.NotFound
                 Resolved.Stale -> return@withContext ScreenActionResult.StaleSnapshot
                 Resolved.NoWindow -> return@withContext ScreenActionResult.NoWindow
+                Resolved.Protected -> return@withContext ScreenActionResult.Protected
             }
             val node = resolved.node
             if (node.isClickable) {
@@ -226,7 +227,9 @@ private class ServiceScreenSession(private val service: BramAccessibilityService
             val node: AccessibilityNodeInfo
             val label: String
             if (target == null) {
-                val focused = service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                val root = service.rootInActiveWindow ?: return@withContext ScreenActionResult.NoWindow
+                if (isProtected(root.packageName)) return@withContext ScreenActionResult.Protected
+                val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
                     ?: return@withContext ScreenActionResult.NotFound
                 node = focused
                 label = focused.describe()
@@ -239,6 +242,7 @@ private class ServiceScreenSession(private val service: BramAccessibilityService
                     Resolved.NotFound -> return@withContext ScreenActionResult.NotFound
                     Resolved.Stale -> return@withContext ScreenActionResult.StaleSnapshot
                     Resolved.NoWindow -> return@withContext ScreenActionResult.NoWindow
+                    Resolved.Protected -> return@withContext ScreenActionResult.Protected
                 }
             }
             if (!node.isEditable) return@withContext ScreenActionResult.NotInteractive
@@ -257,6 +261,7 @@ private class ServiceScreenSession(private val service: BramAccessibilityService
         withContext(Dispatchers.Main.immediate) {
             val walk = runCatching { ScreenTreeReader.walkWithNodes(service.rootInActiveWindow) }
                 .getOrNull() ?: return@withContext ScreenActionResult.NoWindow
+            if (isProtected(walk.snapshot.packageName)) return@withContext ScreenActionResult.Protected
             val interesting = interestingNodes(walk.snapshot)
             val data = if (target == null) {
                 interesting.firstOrNull(ScreenNode::scrollable)
@@ -267,6 +272,7 @@ private class ServiceScreenSession(private val service: BramAccessibilityService
                     Resolved.NotFound -> return@withContext ScreenActionResult.NotFound
                     Resolved.Stale -> return@withContext ScreenActionResult.StaleSnapshot
                     Resolved.NoWindow -> return@withContext ScreenActionResult.NoWindow
+                    Resolved.Protected -> return@withContext ScreenActionResult.Protected
                 }
             }
             var node = walk.nodes.getOrNull(data.walkIndex)
@@ -296,8 +302,14 @@ private class ServiceScreenSession(private val service: BramAccessibilityService
     private fun resolveLive(target: ScreenTarget): Resolved {
         val walk = runCatching { ScreenTreeReader.walkWithNodes(service.rootInActiveWindow) }
             .getOrNull() ?: return Resolved.NoWindow
+        // Checked on the tree the action is about to use, not on the last read, so a window that
+        // came to the front in between cannot slip past.
+        if (isProtected(walk.snapshot.packageName)) return Resolved.Protected
         return resolveIn(walk, interestingNodes(walk.snapshot), target)
     }
+
+    private fun isProtected(packageName: CharSequence?): Boolean =
+        isProtectedWindow(packageName?.toString().orEmpty(), service.packageName)
 
     /**
      * Resolves a target against the tree about to be acted on. An index is looked up in the list
@@ -326,6 +338,7 @@ private class ServiceScreenSession(private val service: BramAccessibilityService
         data object NotFound : Resolved
         data object Stale : Resolved
         data object NoWindow : Resolved
+        data object Protected : Resolved
     }
 
     private fun AccessibilityNodeInfo.describe(): String {

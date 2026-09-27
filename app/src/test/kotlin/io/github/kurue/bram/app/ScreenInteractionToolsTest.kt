@@ -6,6 +6,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ScreenInteractionToolsTest {
@@ -147,7 +148,31 @@ class ScreenInteractionToolsTest {
         assertEquals("not_interactive", code(ScreenActionResult.NotInteractive))
         assertEquals("stale_snapshot", code(ScreenActionResult.StaleSnapshot))
         assertEquals("screen_unavailable", code(ScreenActionResult.NoWindow))
+        assertEquals("protected_screen", code(ScreenActionResult.Protected))
         assertEquals("action_failed", code(ScreenActionResult.Failed("no")))
+    }
+
+    @Test
+    fun `the agent cannot operate its own ui or the system permission prompts`() {
+        val own = "io.github.kurue.bram.app"
+        assertTrue(isProtectedWindow(own, own))
+        assertTrue(isProtectedWindow("com.google.android.permissioncontroller", own))
+        assertTrue(isProtectedWindow("com.android.permissioncontroller", own))
+        assertTrue(isProtectedWindow("com.google.android.packageinstaller", own))
+        assertFalse("settings stays reachable", isProtectedWindow("com.android.settings", own))
+        assertFalse(isProtectedWindow("com.android.chrome", own))
+    }
+
+    @Test
+    fun `type and scroll report a protected window too`() = runBlocking {
+        val session = FakeScreenSession(
+            typeResult = ScreenActionResult.Protected,
+            scrollResult = ScreenActionResult.Protected,
+        )
+        val typed = JSONObject(TypeTextTool { ScreenAccess.Ready(session) }.execute("""{"text":"hi"}"""))
+        val scrolled = JSONObject(ScrollTool { ScreenAccess.Ready(session) }.execute("""{"direction":"down"}"""))
+        assertEquals("protected_screen", typed.getJSONObject("error").getString("code"))
+        assertEquals("protected_screen", scrolled.getJSONObject("error").getString("code"))
     }
 
     @Test
