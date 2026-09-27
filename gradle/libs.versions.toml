@@ -6,12 +6,12 @@ activity-compose = "1.13.0"
 lifecycle = "2.10.0"
 work = "2.11.2"
 haze = "1.7.2"
-coroutines = "1.10.2"
+coroutines = "1.11.0"
 # OkHttp 5.4.0 is the newest 5.x whose Android artifact still builds at compileSdk 36;
 # 5.5.0's okhttp-android declares minCompileSdk=37, which would force an SDK bump.
 okhttp = "5.4.0"
 junit = "4.13.2"
-litertlm = "0.15.0"
+litertlm = "0.17.1"
 androidx-test-runner = "1.7.0"
 androidx-test-ext-junit = "1.3.0"
 
