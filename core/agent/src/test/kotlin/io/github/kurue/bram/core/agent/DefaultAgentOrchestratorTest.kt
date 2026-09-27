@@ -583,6 +583,27 @@ class DefaultAgentOrchestratorTest {
     }
 
     @Test
+    fun `a dropped connection completes as interrupted, not truncated`() = runBlocking {
+        val events = orchestratorWith().run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("dropped"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Tell me")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = FinishReasonRuntime(GenerationEvent.Finished.CONNECTION_CLOSED),
+        ).toList()
+
+        val completed = events.filterIsInstance<AgentEvent.Completed>().single()
+        assertTrue(completed.interrupted)
+        assertTrue("a network drop is not the length limit", !completed.truncated)
+    }
+
+    @Test
     fun `a stopped reply is not marked truncated`() = runBlocking {
         val events = orchestratorWith().run(
             request = AgentRunRequest(

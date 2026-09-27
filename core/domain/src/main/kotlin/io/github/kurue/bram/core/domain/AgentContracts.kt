@@ -244,7 +244,12 @@ sealed interface AgentEvent {
     data class ToolFinished(val call: ToolCall, val result: String) : AgentEvent
     data class Usage(val usage: TokenUsage) : AgentEvent
     data class Metrics(val metrics: GenerationMetrics) : AgentEvent
-    data class Completed(val message: ConversationMessage, val truncated: Boolean = false) : AgentEvent
+    data class Completed(
+        val message: ConversationMessage,
+        val truncated: Boolean = false,
+        /** The connection ended before the server finished; see [GenerationEvent.Finished.CONNECTION_CLOSED]. */
+        val interrupted: Boolean = false,
+    ) : AgentEvent
     data class Failed(val message: String, val recoverable: Boolean) : AgentEvent
 }
 

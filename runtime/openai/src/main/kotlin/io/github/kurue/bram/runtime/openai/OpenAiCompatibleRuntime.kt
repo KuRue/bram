@@ -144,8 +144,12 @@ class OpenAiCompatibleRuntime(
             val reasoning = StringBuilder()
             val calls = sortedMapOf<Int, ChatToolCallBuilder>()
             var finishReason: String? = null
+            var sawDone = false
             connection.readSseLines { data ->
-                if (data == "[DONE]") return@readSseLines false
+                if (data == "[DONE]") {
+                    sawDone = true
+                    return@readSseLines false
+                }
                 val chunk = runCatching { JSONObject(data) }.getOrNull() ?: return@readSseLines true
                 chunk.optJSONObject("usage")?.let { usage ->
                     out.emit(GenerationEvent.Usage(parseChatUsage(usage)))
@@ -189,7 +193,10 @@ class OpenAiCompatibleRuntime(
                     )
                 }
             }
-            out.emit(GenerationEvent.Finished(finishReason))
+            // Neither an end marker nor a finish reason: the body just stopped. That is a dropped
+            // connection, not a finished reply, and the caller has to be able to say so.
+            val endedCleanly = sawDone || finishReason != null || isStopped(request)
+            out.emit(GenerationEvent.Finished(if (endedCleanly) finishReason else GenerationEvent.Finished.CONNECTION_CLOSED))
         } finally {
             activeConnections.remove(request.requestId)
             connection.close()
@@ -253,7 +260,13 @@ class OpenAiCompatibleRuntime(
                 parsed.usage?.let { out.emit(GenerationEvent.Usage(it)) }
                 out.emit(GenerationEvent.Finished(parsed.finishReason))
             } else {
-                out.emit(GenerationEvent.Finished(null))
+                // The Responses stream always ends with response.completed (or incomplete/failed,
+                // handled above); without it the connection dropped mid-reply.
+                out.emit(
+                    GenerationEvent.Finished(
+                        if (isStopped(request)) null else GenerationEvent.Finished.CONNECTION_CLOSED,
+                    ),
+                )
             }
         } finally {
             activeConnections.remove(request.requestId)
