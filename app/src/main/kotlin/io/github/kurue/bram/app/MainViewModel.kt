@@ -3681,6 +3681,105 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Benchmarks a LiteRT package on each backend with the engine's own timers, in the same pp512
+     * / tg128 shape as the llama.cpp benchmark, recording one run per backend under the profile id
+     * `litert:<package id>` so the history sits beside the GGUF runs of the same model.
+     *
+     * Cools between repetitions like the llama.cpp benchmark. No energy figure: each pass builds its
+     * own engine (loading the weights and compiling kernels), and a battery window around that
+     * would charge setup to the tokens. A backend that fails is recorded as skipped with the reason
+     * rather than failing the run — "GPU does not work here" is a result.
+     */
+    fun runLiteRtBenchmark(modelId: String) {
+        val snapshot = mutableState.value
+        val record = snapshot.litertlmModels.firstOrNull { it.id.value == modelId } ?: return
+        if (snapshot.isGenerating || snapshot.isLoadingLiteRt || snapshot.benchmarkingProfileId != null) return
+        val benchId = "litert:$modelId"
+        val restore = snapshot.litertlmLoadedId == modelId
+        viewModelScope.launch(Dispatchers.Default) {
+            mutableState.update { it.copy(benchmarkingProfileId = benchId, benchmarkStatus = "Preparing…", error = null) }
+            try {
+                container.turnMutex.withLock {
+                    refreshMeasurementFingerprint()
+                    // A GGUF resident in :inference plus LiteRT's own copy of the weights was
+                    // enough for the low-memory killer to take the app mid-benchmark on the S25
+                    // Ultra (1.5 GB + 1.6 GB). The next chat turn reloads its profile anyway, so
+                    // the llama.cpp model is released for the duration rather than restored.
+                    if (mutableState.value.loadedModelId != null) {
+                        mutableState.update { it.copy(benchmarkStatus = "Freeing memory…") }
+                        unloadModelInternal(forget = false)
+                    }
+                    val startTemp = container.energySampler.batteryCelsius()
+                    for (backend in LiteRtBackend.entries) {
+                        val prompt = mutableListOf<Double>()
+                        val decode = mutableListOf<Double>()
+                        var failure: String? = null
+                        var init = 0.0
+                        for (rep in 1..3) {
+                            val cooldownStart = System.currentTimeMillis()
+                            while (System.currentTimeMillis() - cooldownStart < MAX_BENCH_COOLDOWN_MILLIS &&
+                                !io.github.kurue.bram.core.domain.Cooldown.ready(container.energySampler.batteryCelsius(), startTemp)
+                            ) {
+                                mutableState.update { it.copy(benchmarkStatus = "Cooling before ${backend.label}…") }
+                                delay(5_000)
+                            }
+                            mutableState.update { it.copy(benchmarkStatus = "${backend.label} ($rep/3)…") }
+                            val result = runCatching {
+                                container.liteRtEngineManager.benchmark(record, backend, prefillTokens = 512, decodeTokens = 128)
+                            }.getOrElse { error ->
+                                failure = error.message ?: error::class.java.simpleName
+                                null
+                            } ?: break
+                            android.util.Log.i("BramBench", "litert ${backend.label} rep $rep: $result")
+                            prompt += result.prefillTokPerSec
+                            decode += result.decodeTokPerSec
+                            init = result.initSeconds
+                        }
+                        val pp = io.github.kurue.bram.core.domain.BenchTest(io.github.kurue.bram.core.domain.BenchTest.Kind.PROMPT, 512)
+                        val tg = io.github.kurue.bram.core.domain.BenchTest(io.github.kurue.bram.core.domain.BenchTest.Kind.GENERATION, 128)
+                        val run = io.github.kurue.bram.core.domain.BenchRun(
+                            id = UUID.randomUUID().toString(),
+                            profileId = benchId,
+                            profileName = record.displayName,
+                            backend = backend.label,
+                            startedAtEpochMillis = System.currentTimeMillis(),
+                            fingerprint = mutableState.value.measurementFingerprint,
+                            results = listOf(
+                                io.github.kurue.bram.core.domain.BenchResult(pp, prompt, skipped = failure.takeIf { prompt.isEmpty() }),
+                                io.github.kurue.bram.core.domain.BenchResult(tg, decode, skipped = failure.takeIf { decode.isEmpty() }),
+                            ),
+                            config = backend.label + " · init %.1fs".format(init),
+                        )
+                        container.benchHistoryStore.add(run)
+                        android.util.Log.i(
+                            "BramBench",
+                            "run ${record.displayName} on ${backend.label}: pp512=%.1f tg128=%.1f%s".format(
+                                prompt.average().takeIf { !it.isNaN() } ?: 0.0,
+                                decode.average().takeIf { !it.isNaN() } ?: 0.0,
+                                failure?.let { " failed: $it" }.orEmpty(),
+                            ),
+                        )
+                    }
+                    mutableState.update { it.copy(benchRuns = container.benchHistoryStore.runs()) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(error = "Benchmark failed: ${error.message ?: error::class.java.simpleName}") }
+            } finally {
+                mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
+                // The benchmark unloaded the resident engine; put it back if chat was using it.
+                if (restore) {
+                    runCatching { container.liteRtEngineManager.load(record) }
+                        .onFailure { mutableState.update { it.copy(litertlmLoadedId = null, litertlmLoadedBackend = null) } }
+                } else if (container.liteRtEngineManager.loadedRecordId == null && mutableState.value.litertlmLoadedId != null) {
+                    mutableState.update { it.copy(litertlmLoadedId = null, litertlmLoadedBackend = null) }
+                }
+            }
+        }
+    }
+
     /** Unloads the LiteRT engine. The llama.cpp service, if it holds a model, is untouched. */
     fun unloadLiteRt() {
         if (mutableState.value.isGenerating) return

@@ -373,6 +373,8 @@ fun BramApp(viewModel: MainViewModel) {
                                 onSaveEndpoint = viewModel::saveEndpoint,
                                 onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
+                                onBenchmarkLiteRt = viewModel::runLiteRtBenchmark,
+                                onRemoveLiteRt = viewModel::removeLiteRt,
                                 onAutoConfigure = viewModel::autoConfigure,
                                 onBenchmark = { id -> viewModel.runBenchmark(id) },
                                 onSustainedBenchmark = viewModel::runSustainedBenchmark,
@@ -1177,6 +1179,8 @@ private fun ModelsScreen(
     onSaveEndpoint: (EndpointDraft) -> Unit,
     onDiscoverRemoteModels: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
+    onBenchmarkLiteRt: (String) -> Unit = {},
+    onRemoveLiteRt: (String) -> Unit = {},
     onAutoConfigure: (String) -> Unit,
     onTuneBatch: (String) -> Unit,
     onTuneDimension: (String, TuningDimension) -> Unit,
@@ -1304,6 +1308,19 @@ private fun ModelsScreen(
                     onConvertQuant = { target -> onConvertQuant(profile.id, target) },
                 )
             }
+        }
+        items(state.litertlmModels, key = { "litert:${it.id.value}" }) { record ->
+            LiteRtModelCard(
+                record = record,
+                loaded = state.litertlmLoadedId == record.id.value,
+                benchmarking = state.benchmarkingProfileId == "litert:${record.id.value}",
+                benchmarkStatus = state.benchmarkStatus,
+                busy = state.isGenerating || state.benchmarkingProfileId != null,
+                runs = state.benchRuns.filter { it.profileId == "litert:${record.id.value}" },
+                currentFingerprint = state.measurementFingerprint,
+                onBenchmark = { onBenchmarkLiteRt(record.id.value) },
+                onRemove = { onRemoveLiteRt(record.id.value) },
+            )
         }
         items(state.endpoints, key = { "remote:${it.id}" }) { endpoint ->
             EndpointCard(
@@ -2444,6 +2461,65 @@ private fun ProfilePerformancePill(profile: ModelProfile) {
         "${measurement.label} ${measurement.promptTokPerSec.toInt()}/${measurement.decodeTokPerSec.toInt()}",
         emphasized = true,
     )
+}
+
+/**
+ * A LiteRT-LM package. These were importable and routable but never listed, so there was no way to
+ * see one, compare it, or remove it. The benchmark measures it on CPU and GPU with the engine's own
+ * timers, one history run per backend, in the same pp512/tg128 shape as the GGUF profiles.
+ */
+@Composable
+private fun LiteRtModelCard(
+    record: io.github.kurue.bram.core.domain.LiteRtModelRecord,
+    loaded: Boolean,
+    benchmarking: Boolean,
+    benchmarkStatus: String?,
+    busy: Boolean,
+    runs: List<io.github.kurue.bram.core.domain.BenchRun>,
+    currentFingerprint: String,
+    onBenchmark: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    GlassSurface(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(record.displayName, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "LiteRT-LM · ${record.backend.label} · ${formatBytes(record.fileSizeBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (loaded) {
+                    Text("● In use", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            OutlinedButton(
+                onClick = onBenchmark,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().testTag("benchmark-litert"),
+            ) { Text(if (benchmarking) benchmarkStatus ?: "Benchmarking…" else "Benchmark CPU and GPU") }
+            // One summary per backend: the latest run of each.
+            io.github.kurue.bram.core.domain.LiteRtBackend.entries.forEach { backend ->
+                val latest = runs.firstOrNull { it.backend == backend.label } ?: return@forEach
+                val stale = currentFingerprint.isNotBlank() && latest.fingerprint.isNotBlank() && latest.fingerprint != currentFingerprint
+                Text(
+                    latest.config.ifBlank { backend.label } + if (stale) " · from another build" else "",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                latest.results.forEach { result ->
+                    MetricRow(
+                        result.test.label,
+                        result.skipped?.let { "failed: ${it.take(60)}" }
+                            ?: "%.1f ± %.1f tok/s".format(result.mean, result.stdDev),
+                    )
+                }
+            }
+            TextButton(onClick = onRemove, enabled = !busy && !loaded) { Text("Remove") }
+        }
+    }
 }
 
 /**
