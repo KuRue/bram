@@ -1146,7 +1146,7 @@ class MainViewModel(
      * and samples battery power around each test when the phone is unplugged. Refuses while
      * anything else is measuring, loading, or generating, and under memory pressure.
      */
-    fun runBenchmark(profileId: String) {
+    fun runBenchmark(profileId: String, sustainedMinutes: Int = 0) {
         val snapshot = mutableState.value
         val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
         if (snapshot.isGenerating || snapshot.isLoadingModel || snapshot.isValidatingAccelerator ||
@@ -1168,13 +1168,36 @@ class MainViewModel(
                         mutableState.update { it.copy(error = "Could not load ${profile.name} to benchmark it.") }
                         return@withLock
                     }
-                    val plan = io.github.kurue.bram.core.domain.BenchPlan.standard(profile.contextTokens)
                     mutableState.update { it.copy(benchmarkStatus = "Measuring idle power…") }
                     val baseline = container.energySampler.baseline()
-                    val results = plan.mapIndexed { index, test ->
-                        mutableState.update { it.copy(benchmarkStatus = "${test.label} (${index + 1}/${plan.size})…") }
+                    val runStartTemp = container.energySampler.batteryCelsius()
+                    // Filled from the first test's report: what the runtime actually ran with.
+                    var config = ""
+
+                    // One test: wait for the phone to cool back to where the run began (not in a
+                    // sustained run, whose point is the heat), then time it with power sampling.
+                    suspend fun measureTest(
+                        test: io.github.kurue.bram.core.domain.BenchTest,
+                        step: String,
+                        cool: Boolean,
+                    ): io.github.kurue.bram.core.domain.BenchResult {
+                        val cooldownStart = System.currentTimeMillis()
+                        while (cool && System.currentTimeMillis() - cooldownStart < MAX_BENCH_COOLDOWN_MILLIS) {
+                            val now = container.energySampler.batteryCelsius()
+                            if (io.github.kurue.bram.core.domain.Cooldown.ready(now, runStartTemp)) break
+                            mutableState.update {
+                                it.copy(
+                                    benchmarkStatus = "Cooling (%.1f°C, waiting for %.1f°C)…"
+                                        .format(now ?: 0.0, (runStartTemp ?: 0.0) + 1.0),
+                                )
+                            }
+                            delay(5_000)
+                        }
+                        val cooldownMillis = System.currentTimeMillis() - cooldownStart
+                        mutableState.update { it.copy(benchmarkStatus = step) }
                         refreshDeviceProfile()
                         val thermalBefore = mutableState.value.deviceProfile?.thermalStatus.orEmpty()
+                        val tempBefore = container.energySampler.batteryCelsius()
                         val (json, energy) = container.energySampler.measure(baseline) {
                             container.llamaCppClient.benchmark(
                                 kind = test.kind.wire,
@@ -1184,8 +1207,17 @@ class MainViewModel(
                             )
                         }
                         refreshDeviceProfile()
+                        if (config.isEmpty()) {
+                            config = io.github.kurue.bram.core.domain.BenchConfig.label(
+                                backend = resolveLoadBackend(profile.backendId).label,
+                                threads = json.optInt("threads"),
+                                decodeThreads = json.optInt("decodeThreads"),
+                                batch = json.optInt("batchTokens"),
+                                ubatch = json.optInt("ubatchTokens"),
+                            )
+                        }
                         val rates = json.optJSONArray("tokPerSec")
-                        io.github.kurue.bram.core.domain.BenchResult(
+                        return io.github.kurue.bram.core.domain.BenchResult(
                             test = test,
                             tokPerSec = (0 until (rates?.length() ?: 0)).map { rates!!.getDouble(it) },
                             skipped = json.optString("skipped").takeIf(String::isNotEmpty),
@@ -1195,7 +1227,31 @@ class MainViewModel(
                             energy = energy.takeIf { test.depth == 0 },
                             thermalBefore = thermalBefore,
                             thermalAfter = mutableState.value.deviceProfile?.thermalStatus.orEmpty(),
+                            batteryTempBefore = tempBefore,
+                            batteryTempAfter = container.energySampler.batteryCelsius(),
+                            cooldownMillis = if (cool) cooldownMillis else 0,
                         )
+                    }
+
+                    val results = if (sustainedMinutes > 0) {
+                        // Back-to-back decode with no rest: the list is the throttling curve.
+                        val decode = io.github.kurue.bram.core.domain.BenchTest(
+                            io.github.kurue.bram.core.domain.BenchTest.Kind.GENERATION,
+                            tokens = 128,
+                            repetitions = 1,
+                        )
+                        val until = System.currentTimeMillis() + sustainedMinutes * 60_000L
+                        buildList {
+                            while (System.currentTimeMillis() < until) {
+                                val left = (until - System.currentTimeMillis()) / 1_000
+                                add(measureTest(decode, "Sustained decode · ${size + 1} · ${left}s left", cool = false))
+                            }
+                        }
+                    } else {
+                        val plan = io.github.kurue.bram.core.domain.BenchPlan.standard(profile.contextTokens)
+                        plan.mapIndexed { index, test ->
+                            measureTest(test, "${test.label} (${index + 1}/${plan.size})…", cool = true)
+                        }
                     }
                     val run = io.github.kurue.bram.core.domain.BenchRun(
                         id = UUID.randomUUID().toString(),
@@ -1205,15 +1261,20 @@ class MainViewModel(
                         startedAtEpochMillis = System.currentTimeMillis(),
                         fingerprint = mutableState.value.measurementFingerprint,
                         results = results,
+                        sustained = sustainedMinutes > 0,
+                        config = config,
                     )
                     container.benchHistoryStore.add(run)
                     android.util.Log.i(
                         "BramBench",
-                        "run ${profile.name} on ${run.backend}: " + results.joinToString { r ->
-                            "${r.test.label}=${"%.1f".format(r.mean)}±${"%.1f".format(r.stdDev)}" +
-                                (r.joulesPerToken?.let { " %.3fJ/tok".format(it) } ?: "") +
-                                (r.skipped?.let { " skipped" } ?: "")
-                        },
+                        "run ${profile.name} on ${run.backend}" + (if (run.sustained) " sustained" else "") + ": " +
+                            results.joinToString { r ->
+                                "${r.test.label}=${"%.1f".format(r.mean)}±${"%.1f".format(r.stdDev)}" +
+                                    (r.joulesPerToken?.let { " %.3fJ/tok".format(it) } ?: "") +
+                                    (r.batteryTempAfter?.let { " %.1fC".format(it) } ?: "") +
+                                    (if (r.cooldownMillis > 0) " cooled ${r.cooldownMillis / 1000}s" else "") +
+                                    (r.skipped?.let { " skipped" } ?: "")
+                            },
                     )
                     mutableState.update { it.copy(benchRuns = container.benchHistoryStore.runs()) }
                 }
@@ -1226,6 +1287,9 @@ class MainViewModel(
             }
         }
     }
+
+    /** Five minutes of back-to-back decode: the throttling curve a long agent run lives on. */
+    fun runSustainedBenchmark(profileId: String) = runBenchmark(profileId, sustainedMinutes = 5)
 
     /**
      * Measures the device's DRAM read bandwidth in the inference process and stores it under the
@@ -5214,6 +5278,10 @@ private const val PROBE_TOKENS = 4
 // overlay's Continue-anyway button overrides this for the rest of the pass.
 private val ALLOWED_SWEEP_THERMAL = setOf("none")
 private const val MIN_SWEEP_RAM_BYTES = 1_500_000_000L
+
+// The longest a benchmark waits for the phone to cool between tests. Past it the test runs anyway
+// and the result records how hot it started, rather than a benchmark that never finishes.
+private const val MAX_BENCH_COOLDOWN_MILLIS = 180_000L
 
 /** llama.cpp clamps this to the model's layer count, so it means "offload everything". */
 private const val FULL_GPU_OFFLOAD = 999

@@ -39,6 +39,8 @@ class BenchHistoryStore(context: Context) {
                         .put("backend", run.backend)
                         .put("startedAtEpochMillis", run.startedAtEpochMillis)
                         .put("fingerprint", run.fingerprint)
+                        .put("sustained", run.sustained)
+                        .put("config", run.config)
                         .put("results", JSONArray().also { results -> run.results.forEach { results.put(encodeResult(it)) } }),
                 )
             }
@@ -53,6 +55,9 @@ class BenchHistoryStore(context: Context) {
             .put("skipped", result.skipped ?: JSONObject.NULL)
             .put("thermalBefore", result.thermalBefore)
             .put("thermalAfter", result.thermalAfter)
+            .put("batteryTempBefore", result.batteryTempBefore ?: JSONObject.NULL)
+            .put("batteryTempAfter", result.batteryTempAfter ?: JSONObject.NULL)
+            .put("cooldownMillis", result.cooldownMillis)
             .put(
                 "energy",
                 result.energy?.let {
@@ -77,6 +82,8 @@ class BenchHistoryStore(context: Context) {
                         startedAtEpochMillis = json.getLong("startedAtEpochMillis"),
                         fingerprint = json.optString("fingerprint"),
                         results = (0 until results.length()).map { decodeResult(results.getJSONObject(it)) },
+                        sustained = json.optBoolean("sustained"),
+                        config = json.optString("config"),
                     )
                 }.getOrNull()
             }
@@ -95,6 +102,9 @@ class BenchHistoryStore(context: Context) {
                 },
                 thermalBefore = json.optString("thermalBefore"),
                 thermalAfter = json.optString("thermalAfter"),
+                batteryTempBefore = json.optDouble("batteryTempBefore").takeIf { !it.isNaN() },
+                batteryTempAfter = json.optDouble("batteryTempAfter").takeIf { !it.isNaN() },
+                cooldownMillis = json.optLong("cooldownMillis"),
             )
         }
     }

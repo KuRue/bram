@@ -24,6 +24,11 @@ import kotlinx.coroutines.launch
 class EnergySampler(private val context: Context) {
     private val battery = context.getSystemService(BatteryManager::class.java)
 
+    /** Battery temperature in °C (the intent reports tenths), or null when unavailable. */
+    fun batteryCelsius(): Double? =
+        batteryIntent()?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+            ?.takeIf { it != Int.MIN_VALUE }?.let { it / 10.0 }
+
     fun onBattery(): Boolean = batteryIntent()?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) == 0
 
     /** Idle watts over [millis], or null when a reading is not meaningful. */
