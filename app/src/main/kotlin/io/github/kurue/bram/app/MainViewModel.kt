@@ -632,6 +632,14 @@ class MainViewModel(
     private val mutableState = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var conversationId = ConversationId(UUID.randomUUID().toString())
+
+    /**
+     * Set once the user picks a conversation themselves (new chat, or one from the list). The
+     * startup restore reads from disk and lands whenever it lands; after an explicit choice it must
+     * not replace the chosen conversation with the most recent one.
+     */
+    @Volatile
+    private var conversationChosen = false
     private var generationJob: Job? = null
 
     /**
@@ -879,7 +887,10 @@ class MainViewModel(
                 ?: PrivacyClass.STANDARD
             var applied = false
             mutableState.update {
-                if (it.isGenerating || it.messages.isNotEmpty()) {
+                // An empty transcript is not proof nobody chose it: tapping New chat right after
+                // launch leaves it empty too, and adopting the disk copy then would send the
+                // user's first message into the old thread.
+                if (conversationChosen || it.isGenerating || it.messages.isNotEmpty()) {
                     it
                 } else {
                     applied = true
@@ -943,6 +954,7 @@ class MainViewModel(
 
     fun startNewConversation() {
         if (mutableState.value.isGenerating) return
+        conversationChosen = true
         conversationId = container.conversationStore.newId()
         hintedDraftSkills.clear()
         container.approvalGate.setMode(PermissionMode.AUTO)
@@ -965,6 +977,7 @@ class MainViewModel(
 
     fun openConversation(id: String) {
         if (mutableState.value.isGenerating) return
+        conversationChosen = true
         viewModelScope.launch {
             val target = ConversationId(id)
             val messages = runCatching { container.conversationStore.load(target) }.getOrDefault(emptyList())
