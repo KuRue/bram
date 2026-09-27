@@ -39,6 +39,10 @@ struct runtime_state {
     // llama.cpp default of 128. See the batch setting in create_context.
     int ubatch_tokens = 0;
     int threads = 0;
+    // Threads for single-token decode on the chat context; 0 means the same as [threads]. Prompt
+    // processing is compute-bound and scales with cores, while decode saturates earlier (on the
+    // S25 Ultra, 4 threads decode as fast as 6 at two-thirds the energy), so the two can differ.
+    int decode_threads = 0;
     int gpu_layers = 0;
     bool enable_thinking = false;
     // Context-level settings carried from the load request: llama.cpp decides the attention path
@@ -343,7 +347,7 @@ std::vector<std::string> derive_shard_paths(const std::string & first_path) {
     return shards;
 }
 
-llama_context * create_context(int context_tokens = 0, bool attach_streamer = false) {
+llama_context * create_context(int context_tokens = 0, bool attach_streamer = false, bool chat_threads = false) {
     llama_context_params params = llama_context_default_params();
     params.n_ctx = static_cast<uint32_t>(context_tokens > 0 ? context_tokens : g_state.context_tokens);
     // The batch settings travel with the load request: they are context parameters, so every
@@ -358,7 +362,9 @@ llama_context * create_context(int context_tokens = 0, bool attach_streamer = fa
         g_state.ubatch_tokens > 0
             ? std::min(g_state.ubatch_tokens, static_cast<int>(params.n_batch))
             : std::min(128, static_cast<int>(params.n_batch)));
-    params.n_threads = g_state.threads;
+    // Only the chat context takes the separate decode count; the reference and self-test contexts
+    // keep one count so the CPU yardstick does not move with a tuning choice.
+    params.n_threads = chat_threads && g_state.decode_threads > 0 ? g_state.decode_threads : g_state.threads;
     params.n_threads_batch = g_state.threads;
     params.no_perf = false;
     params.abort_callback = abort_callback;
@@ -847,7 +853,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     jstring thread_priority, jstring load_mode, jboolean hex_use_hmx, jboolean hex_disable_nhvx,
     jboolean hex_host_buf, jint hex_op_batch, jint hex_ndev,
     jboolean stream_experts, jint stream_cache_mb, jboolean stream_dense_anon,
-    jboolean stream_overlap, jint stream_overlap_lanes) {
+    jboolean stream_overlap, jint stream_overlap_lanes, jint decode_threads) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         // The Hexagon backend reads its environment once, at backend registration, so it has to
@@ -981,12 +987,15 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
                     if (nibble & (1 << (3 - b))) mask_bits[bit] = true;
                 }
             }
-            struct ggml_threadpool_params pool = ggml_threadpool_params_default(threads);
+            // The decode pool gets the decode count, the batch pool the prompt count.
+            struct ggml_threadpool_params pool =
+                ggml_threadpool_params_default(decode_threads > 0 ? decode_threads : threads);
             for (size_t i = 0; i < GGML_MAX_N_THREADS; ++i) pool.cpumask[i] = mask_bits[i];
             pool.strict_cpu = strict;
             if (poll >= 0) pool.poll = static_cast<uint32_t>(poll);
             if (prio == "high") pool.prio = GGML_SCHED_PRIO_HIGH;
             struct ggml_threadpool_params pool_batch = pool;
+            pool_batch.n_threads = threads;
             g_state.chat_pool = ggml_threadpool_new(&pool);
             g_state.chat_pool_batch = ggml_threadpool_new(&pool_batch);
             if (g_state.chat_pool == nullptr || g_state.chat_pool_batch == nullptr) {
@@ -1042,6 +1051,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.batch_tokens = batch_tokens;
         g_state.ubatch_tokens = ubatch_tokens;
         g_state.threads = threads;
+        g_state.decode_threads = decode_threads > 0 ? static_cast<int>(decode_threads) : 0;
         g_state.gpu_layers = gpu_layers;
         g_state.enable_thinking = enable_thinking == JNI_TRUE;
         g_state.model_path = model_path;
@@ -1163,7 +1173,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         }
 
         if (g_state.chat_context == nullptr) {
-            g_state.chat_context = create_context(0, /*attach_streamer=*/true);
+            g_state.chat_context = create_context(0, /*attach_streamer=*/true, /*chat_threads=*/true);
             if (g_state.chat_pool != nullptr) {
                 // The tuned pool is attached here, not in create_context, so the contexts the
                 // harness builds for the CPU reference never carry it.
@@ -1566,7 +1576,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_benchmark
         const int reps = std::max(1, std::min(static_cast<int>(repetitions), 20));
 
         if (g_state.chat_context == nullptr) {
-            g_state.chat_context = create_context(0, /*attach_streamer=*/true);
+            g_state.chat_context = create_context(0, /*attach_streamer=*/true, /*chat_threads=*/true);
             if (g_state.chat_pool != nullptr) {
                 llama_attach_threadpool(g_state.chat_context, g_state.chat_pool, g_state.chat_pool_batch);
             }
@@ -1580,7 +1590,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_benchmark
         const int n_ctx = static_cast<int>(llama_n_ctx(context));
         std::ostringstream result;
         result << "{\"kind\":\"" << (generation ? "tg" : "pp") << "\",\"n\":" << n << ",\"depth\":" << d
-               << ",\"nCtx\":" << n_ctx << ",\"threads\":" << g_state.threads
+               << ",\"nCtx\":" << n_ctx << ",\"threads\":" << g_state.threads << ",\"decodeThreads\":" << (g_state.decode_threads > 0 ? g_state.decode_threads : g_state.threads)
                << ",\"batchTokens\":" << g_state.batch_tokens << ",\"ubatchTokens\":" << g_state.ubatch_tokens
                << ",\"gpuLayers\":" << g_state.gpu_layers;
         if (d + n > n_ctx) {

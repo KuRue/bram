@@ -82,6 +82,20 @@ class LoadIdentityTest {
     }
 
     @Test
+    fun `a decode thread count is part of the identity and zero means unset`() {
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        // A change must reload: the decode count is baked into the context and its threadpool.
+        assertEquals(0, LoadIdentity.from(request()).decodeThreads)
+        assertEquals(0, LoadIdentity.from(request().put("decodeThreads", -3)).decodeThreads)
+        assertEquals(1, LoadIdentity.from(request().put("decodeThreads", 1)).decodeThreads)
+        assertEquals(cores, LoadIdentity.from(request().put("decodeThreads", 10_000)).decodeThreads)
+        assertNotEquals(
+            LoadIdentity.from(request()),
+            LoadIdentity.from(request().put("decodeThreads", 1)),
+        )
+    }
+
+    @Test
     fun `threads of zero resolve to the device core count and clamps to it`() {
         val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         assertEquals(cores, LoadIdentity.from(request()).threads)

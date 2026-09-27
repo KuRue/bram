@@ -2161,6 +2161,23 @@ private fun ProfileCard(
                         onDefault = { onUpdateProfile(profile.copy(threads = 0)) },
                         onTune = { onTuneDimension(TuningDimension.THREADS) },
                     )
+                    // Decode can use fewer threads than prompt processing: it stops gaining sooner,
+                    // so extra threads there mostly cost energy. Benchmark to compare.
+                    SectionLabel("Decode threads")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        val cores = Runtime.getRuntime().availableProcessors()
+                        (listOf(0) + listOf(2, 3, 4, 5, 6, 8).filter { it <= cores }).forEach { count ->
+                            FilterChip(
+                                selected = profile.decodeThreads == count,
+                                onClick = { onUpdateProfile(profile.copy(decodeThreads = count)) },
+                                enabled = !locked,
+                                label = { Text(if (count == 0) "Same" else "$count") },
+                            )
+                        }
+                    }
                     TuningDimensionRow(
                         label = "CPU mask",
                         isDefault = profile.cpuMask.isEmpty(),

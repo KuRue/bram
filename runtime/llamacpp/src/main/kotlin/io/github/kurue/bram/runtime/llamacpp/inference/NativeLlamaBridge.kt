@@ -39,6 +39,7 @@ internal class NativeLlamaBridge {
         streamDenseAnon: Boolean,
         streamOverlap: Boolean,
         streamOverlapLanes: Int,
+        decodeThreads: Int,
     ): String
     external fun referenceDecode(tokenCount: Int, padTokens: Int): String
     external fun teacherForced(forcedTokens: IntArray, padTokens: Int): String

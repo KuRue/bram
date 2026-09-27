@@ -167,6 +167,8 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         streamOverlap: Boolean = false,
         /** Reader-lane count for overlap; 0 lets the native side pick its default. */
         streamOverlapLanes: Int = 0,
+        /** Decode threads, or 0 for the same as [threads]. */
+        decodeThreads: Int = 0,
     ): JSONObject = withContext(Dispatchers.IO) {
         // Normalized before it reaches the service so the load identity compares concrete numbers:
         // "default" must mean the same thing on every request, or every call would force a reload.
@@ -205,6 +207,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("streamDenseAnon", streamDenseAnon)
             .put("streamOverlap", streamOverlap)
             .put("streamOverlapLanes", streamOverlapLanes)
+            .put("decodeThreads", decodeThreads)
         val result = JSONObject(requireService().load(request.toString()))
         if (result.optBoolean("restartRequired")) {
             android.util.Log.d("BramTune", "restartRequired: restarting the inference process")

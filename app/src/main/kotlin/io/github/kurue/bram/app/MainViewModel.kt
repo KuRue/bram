@@ -2301,6 +2301,9 @@ class MainViewModel(
                 streamCacheMb = profile.streamCacheMb,
                 streamDenseAnon = profile.streamDenseAnon,
                 streamOverlap = profile.streamOverlap,
+                // Only a chat load splits decode from prompt threads: the tuning loads measure one
+                // count at a time, and the CPU reference must not move with this choice.
+                decodeThreads = if (profile.decodeThreads > 0) profile.decodeThreads.coerceIn(1, visibleCores) else 0,
             )
         }
         outcome.onSuccess { result ->
