@@ -25,6 +25,8 @@ data class PendingToolApproval(
     val readOnly: Boolean,
     /** What an "always allow" would actually be granting, in words. */
     val scopeLabel: String,
+    /** False when "Always" would be a blanket grant on a tool meant to be scoped; see [InteractiveApprovalGate.canAllowAlways]. */
+    val canAllowAlways: Boolean = true,
     /** Read out of unmarked text rather than marked as a call by the model's format. */
     val recovered: Boolean = false,
     /** Set when the conversation contains fetched content, which is why a recovered call asks. */
@@ -163,6 +165,17 @@ class InteractiveApprovalGate(
             return tool.name + "@" + targets.joinToString(";")
         }
 
+        /**
+         * Whether "Always" may be offered for this call.
+         *
+         * A tool that declares scope keys wants its grants tied to a target. A call that names none
+         * — a tap at a point or an index, a fetch with no parseable url — would fall back to the
+         * bare tool name, so "Always" there would vouch for every future use of the tool: exactly
+         * the blanket grant scoping exists to prevent. Once and For this run still work.
+         */
+        fun canAllowAlways(tool: ToolDefinition, argumentsJson: String): Boolean =
+            tool.approvalScopeKeys.isEmpty() || approvalScope(tool, argumentsJson) != tool.name
+
         /** The same thing said to a person rather than to a preferences file. */
         fun scopeLabel(tool: ToolDefinition, argumentsJson: String): String {
             val scope = approvalScope(tool, argumentsJson)
@@ -239,6 +252,7 @@ class InteractiveApprovalGate(
             requiredPermissions = tool.requiredPermissions,
             readOnly = tool.readOnly,
             scopeLabel = scopeLabel(tool, argumentsJson),
+            canAllowAlways = canAllowAlways(tool, argumentsJson),
             recovered = recovered,
             untrustedContext = untrustedContext,
             answer = answer,
@@ -257,7 +271,14 @@ class InteractiveApprovalGate(
             }
         }
         return try {
-            val decision = withTimeout(timeoutMillis) { answer.await() }
+            val answered = withTimeout(timeoutMillis) { answer.await() }
+            // The button is hidden when a blanket grant is not allowed, but a stale notification
+            // action can still deliver ALLOW_ALWAYS; it counts as allowing this call only.
+            val decision = if (answered == ToolApprovalDecision.ALLOW_ALWAYS && !request.canAllowAlways) {
+                ToolApprovalDecision.ALLOW_ONCE
+            } else {
+                answered
+            }
             if (decision == ToolApprovalDecision.ALLOW_ALWAYS && !recovered) {
                 permissions.allowAlways(scope)
             }

@@ -255,7 +255,13 @@ class DefaultAgentOrchestrator(
                 }
                 // The caller decides what to do about a cut-off reply — continuing it, marking it,
                 // or both — but only the runtime knows it happened, so it is carried on the event.
-                emit(AgentEvent.Completed(assistantMessage, truncated = isLengthLimited(finishReason)))
+                emit(
+                    AgentEvent.Completed(
+                        assistantMessage,
+                        truncated = isLengthLimited(finishReason),
+                        interrupted = finishReason == GenerationEvent.Finished.CONNECTION_CLOSED,
+                    ),
+                )
                 upsertJournal(RunStatus.SUCCEEDED)
                 return@flow
             }

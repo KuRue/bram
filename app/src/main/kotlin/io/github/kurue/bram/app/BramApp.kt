@@ -4003,10 +4003,13 @@ private fun ToolApprovalCard(
                     modifier = Modifier.testTag("approval-for-run"),
                     onClick = { onResolve(ToolApprovalDecision.ALLOW_FOR_RUN) },
                 ) { Text("For this run") }
-                TextButton(
-                    modifier = Modifier.testTag("approval-always"),
-                    onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
-                ) { Text("Always") }
+                // Not offered when it would be a blanket grant on a scoped tool (a tap at a point).
+                if (pending.canAllowAlways) {
+                    TextButton(
+                        modifier = Modifier.testTag("approval-always"),
+                        onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
+                    ) { Text("Always") }
+                }
             }
             TextButton(
                 modifier = Modifier.testTag("approval-details"),
@@ -4014,7 +4017,11 @@ private fun ToolApprovalCard(
             ) { Text(if (showDetails) "Hide details" else "Show details") }
             if (showDetails) {
                 Text(
-                    "Always would allow ${pending.scopeLabel}.",
+                    if (pending.canAllowAlways) {
+                        "Always would allow ${pending.scopeLabel}."
+                    } else {
+                        "This call names no specific target, so it can only be allowed once or for this run."
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -570,6 +570,44 @@ class OpenAiCompatibleRuntimeTest {
     }
 
     @Test
+    fun `a chat stream that just stops is reported as a dropped connection`() = runBlocking {
+        // No finish_reason and no [DONE]: the body ended mid-reply, which must not look finished.
+        sseFrames = listOf(chatChunk(JSONObject().put("content", "The answer is")))
+
+        val events = generate(apiKind = RemoteApiKind.CHAT_COMPLETIONS).toList()
+
+        assertEquals("The answer is", events.filterIsInstance<GenerationEvent.TextDelta>().joinToString("") { it.text })
+        assertEquals(
+            GenerationEvent.Finished.CONNECTION_CLOSED,
+            events.filterIsInstance<GenerationEvent.Finished>().single().finishReason,
+        )
+    }
+
+    @Test
+    fun `a chat stream that ends with done or a finish reason is not a dropped connection`() = runBlocking {
+        sseFrames = listOf(chatChunk(JSONObject().put("content", "Hi")), "data: [DONE]")
+        assertNull(generate(apiKind = RemoteApiKind.CHAT_COMPLETIONS).filterIsInstance<GenerationEvent.Finished>().single().finishReason)
+
+        sseFrames = listOf(chatChunk(JSONObject().put("content", "Hi"), finishReason = "stop"))
+        assertEquals("stop", generate(apiKind = RemoteApiKind.CHAT_COMPLETIONS).filterIsInstance<GenerationEvent.Finished>().single().finishReason)
+    }
+
+    @Test
+    fun `a responses stream without its completed event is a dropped connection`() = runBlocking {
+        sseFrames = listOf(
+            "data: " + JSONObject().put("type", "response.output_text.delta").put("delta", "Partial"),
+        )
+
+        val events = generate(apiKind = RemoteApiKind.RESPONSES).toList()
+
+        assertEquals("Partial", events.filterIsInstance<GenerationEvent.TextDelta>().joinToString("") { it.text })
+        assertEquals(
+            GenerationEvent.Finished.CONNECTION_CLOSED,
+            events.filterIsInstance<GenerationEvent.Finished>().single().finishReason,
+        )
+    }
+
+    @Test
     fun `a null finish reason and null tool fields are absent, not the word null`() = runBlocking {
         responseBody = JSONObject()
             .put(

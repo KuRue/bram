@@ -4209,6 +4209,8 @@ class MainViewModel(
         // answer to show for it is run once more with a nudge to answer directly; a truncated
         // reply that does exist settles with a notice.
         var truncated = false
+        // Set when the connection dropped before the server finished; settles with its own notice.
+        var interrupted = false
         var continuationAttempts = 0
         return try {
             // One run of the agent. A length-limited round with no visible answer starts a second
@@ -4445,6 +4447,7 @@ class MainViewModel(
                                     is AgentEvent.Completed -> {
                                         completedMessage = event.message
                                         truncated = event.truncated
+                                        interrupted = event.interrupted
                                         // Extraction runs in the orchestrator just before Completed, so the new
                                         // memory is already stored — refresh so the browser reflects it live.
                                         refreshMemories()
@@ -4499,6 +4502,7 @@ class MainViewModel(
             ) {
                 continuationAttempts += 1
                 truncated = false
+                interrupted = false
                 // The nudge is a system message, not a user one, so the run's memory extraction
                 // still sees the user's real ask instead of extracting the nudge.
                 val continuationMessages = requestMessages +
@@ -4536,7 +4540,7 @@ class MainViewModel(
                 val (visibleReply, reasoningReply) = resolveReply(rawReply, selection.isLocal, reasoningFormat)
                 // A reply that was cut off at the length limit says so, so a short answer is not
                 // mistaken for a finished one.
-                val replyContent = withTruncationNotice(visibleReply, truncated)
+                val replyContent = withTruncationNotice(visibleReply, truncated, interrupted)
                 // Every block the model opened, including one it never closed.
                 val now = System.currentTimeMillis()
                 val thinkingMillis = thinkingMillisTotal + if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
@@ -5156,11 +5160,26 @@ internal fun shouldContinueAfterTruncation(
  * A truncated reply with no visible text at all is *only* the note: the alternative is an empty
  * message beside the thinking rows, which says nothing about why there is no answer.
  */
-internal fun withTruncationNotice(visible: String, truncated: Boolean): String = when {
-    !truncated -> visible
-    visible.isBlank() -> TRUNCATION_NOTICE
-    else -> visible + "\n\n" + TRUNCATION_NOTICE
+internal fun withTruncationNotice(
+    visible: String,
+    truncated: Boolean,
+    interrupted: Boolean = false,
+): String {
+    // The length limit is the more specific reason when a server reports both.
+    val notice = when {
+        truncated -> TRUNCATION_NOTICE
+        interrupted -> INTERRUPTED_NOTICE
+        else -> return visible
+    }
+    return if (visible.isBlank()) notice else visible + "\n\n" + notice
 }
+
+/**
+ * The marker for a reply whose connection dropped before the server said it was done. Kept apart
+ * from [TRUNCATION_NOTICE]: blaming the length limit for a network drop would send the user to the
+ * wrong setting.
+ */
+internal const val INTERRUPTED_NOTICE = "…[the connection ended before the reply finished]…"
 
 // How long a turn may go without a non-Status event before it counts as stalled. Five minutes
 // is 3x the slowest observed local reload (~90s) and matches the candidate-benchmark hang
