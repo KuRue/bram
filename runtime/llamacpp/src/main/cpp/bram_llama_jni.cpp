@@ -8,6 +8,7 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "expert_stream.h"
+#include "mem_bench.h"
 #include <deque>
 
 #include <algorithm>
@@ -1542,6 +1543,129 @@ extern "C" JNIEXPORT void JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_cancel(
     JNIEnv *, jobject) {
     g_cancelled.store(true, std::memory_order_relaxed);
+}
+
+// One benchmark test on the loaded model, llama-bench style: synthetic tokens (so tokenizer and
+// prompt content play no part), timed with nothing else in the loop.
+//   kind 0 = prompt processing: decode [n] tokens as a prompt from an empty cache.
+//   kind 1 = generation: fill the cache to [depth] (untimed), then decode [n] tokens one at a time.
+// It runs on the chat context — with the tuned threadpool, KV settings, and expert streamer the
+// user's turns get — rather than a second context, which would double KV memory and measure a
+// configuration chat never uses. The prompt cache is dropped as a result: the next turn
+// re-decodes its prompt once.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_benchmark(
+    JNIEnv * env, jobject, jint kind, jint count, jint depth, jint repetitions) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_state.model == nullptr) throw std::runtime_error("Load a model before benchmarking");
+        g_cancelled.store(false, std::memory_order_relaxed);
+        const bool generation = kind == 1;
+        const int n = std::max(1, static_cast<int>(count));
+        const int d = generation ? std::max(0, static_cast<int>(depth)) : 0;
+        const int reps = std::max(1, std::min(static_cast<int>(repetitions), 20));
+
+        if (g_state.chat_context == nullptr) {
+            g_state.chat_context = create_context(0, /*attach_streamer=*/true);
+            if (g_state.chat_pool != nullptr) {
+                llama_attach_threadpool(g_state.chat_context, g_state.chat_pool, g_state.chat_pool_batch);
+            }
+            capture_experts(g_state.chat_context);
+        }
+        llama_context * context = g_state.chat_context;
+        llama_memory_t memory = llama_get_memory(context);
+        llama_memory_clear(memory, true);
+        g_state.cached_tokens.clear();
+
+        const int n_ctx = static_cast<int>(llama_n_ctx(context));
+        std::ostringstream result;
+        result << "{\"kind\":\"" << (generation ? "tg" : "pp") << "\",\"n\":" << n << ",\"depth\":" << d
+               << ",\"nCtx\":" << n_ctx << ",\"threads\":" << g_state.threads
+               << ",\"batchTokens\":" << g_state.batch_tokens << ",\"ubatchTokens\":" << g_state.ubatch_tokens
+               << ",\"gpuLayers\":" << g_state.gpu_layers;
+        if (d + n > n_ctx) {
+            result << ",\"skipped\":\"depth " << d << " + " << n << " does not fit the " << n_ctx
+                   << "-token context\",\"tokPerSec\":[]}";
+            return result.str();
+        }
+
+        // Deterministic ids across the whole vocabulary; a fixed seed makes runs comparable.
+        const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(g_state.model));
+        uint32_t seed = 0x9e3779b9u;
+        auto synthetic = [&](int length) {
+            std::vector<llama_token> tokens(static_cast<size_t>(length));
+            for (auto & token : tokens) {
+                seed = seed * 1664525u + 1013904223u;
+                token = static_cast<llama_token>(seed % static_cast<uint32_t>(std::max(1, n_vocab)));
+            }
+            return tokens;
+        };
+        using clock = std::chrono::steady_clock;
+        auto seconds_since = [](clock::time_point start) {
+            return std::chrono::duration<double>(clock::now() - start).count();
+        };
+
+        std::vector<double> rates;
+        double prefill_seconds = 0.0;
+        if (!generation) {
+            const auto tokens = synthetic(n);
+            for (int rep = 0; rep < reps; ++rep) {
+                llama_memory_clear(memory, true);
+                const auto start = clock::now();
+                decode_prompt(context, tokens);
+                // Accelerator backends may still be running when llama_decode returns.
+                llama_synchronize(context);
+                rates.push_back(n / seconds_since(start));
+            }
+        } else {
+            const auto context_tokens = synthetic(d);
+            const auto generated = synthetic(n);
+            auto prefill = [&] {
+                llama_memory_clear(memory, true);
+                if (d == 0) return;
+                const auto start = clock::now();
+                decode_prompt(context, context_tokens);
+                prefill_seconds = seconds_since(start);
+            };
+            prefill();
+            for (int rep = 0; rep < reps; ++rep) {
+                const auto start = clock::now();
+                for (int index = 0; index < n; ++index) {
+                    if (g_cancelled.load(std::memory_order_relaxed)) throw std::runtime_error("Benchmark cancelled");
+                    llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(&generated[static_cast<size_t>(index)]), 1);
+                    if (llama_decode(context, batch) != 0) throw std::runtime_error("Benchmark decode failed");
+                }
+                llama_synchronize(context);
+                rates.push_back(n / seconds_since(start));
+                // Back to the same depth for the next repetition. Recurrent and hybrid models
+                // refuse a partial trim, so they pay the prefill again (untimed).
+                if (rep + 1 < reps && !llama_memory_seq_rm(memory, 0, static_cast<llama_pos>(d), -1)) prefill();
+            }
+        }
+        llama_memory_clear(memory, true);
+
+        result << ",\"prefillMillis\":" << static_cast<long long>(prefill_seconds * 1000.0) << ",\"tokPerSec\":[";
+        for (size_t index = 0; index < rates.size(); ++index) {
+            if (index > 0) result << ",";
+            result << rates[index];
+        }
+        result << "]}";
+        __android_log_print(ANDROID_LOG_INFO, "BramBench", "bench %s", result.str().c_str());
+        return result.str();
+    });
+}
+
+// Measures the device's DRAM read bandwidth: the ceiling decode speed is judged against. Needs no
+// model; the buffer is freed before returning.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_memoryBandwidth(
+    JNIEnv * env, jobject, jint buffer_mb, jint max_threads, jint passes) {
+    return guarded_string(env, [buffer_mb, max_threads, passes] {
+        return bram::measure_read_bandwidth(
+            static_cast<size_t>(std::max(16, static_cast<int>(buffer_mb))) << 20,
+            static_cast<int>(max_threads),
+            static_cast<int>(passes));
+    });
 }
 
 // Enumerates the ggml backend devices this build can actually see, so accelerator capability is
