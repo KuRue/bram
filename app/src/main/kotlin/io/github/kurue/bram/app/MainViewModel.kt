@@ -3702,6 +3702,14 @@ class MainViewModel(
             try {
                 container.turnMutex.withLock {
                     refreshMeasurementFingerprint()
+                    // A GGUF resident in :inference plus LiteRT's own copy of the weights was
+                    // enough for the low-memory killer to take the app mid-benchmark on the S25
+                    // Ultra (1.5 GB + 1.6 GB). The next chat turn reloads its profile anyway, so
+                    // the llama.cpp model is released for the duration rather than restored.
+                    if (mutableState.value.loadedModelId != null) {
+                        mutableState.update { it.copy(benchmarkStatus = "Freeing memory…") }
+                        unloadModelInternal(forget = false)
+                    }
                     val startTemp = container.energySampler.batteryCelsius()
                     for (backend in LiteRtBackend.entries) {
                         val prompt = mutableListOf<Double>()
