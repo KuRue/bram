@@ -551,7 +551,22 @@ class DefaultAgentOrchestrator(
         finishReason == "length" || finishReason == "incomplete" || finishReason == "max_tokens"
 
     private fun errorJson(code: String, message: String): String {
-        val safe = message.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+        // Every control character needs escaping, not just newlines: exception messages carry tabs
+        // and carriage returns (stack-trace fragments, Windows line endings), and one raw control
+        // character makes the whole envelope invalid JSON for the model and for isErrorResult.
+        val safe = buildString {
+            for (char in message) {
+                when {
+                    char == '\\' -> append("\\\\")
+                    char == '"' -> append("\\\"")
+                    char == '\n' -> append("\\n")
+                    char == '\r' -> append("\\r")
+                    char == '\t' -> append("\\t")
+                    char < ' ' -> append("\\u%04x".format(char.code))
+                    else -> append(char)
+                }
+            }
+        }
         return "{\"error\":{\"code\":\"$code\",\"message\":\"$safe\"}}"
     }
 

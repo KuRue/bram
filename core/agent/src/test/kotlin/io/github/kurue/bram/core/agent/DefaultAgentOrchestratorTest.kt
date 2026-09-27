@@ -417,6 +417,36 @@ class DefaultAgentOrchestratorTest {
     }
 
     @Test
+    fun `a tool error with control characters still yields a valid envelope`() = runBlocking {
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(
+                listOf(ThrowingHandler("asked_about", "line one\r\n\tat Frame \"quoted\" \u0001")),
+            ),
+            approvalGate = ReadOnlyApprovalGate(),
+        )
+
+        val events = orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("escape"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = ToolCallingRuntime(),
+        ).toList()
+
+        val result = events.filterIsInstance<AgentEvent.ToolFinished>().single().result
+        assertTrue("raw control characters in: $result", result.none { it < ' ' })
+        assertTrue(result.contains("line one\\r\\n\\tat Frame \\\"quoted\\\" \\u0001"))
+    }
+
+    @Test
     fun `a tool stuck in blocking io is abandoned at its deadline`() = runBlocking {
         // Real handlers block inside withContext(Dispatchers.IO), which a timeout cannot
         // interrupt; delay() in the test above would hide that. The turn must not wait it out.
@@ -753,6 +783,11 @@ private class LatchHandler(name: String, private val latch: CountDownLatch) : To
         }
         return "{}"
     }
+}
+
+private class ThrowingHandler(name: String, private val message: String) : ToolHandler {
+    override val definition = ToolDefinition(name = name, description = name, inputSchemaJson = "{}")
+    override suspend fun execute(argumentsJson: String): String = throw IllegalStateException(message)
 }
 
 private class NoopHandler(name: String) : ToolHandler {
