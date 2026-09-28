@@ -24,6 +24,8 @@ set(GGML_RPC OFF CACHE BOOL "" FORCE)
 # the ones Bram wants are added below with their own -march after llama.cpp is fetched.
 if(ANDROID_ABI STREQUAL "arm64-v8a")
     set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+    # EXPERIMENT: fp16 arithmetic + dotprod for all of ggml-cpu (attention, f16/q8_0 KV).
+    set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "" FORCE)
 endif()
 
 # Adreno acceleration for Milestone 2. The Vulkan backend is validated against the CPU
