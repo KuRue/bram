@@ -2533,11 +2533,18 @@ private fun LiteRtModelCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 latest.results.forEach { result ->
-                    MetricRow(
-                        result.test.label,
-                        result.skipped?.let { "failed: ${it.take(60)}" }
-                            ?: "%.1f ± %.1f tok/s".format(result.mean, result.stdDev),
-                    )
+                    val failure = result.skipped
+                    if (failure == null) {
+                        MetricRow(result.test.label, "%.1f ± %.1f tok/s".format(result.mean, result.stdDev))
+                    } else {
+                        // A failure reason is long; in the value column it squeezed the label
+                        // into one character per line.
+                        Text(
+                            "${result.test.label}: failed — ${failure.take(160)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             }
             TextButton(onClick = onRemove, enabled = !busy && !loaded) { Text("Remove") }
