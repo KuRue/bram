@@ -24,7 +24,9 @@ set(GGML_RPC OFF CACHE BOOL "" FORCE)
 # the ones Bram wants are added below with their own -march after llama.cpp is fetched.
 if(ANDROID_ABI STREQUAL "arm64-v8a")
     set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
-    # EXPERIMENT: fp16 arithmetic + dotprod for all of ggml-cpu (attention, f16/q8_0 KV).
+    # fp16 arithmetic + dotprod for all of ggml-cpu (attention, f16/q8_0 KV): Qwen3-4B decode at a
+    # 4K context 2.6 -> 7.0 tok/s on the S25 Ultra. Devices without them are refused before the
+    # library loads (CpuRequirements), rather than crashing on SIGILL.
     set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "" FORCE)
 endif()
 

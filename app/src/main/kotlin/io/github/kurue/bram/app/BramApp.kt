@@ -982,6 +982,25 @@ private fun ChatTranscript(
                 onEdit = { text -> onEdit(message.id.value, text) },
             )
         }
+        // A turn whose process died (the app killed mid-turn by the system, an update, or a
+        // crash) leaves the prompt saved with nothing after it, and the chat used to just sit
+        // there. Nothing is running, no error explains it, and the user spoke last: say so and
+        // offer the retry that already exists.
+        val unanswered = !state.isGenerating && state.error == null && state.pendingApproval == null &&
+            state.queuedMessages.isEmpty() && visibleMessages.lastOrNull()?.role == MessageRole.USER
+        if (unanswered) {
+            item(key = "unanswered") {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("unanswered-turn")) {
+                    Text(
+                        "No reply — Bram was closed before it answered.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onRegenerate) { Text("Retry") }
+                }
+            }
+        }
         state.pendingApproval?.let { pending ->
             item(key = "approval") {
                 ToolApprovalCard(pending, onResolve = onResolveApproval)
