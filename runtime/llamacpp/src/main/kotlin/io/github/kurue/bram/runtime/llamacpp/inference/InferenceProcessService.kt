@@ -25,6 +25,8 @@ class InferenceProcessService : Service() {
             val nativeDir = applicationInfo.nativeLibraryDir
             android.system.Os.setenv("ADSP_LIBRARY_PATH", nativeDir, true)
         }
+        // Before the library loads: a CPU without the build's required instructions would SIGILL.
+        CpuRequirements.check(android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty())
         NativeLlamaBridge()
     }
     /**
