@@ -1153,6 +1153,11 @@ class MainViewModel(
             snapshot.tuningProfileId != null || snapshot.batchTuneProfileId != null ||
             snapshot.benchmarkingProfileId != null || snapshot.measuringBandwidth
         ) {
+            android.util.Log.w(
+                "BramBench",
+                "benchmark refused: generating=${snapshot.isGenerating} loading=${snapshot.isLoadingModel} " +
+                    "validating=${snapshot.isValidatingAccelerator} busy=${snapshot.benchmarkingProfileId ?: snapshot.tuningProfileId}",
+            )
             return
         }
         viewModelScope.launch(Dispatchers.Default) {
@@ -1285,6 +1290,25 @@ class MainViewModel(
             } finally {
                 mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
             }
+        }
+    }
+
+    /** Debug hook (see MainActivity): benchmark a profile by name once the profile list has loaded. */
+    fun debugBenchmarkByName(name: String, sustained: Boolean) {
+        viewModelScope.launch {
+            repeat(600) {
+                val state = mutableState.value
+                val profile = state.profiles.firstOrNull { it.name == name }
+                // Launch restores the last model, and runBenchmark refuses while anything loads.
+                val idle = !state.isLoadingModel && !state.isGenerating && !state.isValidatingAccelerator
+                if (profile != null && idle) {
+                    android.util.Log.i("BramBench", "debug benchmark requested for $name")
+                    runBenchmark(profile.id, sustainedMinutes = if (sustained) 5 else 0)
+                    return@launch
+                }
+                delay(200)
+            }
+            android.util.Log.w("BramBench", "debug benchmark: no profile named $name")
         }
     }
 

@@ -46,5 +46,25 @@ class MainActivity : ComponentActivity() {
                 BramApp(viewModel)
             }
         }
+        handleDebugIntent(intent)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        handleDebugIntent(intent)
+    }
+
+    /**
+     * Debug builds only: `am start -n <pkg>/.MainActivity --es bram.debug.benchmark "<profile>"`
+     * (add `--ez bram.debug.sustained true` for the 5-minute run) starts a benchmark by profile
+     * name, so measurements do not depend on driving the UI by screen coordinates. A release
+     * build is not debuggable and ignores the extra.
+     */
+    private fun handleDebugIntent(intent: android.content.Intent?) {
+        val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+        val name = intent?.getStringExtra("bram.debug.benchmark") ?: return
+        if (!debuggable) return
+        intent.removeExtra("bram.debug.benchmark")
+        viewModel.debugBenchmarkByName(name, sustained = intent.getBooleanExtra("bram.debug.sustained", false))
     }
 }

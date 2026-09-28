@@ -888,6 +888,13 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
             g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
         } else if (fa == "off" || fa == "disabled") {
             g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        } else if (gpu_layers <= 0) {
+            // "auto" enables llama.cpp's flash-attention kernel on the CPU too, and on the CPU that
+            // kernel is the slow path at depth. Measured on the S25 Ultra: Qwen3-4B decode at a
+            // 4K-token context went 2.6 tok/s with it vs 7.0 without; LFM2.5-2.6B 14.0 vs 19.3.
+            // With nothing offloaded, auto therefore means off. Explicit "on" is still honored
+            // (a quantized V cache requires it).
+            g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
         } else {
             g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
         }
@@ -900,6 +907,12 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
             g_state.kv_type = GGML_TYPE_Q8_0;
         } else {
             g_state.kv_type = GGML_TYPE_F16;
+        }
+        // The CPU "auto means off" rule above cannot stand with a quantized cache: llama.cpp
+        // refuses a quantized V without flash attention, and the context would fail to create.
+        const bool fa_auto = !(fa == "on" || fa == "force" || fa == "enabled" || fa == "off" || fa == "disabled");
+        if (fa_auto && g_state.kv_type != GGML_TYPE_F16) {
+            g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
         }
 
         // Without an explicit list llama.cpp offloads to whichever accelerator it considers best,
