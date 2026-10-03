@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.kurue.bram.app.EndpointHealth
 import io.github.kurue.bram.app.MainActivity
 import java.net.HttpURLConnection
 import java.net.URL
@@ -64,6 +65,11 @@ class TurnStallOnDeviceTest {
                 "and run `adb reverse tcp:8099 tcp:8099`",
             mockServerReachable(),
         )
+        // The turn this class stops goes on to fail, and a failed remote turn marks the endpoint
+        // down. The process is shared by the whole suite, so the mark has to be cleared here rather
+        // than left for the next class to trip over — see RemoteTurnSettlingTest for the longer
+        // account of what that costs.
+        EndpointHealth.clear()
     }
 
     @Test
@@ -192,6 +198,9 @@ class TurnStallOnDeviceTest {
             // class: left armed, the next request that does not re-arm waits out the stall instead
             // of answering. Re-arm a responsive scenario so a following class cannot inherit it.
             postScenario("happy_tool_call")
+            // The reachability mark this class's stopped turn leaves is the other piece of global
+            // state, and it outlives the class just the same.
+            EndpointHealth.clear()
             val endpointsPrefs = targetContext().getSharedPreferences(ENDPOINTS_PREFS, Context.MODE_PRIVATE)
             if (previousEndpoints == null) {
                 endpointsPrefs.edit().remove(ENDPOINTS_KEY).commit()

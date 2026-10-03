@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.kurue.bram.app.EndpointHealth
 import io.github.kurue.bram.app.MainActivity
 import org.json.JSONArray
 import org.json.JSONObject
@@ -46,6 +47,12 @@ class RemoteTurnSettlingTest {
                 "and run `adb reverse tcp:8099 tcp:8099`",
             mockServerReachable(),
         )
+        // This class fails a remote turn on purpose, and a failed remote turn marks the endpoint
+        // down. The instrumentation process is shared by the whole device suite, so without this the
+        // mark outlives the class and the next turn to ask for the mock gets no route at all — which
+        // reads as a turn that never left the device rather than as the reachability verdict it is.
+        // The sibling test can also run second, so it is cleared per test and not only at the end.
+        EndpointHealth.clear()
     }
 
     @Test
@@ -128,6 +135,10 @@ class RemoteTurnSettlingTest {
             // The mock's scenario is global state and outlives this class, so leave a responsive one
             // armed or the next class inherits the failure.
             postScenario("happy_tool_call")
+            // So does the reachability mark this class's failing turn left behind: the endpoint would
+            // otherwise still be marked down for the cooldown, and the next class's first turn would
+            // find no eligible route and end without a request.
+            EndpointHealth.clear()
             val endpointsPrefs = targetContext().getSharedPreferences(ENDPOINTS_PREFS, Context.MODE_PRIVATE)
             if (previousEndpoints == null) {
                 endpointsPrefs.edit().remove(ENDPOINTS_KEY).commit()

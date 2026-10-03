@@ -34,5 +34,17 @@ object EndpointHealth {
         return clock() - failedAt > FAILURE_COOLDOWN_MILLIS
     }
 
+    /**
+     * Forgets every mark, so every endpoint counts as reachable again.
+     *
+     * For tests, and only for tests: the instrumentation process is shared by the whole device suite,
+     * so a case that deliberately fails a remote turn marks the endpoint down for the next case too.
+     * That is invisible from the failing case — it looks like the next turn never left the device —
+     * and it lasts [FAILURE_COOLDOWN_MILLIS], so it clears itself long after the run that caused it.
+     */
+    fun clear() {
+        failedAtEpochMillis.clear()
+    }
+
     private const val FAILURE_COOLDOWN_MILLIS = 60_000L
 }
