@@ -30,6 +30,70 @@ import io.github.kurue.bram.core.domain.ToolApprovalDecision
  * dismissible notification that a reply has finished, with a reply action that starts the next
  * turn without opening the app.
  */
+/**
+ * Orders a stop against a start that has not reached the foreground yet.
+ *
+ * Telling Android to start a foreground service and then telling it to stop, inside the ~13ms the
+ * start takes to reach `startForeground`, is fatal. The stop tears the service record down while
+ * Android is still waiting for the foreground call it was promised, and Android answers the app with
+ * `ForegroundServiceDidNotStartInTimeException` — which arrives on a binder thread as an uncaught
+ * exception and kills the process mid-turn.
+ *
+ * Measured on a cold `s25u_sim`: a healthy start reaches `startForeground` 11-16ms after the
+ * request, and the crash showed the service being brought down 17ms after a start, mid-window. So
+ * this is not a start that is slow, nor a main thread that is blocked; it is a stop landing in a
+ * window that is a couple of dozen milliseconds wide, which a busy main thread makes easy to hit.
+ *
+ * A stop that arrives in that window is therefore recorded rather than issued, and the service
+ * performs it itself once it is safely foreground. Nothing is lost: the caller asked for the
+ * service to go away, and it goes away one main-loop turn later.
+ */
+internal object StartStopHandshake {
+    private val lock = Any()
+
+    /** A start has been asked for and has not yet reached the foreground. */
+    private var startPending = false
+
+    /** A stop was asked for while a start was pending, and is owed. */
+    private var stopOwed = false
+
+    /** A start has been requested. */
+    fun onStartRequested() = synchronized(lock) {
+        startPending = true
+        // The new start supersedes any stop owed to a start that never arrived.
+        stopOwed = false
+    }
+
+    /**
+     * Whether the stop should be issued now, or is owed to a start still in flight.
+     *
+     * `true` means call `stopService` now; `false` means a start is pending and the service will
+     * stop itself once it is foreground.
+     */
+    fun shouldStopNow(): Boolean = synchronized(lock) {
+        if (!startPending) return@synchronized true
+        stopOwed = true
+        false
+    }
+
+    /**
+     * The start reached the foreground. Returns whether a stop was owed, which the service then
+     * carries out.
+     */
+    fun onReachedForeground(): Boolean = synchronized(lock) {
+        startPending = false
+        val owed = stopOwed
+        stopOwed = false
+        owed
+    }
+
+    /** The start never left the process, so no service is coming and a stop is due immediately. */
+    fun onStartFailed() = synchronized(lock) {
+        startPending = false
+        stopOwed = false
+    }
+}
+
 class AgentTaskService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -41,9 +105,13 @@ class AgentTaskService : Service() {
             ?: ModelPhase.IDLE
         val detail = intent?.getStringExtra(EXTRA_DETAIL)
         startInForegroundCompat(buildNotification(model, backend, phase, detail))
+        // The start has landed, so it is now safe to stop: see StartStopHandshake for why a stop
+        // could not simply have been issued a moment ago.
+        val stopAfterStart = StartStopHandshake.onReachedForeground()
         // Do not resurrect the service on its own: a loaded model cannot be resumed from nothing,
         // and a restarted service with no model behind it would show a notification for work that
         // is over.
+        if (stopAfterStart) stopSelf()
         return START_NOT_STICKY
     }
 
@@ -135,10 +203,18 @@ class AgentTaskService : Service() {
                 .putExtra(EXTRA_BACKEND, backend)
                 .putExtra(EXTRA_PHASE, phase.wire)
                 .putExtra(EXTRA_DETAIL, detail)
+            StartStopHandshake.onStartRequested()
             runCatching { context.startForegroundService(intent) }
+                // A start that never left the process must not leave the handshake believing one is
+                // coming, or every later stop would be deferred to a service that will not arrive.
+                .onFailure { StartStopHandshake.onStartFailed() }
         }
 
         fun stop(context: Context) {
+            // Issued only when no start is in flight. Otherwise it is owed to the pending start and
+            // the service stops itself the moment it is foreground — see StartStopHandshake, and
+            // the crash that made it necessary.
+            if (!StartStopHandshake.shouldStopNow()) return
             runCatching { context.stopService(Intent(context, AgentTaskService::class.java)) }
         }
 

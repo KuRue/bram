@@ -1,8 +1,11 @@
 package io.github.kurue.bram.app.test
 
 import android.content.Context
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -17,6 +20,7 @@ import org.json.JSONObject
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.BeforeClass
@@ -65,6 +69,7 @@ class TruncationContinuationOnDeviceTest {
         // entries, so after a long day of runs a length difference reads as zero.
         val before = lastSeq()
         send(ASK)
+        awaitTurnReachedMock("truncated_then_answer", before)
         // The scripted answer goes only to a request carrying the nudge, so seeing it at all is
         // the continuation having run; the log check below pins how.
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(TRUNCATED_FINAL_TEXT) }
@@ -88,6 +93,7 @@ class TruncationContinuationOnDeviceTest {
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText("Mock endpoint") }
         val before = lastSeq()
         send(ASK)
+        awaitTurnReachedMock("truncated_partial", before)
         composeRule.waitUntil(TIMEOUT_MILLIS) { hasText(TRUNCATED_PARTIAL_TEXT) }
         composeRule.waitUntil(TIMEOUT_MILLIS) { countText(NOTICE_MARKER) >= 1 }
 
@@ -103,10 +109,65 @@ class TruncationContinuationOnDeviceTest {
         )
     }
 
+    /**
+     * Waits for this test's own turn to reach the mock, counted from the sequence number [before].
+     *
+     * Every other wait in this class is on screen text, so when the suite runs end to end a turn that
+     * never leaves the device looks exactly like a turn that reached the mock and then failed to
+     * continue — a bare 120s `ComposeTimeoutException` on the answer, naming neither. This splits
+     * them apart against the mock's own request log, which is out of band and unaffected by how fast
+     * the UI moves.
+     *
+     * The baseline is a sequence number rather than a count of entries for the reason
+     * [lastSeq] gives, and it has to be used the same way here: an earlier version took a count of
+     * this class's own requests and dropped that many entries from the *whole* shared log, which
+     * under-drops and leaves a stale truncation request inside the window. That check then reported
+     * "the turn reached the mock" for a turn that never left the device, and sent the reading of the
+     * defect after the request rather than before it. Worth stating plainly: the check that was
+     * supposed to localise this was the thing that mislocalised it.
+     */
+    private fun awaitTurnReachedMock(scenario: String, before: Long) {
+        val deadline = System.currentTimeMillis() + TIMEOUT_MILLIS
+        while (System.currentTimeMillis() < deadline) {
+            val mine = loggedChatCompletions()
+                .count { it.optLong("seq") > before && it.optString("scenario") == scenario && it.carriesUserAsk() }
+            if (mine >= 1) return
+            Thread.sleep(500)
+        }
+        fail(
+            "the turn never reached the mock: no $scenario request carrying the user's ask was logged " +
+                "in ${TIMEOUT_MILLIS}ms. That is routing or request construction, not the " +
+                "continuation path — do not debug the continuation until this passes."
+        )
+    }
+
     private fun send(text: String) {
         composeRule.onNodeWithTag("composer-field").performTextInput(text)
+        // The composer's button is disabled until the routing pool is restored, which the view model
+        // does after its first frame, so "the endpoint chip is showing" is not the same as "the
+        // button will do something". A click on a disabled button is dropped without complaint: the
+        // field stays full, no turn starts, and the only symptom is a request that never arrives.
+        composeRule.waitUntil(TIMEOUT_MILLIS) { isSendEnabled() }
         composeRule.onNodeWithTag("send-button").performClick()
+        // A press the composer accepted empties the field, so this splits the two ways a turn can
+        // fail to reach the mock. Field still full: the press never became a send. Field emptied:
+        // the turn was accepted and started, and whatever stopped it is downstream of the composer.
+        composeRule.waitUntil(TIMEOUT_MILLIS) { isComposerEmpty() }
     }
+
+    /** Whether the composer's send control is enabled, as opposed to present but inert. */
+    private fun isSendEnabled(): Boolean =
+        composeRule.onAllNodesWithTag("send-button")
+            .fetchSemanticsNodes()
+            .any { !it.config.contains(SemanticsProperties.Disabled) }
+
+    /** Whether the composer holds no text, which is what a send leaves behind. */
+    private fun isComposerEmpty(): Boolean =
+        composeRule.onAllNodesWithTag("composer-field")
+            .fetchSemanticsNodes()
+            .none { node ->
+                node.config.getOrNull(SemanticsProperties.EditableText)?.text?.isNotEmpty() == true
+            }
 
     private fun hasText(text: String): Boolean =
         composeRule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()

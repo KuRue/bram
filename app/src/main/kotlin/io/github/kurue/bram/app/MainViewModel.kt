@@ -655,6 +655,7 @@ class MainViewModel(
     @Volatile
     private var conversationChosen = false
     private var generationJob: Job? = null
+    private val statusPushes = StatusPushLedger()
 
     /**
      * The orchestrator driving the turn in flight, so a stop can reach the runtime underneath it.
@@ -690,7 +691,7 @@ class MainViewModel(
                 )
             }
             // The model is gone with the process; the status service has nothing left to hold.
-            AgentTaskService.stop(container.appContext)
+            stopStatusService()
             refreshDeviceProfile()
         }
         viewModelScope.launch {
@@ -2435,7 +2436,7 @@ class MainViewModel(
                     error = error.message ?: "Could not prepare the local profile",
                 )
             }
-            AgentTaskService.stop(container.appContext)
+            stopStatusService()
             refreshDeviceProfile()
         }
         mutableState.update { it.copy(isLoadingModel = false, status = null) }
@@ -3698,7 +3699,7 @@ class MainViewModel(
                             error = error.message ?: "Could not load the LiteRT package",
                         )
                     }
-                    AgentTaskService.stop(container.appContext)
+                    stopStatusService()
                     refreshDeviceProfile()
                 }
             mutableState.update { it.copy(isLoadingLiteRt = false, status = null) }
@@ -3811,7 +3812,7 @@ class MainViewModel(
         mutableState.update {
             it.copy(litertlmLoadedId = null, litertlmLoadedBackend = null, liteRtLoadDetail = null)
         }
-        AgentTaskService.stop(container.appContext)
+        stopStatusService()
     }
 
     /** Removes an imported LiteRT package, unloading it first if it holds the engine. */
@@ -4293,11 +4294,32 @@ class MainViewModel(
     }
 
     /**
+     * Sets the phase the transcript renders. Kept apart from [pushModelStatus] because a phase can
+     * have to reach the screen without the status service being disturbed — see the remote turn's
+     * settle, which stops the service and must not immediately restart it.
+     */
+    private fun setModelPhase(phase: ModelPhase) {
+        mutableState.update { it.copy(modelPhase = phase) }
+    }
+
+    /**
+     * Stops the status service and forgets what it was last told, so the next push starts it again
+     * instead of assuming it is still up.
+     */
+    private fun stopStatusService() {
+        statusPushes.forget()
+        AgentTaskService.stop(container.appContext)
+    }
+
+    /**
      * Moves the status notification to the current phase. No-op when nothing is loaded or
      * selected, which is when there is nothing to hold a foreground service for.
+     *
+     * A push the service is already showing is dropped: the phase on screen still moves, so this
+     * only ever skips re-posting a notification that would not change.
      */
     private fun pushModelStatus(phase: ModelPhase, detail: String? = null) {
-        mutableState.update { it.copy(modelPhase = phase) }
+        setModelPhase(phase)
         val s = mutableState.value
         val name = s.loadedModelId
             ?.let { id -> s.localModels.firstOrNull { it.id.value == id }?.displayName }
@@ -4308,6 +4330,9 @@ class MainViewModel(
         val backend = s.loadedBackend?.label
             ?: s.litertlmLoadedBackend?.label
             ?: if (s.lastRoutedRuntimeLabel != null && s.loadedModelId == null) "Remote" else "CPU"
+        // Asked only once the push is known to be worth making: the ledger records what it is told,
+        // so a push abandoned above — no model to name — must not count as one made.
+        if (!statusPushes.shouldPush(phase, detail)) return
         AgentTaskService.update(
             container.appContext,
             model = name,
@@ -4923,8 +4948,15 @@ class MainViewModel(
                     // the generating phase: nothing else resets it for a remote turn, and while it
                     // stays GENERATING the label reads "Writing…" forever — the composer never offers
                     // a settled turn again, and a completed remote answer looks like a hung one.
-                    AgentTaskService.stop(container.appContext)
-                    pushModelStatus(ModelPhase.IDLE)
+                    //
+                    // The phase is set without going through pushModelStatus on purpose. Pushing it
+                    // restarted the service this line had just stopped, so a remote turn ended by
+                    // stopping a foreground service and starting it again in the same breath — the
+                    // stop/start pair the shade never asked for, and one Android can answer by
+                    // killing the app process when the new start does not reach startForeground in
+                    // time. The screen needs the phase; the service needs to stay down.
+                    stopStatusService()
+                    setModelPhase(ModelPhase.IDLE)
                 }
                 if (!appForeground && container.notificationSettings.completionAlertsEnabled()) {
                     val turnName = selection.localModel?.displayName
@@ -4995,7 +5027,7 @@ class MainViewModel(
             )
         }
         // No model left to hold a foreground service for.
-        AgentTaskService.stop(container.appContext)
+        stopStatusService()
         refreshDeviceProfile()
     }
 

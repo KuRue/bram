@@ -35,3 +35,34 @@ internal fun ModelPhase.hasTurnRunning(): Boolean = this != ModelPhase.IDLE
  * being offered in one place and refused in the other.
  */
 internal fun canStop(phase: ModelPhase): Boolean = phase.hasTurnRunning()
+
+/**
+ * What the status service has already been told, so a repeat push costs nothing.
+ *
+ * Telling the service is not free: each push is a `startForegroundService`, and Android kills the
+ * app process if such a start does not reach `startForeground` within ten seconds. A turn pushes
+ * far more often than it changes state — every `AgentEvent.Status` re-pushes the phase the turn is
+ * already in — so an undeduplicated turn is a burst of identical notifications, and the more of
+ * them land while the main thread is busy the likelier one of them is the one that misses the
+ * window. Remembering the last push makes every repeat free, which is all a repeat was ever worth:
+ * the notification it would post is the one already on screen.
+ *
+ * [forget] exists because a stopped service has to be started again, not merely updated: the last
+ * push said nothing about the service still running.
+ */
+internal class StatusPushLedger {
+    private var last: Pair<ModelPhase, String?>? = null
+
+    /** Whether this push would tell the service something it is not already showing. */
+    fun shouldPush(phase: ModelPhase, detail: String?): Boolean {
+        val next = phase to detail
+        if (next == last) return false
+        last = next
+        return true
+    }
+
+    /** Forgets the last push, so the next one starts the service afresh. */
+    fun forget() {
+        last = null
+    }
+}
