@@ -379,6 +379,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onAutoConfigure = viewModel::autoConfigure,
                                 onBenchmark = { id -> viewModel.runBenchmark(id) },
                                 onSustainedBenchmark = viewModel::runSustainedBenchmark,
+                                onCancelBenchmark = viewModel::cancelBenchmark,
                                 onTuneBatch = viewModel::tuneBatch,
                                 onTuneDimension = viewModel::tuneDimension,
                                 tuningDimension = state.tuningDimension,
@@ -1209,6 +1210,7 @@ private fun ModelsScreen(
     tuningDimension: TuningDimension?,
     onBenchmark: (String) -> Unit = {},
     onSustainedBenchmark: (String) -> Unit = {},
+    onCancelBenchmark: () -> Unit = {},
     /** Starts a quant conversion for a profile's file. */
     onConvertQuant: (String, String) -> Unit,
     sheetReadyToScroll: Boolean,
@@ -1314,9 +1316,10 @@ private fun ModelsScreen(
                     onAutoConfigure = { onAutoConfigure(profile.id) },
                     onBenchmark = { onBenchmark(profile.id) },
                     onSustainedBenchmark = { onSustainedBenchmark(profile.id) },
+                    onCancelBenchmark = onCancelBenchmark,
                     onUnload = onUnloadModel,
                     benchmarking = state.benchmarkingProfileId == profile.id,
-                    benchmarkStatus = state.benchmarkStatus.takeIf { state.benchmarkingProfileId == profile.id },
+                    benchmarkStatus = state.benchmarkStatus.takeIf { state.benchmarkStatusProfileId == profile.id },
                     benchRuns = state.benchRuns.filter { it.profileId == profile.id },
                     currentFingerprint = state.measurementFingerprint,
                     onTuneBatch = { onTuneBatch(profile.id) },
@@ -1341,6 +1344,7 @@ private fun ModelsScreen(
                 runs = state.benchRuns.filter { it.profileId == "litert:${record.id.value}" },
                 currentFingerprint = state.measurementFingerprint,
                 onBenchmark = { onBenchmarkLiteRt(record.id.value) },
+                onCancelBenchmark = onCancelBenchmark,
                 onRemove = { onRemoveLiteRt(record.id.value) },
             )
         }
@@ -1778,6 +1782,8 @@ private fun ProfileCard(
     onSustainedBenchmark: () -> Unit = {},
     /** Releases the loaded model, which is what unlocks its load-time settings. */
     onUnload: () -> Unit = {},
+    /** Stops the benchmark in flight. Only reachable while [benchmarking] is true. */
+    onCancelBenchmark: () -> Unit = {},
     /** True while this profile's benchmark runs; [benchmarkStatus] is its live step. */
     benchmarking: Boolean = false,
     benchmarkStatus: String? = null,
@@ -1972,8 +1978,20 @@ private fun ProfileCard(
                 // Measures the configuration as it stands, rather than choosing one: the numbers
                 // chat will actually get, kept as a history so a change can be compared.
                 if (benchmarking) {
-                    OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth()) {
-                        Text(benchmarkStatus ?: "Benchmarking…")
+                    // Cancel sits beside the live step rather than replacing it: a sustained run is
+                    // five minutes of unbroken decode, and the status is what says how far along it
+                    // is, so the way out cannot take its place.
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) {
+                            Text(benchmarkStatus ?: "Benchmarking…")
+                        }
+                        OutlinedButton(
+                            onClick = onCancelBenchmark,
+                            modifier = Modifier.testTag("cancel-benchmark"),
+                        ) { Text("Cancel") }
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2516,6 +2534,7 @@ private fun LiteRtModelCard(
     loaded: Boolean,
     benchmarking: Boolean,
     benchmarkStatus: String?,
+    onCancelBenchmark: () -> Unit = {},
     busy: Boolean,
     runs: List<io.github.kurue.bram.core.domain.BenchRun>,
     currentFingerprint: String,
@@ -2537,11 +2556,26 @@ private fun LiteRtModelCard(
                     Text("● In use", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
                 }
             }
-            OutlinedButton(
-                onClick = onBenchmark,
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth().testTag("benchmark-litert"),
-            ) { Text(if (benchmarking) benchmarkStatus ?: "Benchmarking…" else "Benchmark CPU and GPU") }
+            if (benchmarking) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) {
+                        Text(benchmarkStatus ?: "Benchmarking…")
+                    }
+                    OutlinedButton(
+                        onClick = onCancelBenchmark,
+                        modifier = Modifier.testTag("cancel-benchmark-litert"),
+                    ) { Text("Cancel") }
+                }
+            } else {
+                OutlinedButton(
+                    onClick = onBenchmark,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth().testTag("benchmark-litert"),
+                ) { Text("Benchmark CPU and GPU") }
+            }
             // One summary per backend: the latest run of each.
             io.github.kurue.bram.core.domain.LiteRtBackend.entries.forEach { backend ->
                 val latest = runs.firstOrNull { it.backend == backend.label } ?: return@forEach
