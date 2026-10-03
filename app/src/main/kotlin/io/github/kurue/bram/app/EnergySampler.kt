@@ -8,6 +8,7 @@ import io.github.kurue.bram.core.domain.BatteryPower
 import io.github.kurue.bram.core.domain.EnergySample
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -23,6 +24,23 @@ import kotlinx.coroutines.launch
  */
 class EnergySampler(private val context: Context) {
     private val battery = context.getSystemService(BatteryManager::class.java)
+
+    /** The sampling coroutine of the measurement in progress, so it can be stopped without waiting. */
+    @Volatile
+    private var sampling: Job? = null
+
+    /**
+     * Stops sampling immediately, without waiting for the measured work to return.
+     *
+     * Cancelling the benchmark does stop sampling on its own, but only once the coroutine unwinds
+     * through [measure]. A measurement is a blocking call into the inference process, so that can be
+     * seconds away — long enough for a sampler to keep reading the battery for work that has been
+     * called off. Cancelling the sampler directly ends it at once; the abandoned readings are
+     * discarded with it, because a half-measured sample is not a measurement.
+     */
+    fun cancel() {
+        sampling?.cancel()
+    }
 
     /** Battery temperature in °C (the intent reports tenths), or null when unavailable. */
     fun batteryCelsius(): Double? =
@@ -54,10 +72,12 @@ class EnergySampler(private val context: Context) {
                     delay(SAMPLE_INTERVAL_MILLIS)
                 }
             }
+            sampling = sampler
             try {
                 block()
             } finally {
                 sampler.cancel()
+                sampling = null
             }
         }
         val taken = synchronized(readings) { readings.toList() }

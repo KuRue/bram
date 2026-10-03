@@ -503,6 +503,15 @@ data class AppUiState(
     val benchmarkingProfileId: String? = null,
     /** The live step of a running benchmark ("tg128@4096 (3/3)…"). */
     val benchmarkStatus: String? = null,
+    /**
+     * Whose card [benchmarkStatus] belongs to.
+     *
+     * Separate from [benchmarkingProfileId] because that one clears the moment the run stops, while
+     * the status outlives it: a cancelled benchmark says so on the card that ran it. Gating the card
+     * on the id that is running something would make every terminal state invisible, which is the
+     * opposite of settled.
+     */
+    val benchmarkStatusProfileId: String? = null,
     /** Every recorded benchmark run, newest first. */
     val benchRuns: List<io.github.kurue.bram.core.domain.BenchRun> = emptyList(),
     /** A quant conversion in flight, so the card can show which model is being converted. */
@@ -656,6 +665,7 @@ class MainViewModel(
     private var conversationChosen = false
     private var generationJob: Job? = null
     private val statusPushes = StatusPushLedger()
+    private val benchmarkRuns = BenchmarkRunControl()
 
     /**
      * The orchestrator driving the turn in flight, so a stop can reach the runtime underneath it.
@@ -1161,8 +1171,18 @@ class MainViewModel(
             )
             return
         }
-        viewModelScope.launch(Dispatchers.Default) {
-            mutableState.update { it.copy(benchmarkingProfileId = profileId, benchmarkStatus = "Preparing…", error = null) }
+        // Set the card's state before the job exists, so a cancel landing in the gap between the two
+        // finds a run already marked instead of nothing at all.
+        mutableState.update {
+            it.copy(
+                benchmarkingProfileId = profileId,
+                benchmarkStatusProfileId = profileId,
+                benchmarkStatus = "Preparing…",
+                error = null,
+            )
+        }
+        val ticket = benchmarkRuns.begin()
+        val job = viewModelScope.launch(Dispatchers.Default) {
             try {
                 sweepGate()?.let { reason ->
                     mutableState.update { it.copy(error = reason) }
@@ -1174,7 +1194,7 @@ class MainViewModel(
                         mutableState.update { it.copy(error = "Could not load ${profile.name} to benchmark it.") }
                         return@withLock
                     }
-                    mutableState.update { it.copy(benchmarkStatus = "Measuring idle power…") }
+                    setBenchmarkStatus(ticket, "Measuring idle power…")
                     val baseline = container.energySampler.baseline()
                     val runStartTemp = container.energySampler.batteryCelsius()
                     // Filled from the first test's report: what the runtime actually ran with.
@@ -1191,16 +1211,15 @@ class MainViewModel(
                         while (cool && System.currentTimeMillis() - cooldownStart < MAX_BENCH_COOLDOWN_MILLIS) {
                             val now = container.energySampler.batteryCelsius()
                             if (io.github.kurue.bram.core.domain.Cooldown.ready(now, runStartTemp)) break
-                            mutableState.update {
-                                it.copy(
-                                    benchmarkStatus = "Cooling (%.1f°C, waiting for %.1f°C)…"
-                                        .format(now ?: 0.0, (runStartTemp ?: 0.0) + 1.0),
-                                )
-                            }
+                            setBenchmarkStatus(
+                                ticket,
+                                "Cooling (%.1f°C, waiting for %.1f°C)…"
+                                    .format(now ?: 0.0, (runStartTemp ?: 0.0) + 1.0),
+                            )
                             delay(5_000)
                         }
                         val cooldownMillis = System.currentTimeMillis() - cooldownStart
-                        mutableState.update { it.copy(benchmarkStatus = step) }
+                        setBenchmarkStatus(ticket, step)
                         refreshDeviceProfile()
                         val thermalBefore = mutableState.value.deviceProfile?.thermalStatus.orEmpty()
                         val tempBefore = container.energySampler.batteryCelsius()
@@ -1289,9 +1308,44 @@ class MainViewModel(
             } catch (error: Throwable) {
                 mutableState.update { it.copy(error = "Benchmark failed: ${error.message ?: error::class.java.simpleName}") }
             } finally {
-                mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
+                // Only the run that still owns the run may clear it: a cancelled one has already
+                // settled the card, and clearing behind it would erase the fact it was cancelled.
+                if (benchmarkRuns.isCurrent(ticket)) {
+                    mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
+                }
+                benchmarkRuns.onFinished(ticket)
             }
         }
+        benchmarkRuns.attach(ticket, job)
+    }
+
+    /**
+     * Stops the benchmark in flight, if any, and settles the card that was running it.
+     *
+     * The model stays loaded. A benchmark prepares the profile exactly as a chat turn would, so
+     * unloading it here would throw away work the next turn has to do again; a cancelled benchmark
+     * ends the measuring, not the session. The power sampler is stopped outright rather than left to
+     * unwind, because a measurement is a blocking call into the inference process and the sampler
+     * would otherwise keep reading the battery for work already called off.
+     */
+    fun cancelBenchmark() {
+        if (!benchmarkRuns.cancel()) return
+        container.energySampler.cancel()
+        mutableState.update {
+            it.copy(benchmarkingProfileId = null, benchmarkStatus = BenchmarkRunControl.CANCELLED_STATUS)
+        }
+    }
+
+    /**
+     * Sets the benchmark status, unless the run that would own it has been cancelled or superseded.
+     *
+     * A cancelled coroutine still runs to the end of the segment it was in, so without this a run
+     * stopped mid-measurement could put a live status — and with it the card's spinner — back after
+     * the user had stopped it.
+     */
+    private fun setBenchmarkStatus(ticket: Long, status: String?) {
+        if (!benchmarkRuns.isCurrent(ticket)) return
+        mutableState.update { it.copy(benchmarkStatus = status) }
     }
 
     /** Debug hook (see MainActivity): benchmark a profile by name once the profile list has loaded. */
@@ -3722,8 +3776,18 @@ class MainViewModel(
         if (snapshot.isGenerating || snapshot.isLoadingLiteRt || snapshot.benchmarkingProfileId != null) return
         val benchId = "litert:$modelId"
         val restore = snapshot.litertlmLoadedId == modelId
-        viewModelScope.launch(Dispatchers.Default) {
-            mutableState.update { it.copy(benchmarkingProfileId = benchId, benchmarkStatus = "Preparing…", error = null) }
+        // As in runBenchmark: the card's state is set before the job exists, so a cancel cannot land
+        // in the gap and find no run to stop.
+        mutableState.update {
+            it.copy(
+                benchmarkingProfileId = benchId,
+                benchmarkStatusProfileId = benchId,
+                benchmarkStatus = "Preparing…",
+                error = null,
+            )
+        }
+        val ticket = benchmarkRuns.begin()
+        val job = viewModelScope.launch(Dispatchers.Default) {
             try {
                 container.turnMutex.withLock {
                     refreshMeasurementFingerprint()
@@ -3732,7 +3796,7 @@ class MainViewModel(
                     // Ultra (1.5 GB + 1.6 GB). The next chat turn reloads its profile anyway, so
                     // the llama.cpp model is released for the duration rather than restored.
                     if (mutableState.value.loadedModelId != null) {
-                        mutableState.update { it.copy(benchmarkStatus = "Freeing memory…") }
+                        setBenchmarkStatus(ticket, "Freeing memory…")
                         unloadModelInternal(forget = false)
                     }
                     val startTemp = container.energySampler.batteryCelsius()
@@ -3746,10 +3810,10 @@ class MainViewModel(
                             while (System.currentTimeMillis() - cooldownStart < MAX_BENCH_COOLDOWN_MILLIS &&
                                 !io.github.kurue.bram.core.domain.Cooldown.ready(container.energySampler.batteryCelsius(), startTemp)
                             ) {
-                                mutableState.update { it.copy(benchmarkStatus = "Cooling before ${backend.label}…") }
+                                setBenchmarkStatus(ticket, "Cooling before ${backend.label}…")
                                 delay(5_000)
                             }
-                            mutableState.update { it.copy(benchmarkStatus = "${backend.label} ($rep/3)…") }
+                            setBenchmarkStatus(ticket, "${backend.label} ($rep/3)…")
                             val result = runCatching {
                                 container.liteRtEngineManager.benchmark(record, backend, prefillTokens = 512, decodeTokens = 128)
                             }.getOrElse { error ->
@@ -3793,7 +3857,12 @@ class MainViewModel(
             } catch (error: Throwable) {
                 mutableState.update { it.copy(error = "Benchmark failed: ${error.message ?: error::class.java.simpleName}") }
             } finally {
-                mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
+                // Only the run that still owns the run may clear it; a cancelled one has already
+                // settled the card and clearing behind it would erase that it was cancelled.
+                if (benchmarkRuns.isCurrent(ticket)) {
+                    mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
+                }
+                benchmarkRuns.onFinished(ticket)
                 // The benchmark unloaded the resident engine; put it back if chat was using it.
                 if (restore) {
                     runCatching { container.liteRtEngineManager.load(record) }
@@ -3803,6 +3872,7 @@ class MainViewModel(
                 }
             }
         }
+        benchmarkRuns.attach(ticket, job)
     }
 
     /** Unloads the LiteRT engine. The llama.cpp service, if it holds a model, is untouched. */
