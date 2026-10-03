@@ -124,7 +124,16 @@ sealed interface GenerationEvent {
     data class ToolCallReady(val call: ToolCall) : GenerationEvent
     data class Usage(val usage: TokenUsage) : GenerationEvent
     data class Metrics(val metrics: GenerationMetrics) : GenerationEvent
-    data class Finished(val finishReason: String? = null) : GenerationEvent
+    data class Finished(val finishReason: String? = null) : GenerationEvent {
+        companion object {
+            /**
+             * The stream ended without the server saying it was done — no finish reason, no end
+             * marker. Mainstream servers always send one, so this is a dropped connection, and the
+             * text so far is only part of the reply.
+             */
+            const val CONNECTION_CLOSED = "connection_closed"
+        }
+    }
     data class Failed(
         val message: String,
         val recoverable: Boolean,

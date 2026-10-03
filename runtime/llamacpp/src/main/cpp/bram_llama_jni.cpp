@@ -8,6 +8,7 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "expert_stream.h"
+#include "mem_bench.h"
 #include <deque>
 
 #include <algorithm>
@@ -38,6 +39,10 @@ struct runtime_state {
     // llama.cpp default of 128. See the batch setting in create_context.
     int ubatch_tokens = 0;
     int threads = 0;
+    // Threads for single-token decode on the chat context; 0 means the same as [threads]. Prompt
+    // processing is compute-bound and scales with cores, while decode saturates earlier (on the
+    // S25 Ultra, 4 threads decode as fast as 6 at two-thirds the energy), so the two can differ.
+    int decode_threads = 0;
     int gpu_layers = 0;
     bool enable_thinking = false;
     // Context-level settings carried from the load request: llama.cpp decides the attention path
@@ -342,7 +347,7 @@ std::vector<std::string> derive_shard_paths(const std::string & first_path) {
     return shards;
 }
 
-llama_context * create_context(int context_tokens = 0, bool attach_streamer = false) {
+llama_context * create_context(int context_tokens = 0, bool attach_streamer = false, bool chat_threads = false) {
     llama_context_params params = llama_context_default_params();
     params.n_ctx = static_cast<uint32_t>(context_tokens > 0 ? context_tokens : g_state.context_tokens);
     // The batch settings travel with the load request: they are context parameters, so every
@@ -357,7 +362,9 @@ llama_context * create_context(int context_tokens = 0, bool attach_streamer = fa
         g_state.ubatch_tokens > 0
             ? std::min(g_state.ubatch_tokens, static_cast<int>(params.n_batch))
             : std::min(128, static_cast<int>(params.n_batch)));
-    params.n_threads = g_state.threads;
+    // Only the chat context takes the separate decode count; the reference and self-test contexts
+    // keep one count so the CPU yardstick does not move with a tuning choice.
+    params.n_threads = chat_threads && g_state.decode_threads > 0 ? g_state.decode_threads : g_state.threads;
     params.n_threads_batch = g_state.threads;
     params.no_perf = false;
     params.abort_callback = abort_callback;
@@ -846,7 +853,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
     jstring thread_priority, jstring load_mode, jboolean hex_use_hmx, jboolean hex_disable_nhvx,
     jboolean hex_host_buf, jint hex_op_batch, jint hex_ndev,
     jboolean stream_experts, jint stream_cache_mb, jboolean stream_dense_anon,
-    jboolean stream_overlap, jint stream_overlap_lanes) {
+    jboolean stream_overlap, jint stream_overlap_lanes, jint decode_threads) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         // The Hexagon backend reads its environment once, at backend registration, so it has to
@@ -881,6 +888,13 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
             g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
         } else if (fa == "off" || fa == "disabled") {
             g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        } else if (gpu_layers <= 0) {
+            // "auto" enables llama.cpp's flash-attention kernel on the CPU too, and on the CPU that
+            // kernel is the slow path at depth. Measured on the S25 Ultra: Qwen3-4B decode at a
+            // 4K-token context went 2.6 tok/s with it vs 7.0 without; LFM2.5-2.6B 14.0 vs 19.3.
+            // With nothing offloaded, auto therefore means off. Explicit "on" is still honored
+            // (a quantized V cache requires it).
+            g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
         } else {
             g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
         }
@@ -893,6 +907,12 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
             g_state.kv_type = GGML_TYPE_Q8_0;
         } else {
             g_state.kv_type = GGML_TYPE_F16;
+        }
+        // The CPU "auto means off" rule above cannot stand with a quantized cache: llama.cpp
+        // refuses a quantized V without flash attention, and the context would fail to create.
+        const bool fa_auto = !(fa == "on" || fa == "force" || fa == "enabled" || fa == "off" || fa == "disabled");
+        if (fa_auto && g_state.kv_type != GGML_TYPE_F16) {
+            g_state.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
         }
 
         // Without an explicit list llama.cpp offloads to whichever accelerator it considers best,
@@ -980,12 +1000,15 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
                     if (nibble & (1 << (3 - b))) mask_bits[bit] = true;
                 }
             }
-            struct ggml_threadpool_params pool = ggml_threadpool_params_default(threads);
+            // The decode pool gets the decode count, the batch pool the prompt count.
+            struct ggml_threadpool_params pool =
+                ggml_threadpool_params_default(decode_threads > 0 ? decode_threads : threads);
             for (size_t i = 0; i < GGML_MAX_N_THREADS; ++i) pool.cpumask[i] = mask_bits[i];
             pool.strict_cpu = strict;
             if (poll >= 0) pool.poll = static_cast<uint32_t>(poll);
             if (prio == "high") pool.prio = GGML_SCHED_PRIO_HIGH;
             struct ggml_threadpool_params pool_batch = pool;
+            pool_batch.n_threads = threads;
             g_state.chat_pool = ggml_threadpool_new(&pool);
             g_state.chat_pool_batch = ggml_threadpool_new(&pool_batch);
             if (g_state.chat_pool == nullptr || g_state.chat_pool_batch == nullptr) {
@@ -1041,6 +1064,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_load(
         g_state.batch_tokens = batch_tokens;
         g_state.ubatch_tokens = ubatch_tokens;
         g_state.threads = threads;
+        g_state.decode_threads = decode_threads > 0 ? static_cast<int>(decode_threads) : 0;
         g_state.gpu_layers = gpu_layers;
         g_state.enable_thinking = enable_thinking == JNI_TRUE;
         g_state.model_path = model_path;
@@ -1162,7 +1186,7 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_generate(
         }
 
         if (g_state.chat_context == nullptr) {
-            g_state.chat_context = create_context(0, /*attach_streamer=*/true);
+            g_state.chat_context = create_context(0, /*attach_streamer=*/true, /*chat_threads=*/true);
             if (g_state.chat_pool != nullptr) {
                 // The tuned pool is attached here, not in create_context, so the contexts the
                 // harness builds for the CPU reference never carry it.
@@ -1542,6 +1566,129 @@ extern "C" JNIEXPORT void JNICALL
 Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_cancel(
     JNIEnv *, jobject) {
     g_cancelled.store(true, std::memory_order_relaxed);
+}
+
+// One benchmark test on the loaded model, llama-bench style: synthetic tokens (so tokenizer and
+// prompt content play no part), timed with nothing else in the loop.
+//   kind 0 = prompt processing: decode [n] tokens as a prompt from an empty cache.
+//   kind 1 = generation: fill the cache to [depth] (untimed), then decode [n] tokens one at a time.
+// It runs on the chat context — with the tuned threadpool, KV settings, and expert streamer the
+// user's turns get — rather than a second context, which would double KV memory and measure a
+// configuration chat never uses. The prompt cache is dropped as a result: the next turn
+// re-decodes its prompt once.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_benchmark(
+    JNIEnv * env, jobject, jint kind, jint count, jint depth, jint repetitions) {
+    return guarded_string(env, [&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_state.model == nullptr) throw std::runtime_error("Load a model before benchmarking");
+        g_cancelled.store(false, std::memory_order_relaxed);
+        const bool generation = kind == 1;
+        const int n = std::max(1, static_cast<int>(count));
+        const int d = generation ? std::max(0, static_cast<int>(depth)) : 0;
+        const int reps = std::max(1, std::min(static_cast<int>(repetitions), 20));
+
+        if (g_state.chat_context == nullptr) {
+            g_state.chat_context = create_context(0, /*attach_streamer=*/true, /*chat_threads=*/true);
+            if (g_state.chat_pool != nullptr) {
+                llama_attach_threadpool(g_state.chat_context, g_state.chat_pool, g_state.chat_pool_batch);
+            }
+            capture_experts(g_state.chat_context);
+        }
+        llama_context * context = g_state.chat_context;
+        llama_memory_t memory = llama_get_memory(context);
+        llama_memory_clear(memory, true);
+        g_state.cached_tokens.clear();
+
+        const int n_ctx = static_cast<int>(llama_n_ctx(context));
+        std::ostringstream result;
+        result << "{\"kind\":\"" << (generation ? "tg" : "pp") << "\",\"n\":" << n << ",\"depth\":" << d
+               << ",\"nCtx\":" << n_ctx << ",\"threads\":" << g_state.threads << ",\"decodeThreads\":" << (g_state.decode_threads > 0 ? g_state.decode_threads : g_state.threads)
+               << ",\"batchTokens\":" << g_state.batch_tokens << ",\"ubatchTokens\":" << g_state.ubatch_tokens
+               << ",\"gpuLayers\":" << g_state.gpu_layers;
+        if (d + n > n_ctx) {
+            result << ",\"skipped\":\"depth " << d << " + " << n << " does not fit the " << n_ctx
+                   << "-token context\",\"tokPerSec\":[]}";
+            return result.str();
+        }
+
+        // Deterministic ids across the whole vocabulary; a fixed seed makes runs comparable.
+        const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(g_state.model));
+        uint32_t seed = 0x9e3779b9u;
+        auto synthetic = [&](int length) {
+            std::vector<llama_token> tokens(static_cast<size_t>(length));
+            for (auto & token : tokens) {
+                seed = seed * 1664525u + 1013904223u;
+                token = static_cast<llama_token>(seed % static_cast<uint32_t>(std::max(1, n_vocab)));
+            }
+            return tokens;
+        };
+        using clock = std::chrono::steady_clock;
+        auto seconds_since = [](clock::time_point start) {
+            return std::chrono::duration<double>(clock::now() - start).count();
+        };
+
+        std::vector<double> rates;
+        double prefill_seconds = 0.0;
+        if (!generation) {
+            const auto tokens = synthetic(n);
+            for (int rep = 0; rep < reps; ++rep) {
+                llama_memory_clear(memory, true);
+                const auto start = clock::now();
+                decode_prompt(context, tokens);
+                // Accelerator backends may still be running when llama_decode returns.
+                llama_synchronize(context);
+                rates.push_back(n / seconds_since(start));
+            }
+        } else {
+            const auto context_tokens = synthetic(d);
+            const auto generated = synthetic(n);
+            auto prefill = [&] {
+                llama_memory_clear(memory, true);
+                if (d == 0) return;
+                const auto start = clock::now();
+                decode_prompt(context, context_tokens);
+                prefill_seconds = seconds_since(start);
+            };
+            prefill();
+            for (int rep = 0; rep < reps; ++rep) {
+                const auto start = clock::now();
+                for (int index = 0; index < n; ++index) {
+                    if (g_cancelled.load(std::memory_order_relaxed)) throw std::runtime_error("Benchmark cancelled");
+                    llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(&generated[static_cast<size_t>(index)]), 1);
+                    if (llama_decode(context, batch) != 0) throw std::runtime_error("Benchmark decode failed");
+                }
+                llama_synchronize(context);
+                rates.push_back(n / seconds_since(start));
+                // Back to the same depth for the next repetition. Recurrent and hybrid models
+                // refuse a partial trim, so they pay the prefill again (untimed).
+                if (rep + 1 < reps && !llama_memory_seq_rm(memory, 0, static_cast<llama_pos>(d), -1)) prefill();
+            }
+        }
+        llama_memory_clear(memory, true);
+
+        result << ",\"prefillMillis\":" << static_cast<long long>(prefill_seconds * 1000.0) << ",\"tokPerSec\":[";
+        for (size_t index = 0; index < rates.size(); ++index) {
+            if (index > 0) result << ",";
+            result << rates[index];
+        }
+        result << "]}";
+        __android_log_print(ANDROID_LOG_INFO, "BramBench", "bench %s", result.str().c_str());
+        return result.str();
+    });
+}
+
+// Measures the device's DRAM read bandwidth: the ceiling decode speed is judged against. Needs no
+// model; the buffer is freed before returning.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_memoryBandwidth(
+    JNIEnv * env, jobject, jint buffer_mb, jint max_threads, jint passes) {
+    return guarded_string(env, [buffer_mb, max_threads, passes] {
+        return bram::measure_read_bandwidth(
+            static_cast<size_t>(std::max(16, static_cast<int>(buffer_mb))) << 20,
+            static_cast<int>(max_threads),
+            static_cast<int>(passes));
+    });
 }
 
 // Enumerates the ggml backend devices this build can actually see, so accelerator capability is

@@ -32,7 +32,10 @@ import io.github.kurue.bram.core.domain.toRecord
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -252,7 +255,13 @@ class DefaultAgentOrchestrator(
                 }
                 // The caller decides what to do about a cut-off reply — continuing it, marking it,
                 // or both — but only the runtime knows it happened, so it is carried on the event.
-                emit(AgentEvent.Completed(assistantMessage, truncated = isLengthLimited(finishReason)))
+                emit(
+                    AgentEvent.Completed(
+                        assistantMessage,
+                        truncated = isLengthLimited(finishReason),
+                        interrupted = finishReason == GenerationEvent.Finished.CONNECTION_CLOSED,
+                    ),
+                )
                 upsertJournal(RunStatus.SUCCEEDED)
                 return@flow
             }
@@ -443,13 +452,16 @@ class DefaultAgentOrchestrator(
                         "it in system settings. Do not retry this run; say what is missing.",
                 ),
             )
-            // Remembering past the run is the gate's business, not the loop's; here both mean the
-            // same thing — do not ask again before this run ends.
+            // "For this run" vouches for the tool itself until the run ends.
             // A recovered call grants nothing forward: allowing this one says nothing about the
             // next piece of text that happens to look like it.
-            ToolApprovalDecision.ALLOW_FOR_RUN, ToolApprovalDecision.ALLOW_ALWAYS ->
+            ToolApprovalDecision.ALLOW_FOR_RUN ->
                 if (!call.recovered) allowedForRun += call.name
-            ToolApprovalDecision.ALLOW_ONCE -> Unit
+            // "Always" vouches only for the scope the card named (a host, a folder, one exact
+            // command), and the gate remembers it under that scope. Widening it to the tool name
+            // here would let "always allow termux_exec `ls`" wave through any command for the rest
+            // of the run; a later call in the same scope already passes the gate on its own.
+            ToolApprovalDecision.ALLOW_ALWAYS, ToolApprovalDecision.ALLOW_ONCE -> Unit
         }
         return PreparedCall(call = call, handler = handler)
     }
@@ -459,17 +471,30 @@ class DefaultAgentOrchestrator(
         prepared.answered?.let { return it }
         val handler = prepared.handler ?: return errorJson("tool_error", "No handler")
         val timeoutMillis = handler.definition.timeoutMillis
+        // A handler that outlives its deadline must not hold the turn: the model gets told the
+        // call was abandoned and can continue, which is strictly better than a run that never
+        // ends.
+        //
+        // The handler runs as its own job, not a child of this one, because handlers do blocking
+        // I/O inside withContext(Dispatchers.IO) and a timeout cannot interrupt that: a child would
+        // hold this scope open until the read returned on its own. Detached, the turn stops waiting
+        // at the deadline and the job is cancelled to finish whenever the blocking call lets go.
+        val execution = CoroutineScope(currentCoroutineContext().minusKey(Job)).async {
+            handler.execute(prepared.call.argumentsJson)
+        }
         return try {
-            // A handler that outlives its deadline must not hold the turn: the model gets told the
-            // call was abandoned and can continue, which is strictly better than a run that never
-            // ends.
-            withTimeoutOrNull(timeoutMillis) { handler.execute(prepared.call.argumentsJson) }
-                ?: errorJson(
-                    "tool_timeout",
-                    "The tool did not finish within ${timeoutMillis / 1_000} seconds and was " +
-                        "abandoned. Continue without its result or try a narrower call.",
-                )
+            withTimeoutOrNull(timeoutMillis) { execution.await() }
+                ?: run {
+                    execution.cancel()
+                    errorJson(
+                        "tool_timeout",
+                        "The tool did not finish within ${timeoutMillis / 1_000} seconds and was " +
+                            "abandoned. Continue without its result or try a narrower call.",
+                    )
+                }
         } catch (cancelled: CancellationException) {
+            // A stop must still reach the handler, which is no longer our child.
+            execution.cancel()
             throw cancelled
         } catch (error: Throwable) {
             errorJson("tool_error", error.message ?: error::class.java.simpleName)
@@ -532,7 +557,22 @@ class DefaultAgentOrchestrator(
         finishReason == "length" || finishReason == "incomplete" || finishReason == "max_tokens"
 
     private fun errorJson(code: String, message: String): String {
-        val safe = message.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+        // Every control character needs escaping, not just newlines: exception messages carry tabs
+        // and carriage returns (stack-trace fragments, Windows line endings), and one raw control
+        // character makes the whole envelope invalid JSON for the model and for isErrorResult.
+        val safe = buildString {
+            for (char in message) {
+                when {
+                    char == '\\' -> append("\\\\")
+                    char == '"' -> append("\\\"")
+                    char == '\n' -> append("\\n")
+                    char == '\r' -> append("\\r")
+                    char == '\t' -> append("\\t")
+                    char < ' ' -> append("\\u%04x".format(char.code))
+                    else -> append(char)
+                }
+            }
+        }
         return "{\"error\":{\"code\":\"$code\",\"message\":\"$safe\"}}"
     }
 

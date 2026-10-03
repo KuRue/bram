@@ -250,6 +250,14 @@ data class ModelProfile(
      */
     val threads: Int = 0,
     /**
+     * Threads for single-token decode, or 0 for the same as [threads] (which then covers prompt
+     * processing only in name). Prompt work is compute-bound and scales with cores; decode stops
+     * gaining earlier, so extra decode threads mostly cost energy. On the S25 Ultra with
+     * LFM2.5-2.6B Q4_0: 6 threads prompt at 140 tok/s vs 104 at 4, but decode at 22 tok/s either
+     * way, for 0.31 vs 0.20 J/token.
+     */
+    val decodeThreads: Int = 0,
+    /**
      * Hex string naming the CPU cores the generation threadpool may use, "" for default affinity
      * (which is today's behavior on any device whose topology was not measured). "0xfc" means
      * cores 2–7, which is the Snapdragon reference config for the Hexagon path.
@@ -337,6 +345,7 @@ data class ModelProfile(
         val hex = canonicalCpuMask(cpuMask)
         return copy(
             threads = threads.coerceIn(0, 64),
+            decodeThreads = decodeThreads.coerceIn(0, 64),
             cpuMask = hex,
             // Strict placement without a mask names nothing; treat it as unset.
             cpuStrict = cpuStrict && hex.isNotEmpty(),

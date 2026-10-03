@@ -59,4 +59,18 @@ class TruncationContinuationTest {
         // Better than an empty message beside the thinking rows: it says why there is no answer.
         assertEquals(TRUNCATION_NOTICE, withTruncationNotice("", truncated = true))
     }
+
+    @Test
+    fun `a dropped connection names the connection, not the length limit`() {
+        assertEquals(
+            "Partial\n\n" + INTERRUPTED_NOTICE,
+            withTruncationNotice("Partial", truncated = false, interrupted = true),
+        )
+        assertEquals(INTERRUPTED_NOTICE, withTruncationNotice("", truncated = false, interrupted = true))
+        // A reported length limit is the more specific reason.
+        assertEquals(
+            "Partial\n\n" + TRUNCATION_NOTICE,
+            withTruncationNotice("Partial", truncated = true, interrupted = true),
+        )
+    }
 }

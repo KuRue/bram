@@ -45,6 +45,13 @@ class OpenAiCompatibleRuntime(
     private val activeConnections = ConcurrentHashMap<String, Call>()
 
     /**
+     * Stop flags for requests still inside [generate], set by [cancel]. The call map alone cannot
+     * answer "was this stopped?": between retry attempts no call is live, so a stop landing in the
+     * backoff would cancel nothing and the next attempt would go out anyway.
+     */
+    private val liveRequests = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
+
+    /**
      * One client for the process. `readTimeout` is deliberately zero: OkHttp treats it as no
      * read timeout, and the stall watchdog in the ViewModel is what bounds a silent peer. A
      * non-zero value here would reintroduce the same "hang until the timeout" behaviour the
@@ -96,6 +103,7 @@ class OpenAiCompatibleRuntime(
      */
     override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
         emit(GenerationEvent.Started("Remote: ${endpoint.displayName}/${endpoint.modelName}"))
+        liveRequests[request.requestId] = java.util.concurrent.atomic.AtomicBoolean(false)
         try {
             when (endpoint.apiKind) {
                 RemoteApiKind.CHAT_COMPLETIONS -> streamChat(request, this)
@@ -111,12 +119,18 @@ class OpenAiCompatibleRuntime(
                     cause = error,
                 ),
             )
+        } finally {
+            liveRequests.remove(request.requestId)
         }
     }.flowOn(Dispatchers.IO)
 
     override suspend fun cancel(requestId: String) {
+        liveRequests[requestId]?.set(true)
         activeConnections.remove(requestId)?.cancel()
     }
+
+    private fun isStopped(request: GenerationRequest): Boolean =
+        liveRequests[request.requestId]?.get() == true
 
     /** Chat Completions SSE: `choices[0].delta` fragments per chunk, `data: [DONE]` at the end. */
     private suspend fun streamChat(request: GenerationRequest, out: FlowCollector<GenerationEvent>) {
@@ -130,8 +144,12 @@ class OpenAiCompatibleRuntime(
             val reasoning = StringBuilder()
             val calls = sortedMapOf<Int, ChatToolCallBuilder>()
             var finishReason: String? = null
+            var sawDone = false
             connection.readSseLines { data ->
-                if (data == "[DONE]") return@readSseLines false
+                if (data == "[DONE]") {
+                    sawDone = true
+                    return@readSseLines false
+                }
                 val chunk = runCatching { JSONObject(data) }.getOrNull() ?: return@readSseLines true
                 chunk.optJSONObject("usage")?.let { usage ->
                     out.emit(GenerationEvent.Usage(parseChatUsage(usage)))
@@ -175,7 +193,10 @@ class OpenAiCompatibleRuntime(
                     )
                 }
             }
-            out.emit(GenerationEvent.Finished(finishReason))
+            // Neither an end marker nor a finish reason: the body just stopped. That is a dropped
+            // connection, not a finished reply, and the caller has to be able to say so.
+            val endedCleanly = sawDone || finishReason != null || isStopped(request)
+            out.emit(GenerationEvent.Finished(if (endedCleanly) finishReason else GenerationEvent.Finished.CONNECTION_CLOSED))
         } finally {
             activeConnections.remove(request.requestId)
             connection.close()
@@ -239,7 +260,13 @@ class OpenAiCompatibleRuntime(
                 parsed.usage?.let { out.emit(GenerationEvent.Usage(it)) }
                 out.emit(GenerationEvent.Finished(parsed.finishReason))
             } else {
-                out.emit(GenerationEvent.Finished(null))
+                // The Responses stream always ends with response.completed (or incomplete/failed,
+                // handled above); without it the connection dropped mid-reply.
+                out.emit(
+                    GenerationEvent.Finished(
+                        if (isStopped(request)) null else GenerationEvent.Finished.CONNECTION_CLOSED,
+                    ),
+                )
             }
         } finally {
             activeConnections.remove(request.requestId)
@@ -294,7 +321,21 @@ class OpenAiCompatibleRuntime(
         var attempt = 0
         while (true) {
             attempt++
-            val connection = openConnection(request)
+            if (isStopped(request)) throw RequestStoppedException()
+            // Opening sits inside the retry: OkHttp connects in await(), so a refused connection,
+            // a failed lookup, or a connect timeout is thrown here, not from statusCode below.
+            val connection = try {
+                openConnection(request)
+            } catch (io: java.io.IOException) {
+                // A stop cancels the call, which OkHttp also reports as an IOException. That is the
+                // user's answer, not a hiccup, so it must never be retried.
+                if (isStopped(request)) throw RequestStoppedException()
+                if (attempt <= MAX_ATTEMPTS - 1) {
+                    delay(RETRY_BACKOFF_MILLIS * attempt)
+                    continue
+                }
+                throw RemoteEndpointException(-1, io.message ?: "The endpoint could not be reached", io)
+            }
             try {
                 val status = connection.statusCode
                 if (status in 200..299) return connection
@@ -315,6 +356,7 @@ class OpenAiCompatibleRuntime(
                 }
             } catch (io: java.io.IOException) {
                 connection.close()
+                if (isStopped(request)) throw RequestStoppedException()
                 if (attempt <= MAX_ATTEMPTS - 1) {
                     delay(RETRY_BACKOFF_MILLIS * attempt)
                     continue
@@ -338,6 +380,9 @@ class OpenAiCompatibleRuntime(
         // Registered here rather than by each caller, so the explicit-stop path always has the call
         // that is actually reading the response.
         activeConnections[request.requestId] = call
+        // A stop that landed after the attempt's check but before this registration found no call
+        // to cancel; honour it now instead of sending the request.
+        if (isStopped(request)) call.cancel()
         val response = call.await()
         return OkHttpRemoteResponse(call, response)
     }
@@ -771,6 +816,9 @@ private data class ParsedResponse(
 )
 
 private class EndpointConfigurationException(message: String) : IllegalArgumentException(message)
+
+/** The request was stopped by [OpenAiCompatibleRuntime.cancel]; never retried. */
+private class RequestStoppedException : java.io.IOException("The request was stopped")
 
 private class RemoteEndpointException(
     val statusCode: Int,

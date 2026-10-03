@@ -134,6 +134,7 @@ class ModelProfileStore(context: Context) {
         .put("batchTokens", batchTokens)
         .put("ubatchTokens", ubatchTokens)
         .put("threads", threads)
+        .put("decodeThreads", decodeThreads)
         .put("cpuMask", cpuMask)
         .put("cpuStrict", cpuStrict)
         .put("poll", poll)
@@ -225,6 +226,7 @@ class ModelProfileStore(context: Context) {
             batchTokens = storedBatch,
             ubatchTokens = optInt("ubatchTokens", 0).coerceIn(0, storedBatch),
             threads = optInt("threads", 0).coerceIn(0, 64),
+            decodeThreads = optInt("decodeThreads", 0).coerceIn(0, 64),
             cpuMask = canonicalCpuMask(optString("cpuMask")),
             cpuStrict = optBoolean("cpuStrict") && canonicalCpuMask(optString("cpuMask")).isNotEmpty(),
             poll = optInt("poll", -1).coerceIn(-1, 100),

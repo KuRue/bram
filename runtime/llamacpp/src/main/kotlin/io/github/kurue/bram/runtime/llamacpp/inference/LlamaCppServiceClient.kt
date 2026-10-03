@@ -78,6 +78,29 @@ class LlamaCppServiceClient(context: Context) : Closeable {
     }
 
     /**
+     * Runs one benchmark test on the loaded model ([kind] "pp" or "tg"). Occupies the inference
+     * process and drops the chat's prompt cache; see the native benchmark for what is timed.
+     */
+    suspend fun benchmark(kind: String, n: Int, depth: Int, repetitions: Int): JSONObject =
+        withContext(Dispatchers.IO) {
+            val request = JSONObject()
+                .put("kind", kind)
+                .put("n", n)
+                .put("depth", depth)
+                .put("repetitions", repetitions)
+            JSONObject(requireService().benchmark(request.toString()))
+        }
+
+    /**
+     * Measures DRAM read bandwidth in the inference process. Takes a few seconds and holds the
+     * process, so it waits behind (and blocks) generation like any other native call.
+     */
+    suspend fun memoryBandwidth(bufferMb: Int = 256, passes: Int = 5): JSONObject = withContext(Dispatchers.IO) {
+        val request = JSONObject().put("bufferMb", bufferMb).put("passes", passes)
+        JSONObject(requireService().memoryBandwidth(request.toString()))
+    }
+
+    /**
      * Converts a GGUF to another quant on the device. Long-running: it occupies the inference
      * process for the duration, and the app should show progress while it runs.
      */
@@ -144,6 +167,8 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         streamOverlap: Boolean = false,
         /** Reader-lane count for overlap; 0 lets the native side pick its default. */
         streamOverlapLanes: Int = 0,
+        /** Decode threads, or 0 for the same as [threads]. */
+        decodeThreads: Int = 0,
     ): JSONObject = withContext(Dispatchers.IO) {
         // Normalized before it reaches the service so the load identity compares concrete numbers:
         // "default" must mean the same thing on every request, or every call would force a reload.
@@ -182,6 +207,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
             .put("streamDenseAnon", streamDenseAnon)
             .put("streamOverlap", streamOverlap)
             .put("streamOverlapLanes", streamOverlapLanes)
+            .put("decodeThreads", decodeThreads)
         val result = JSONObject(requireService().load(request.toString()))
         if (result.optBoolean("restartRequired")) {
             android.util.Log.d("BramTune", "restartRequired: restarting the inference process")

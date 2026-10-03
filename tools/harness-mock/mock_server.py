@@ -42,11 +42,14 @@ SCENARIOS = (
     "status_failed",
     "truncated_then_answer",
     "truncated_partial",
+    "tap_own_ui",
 )
 DEFAULT_SCENARIO = "happy_tool_call"
-TOOL_SCENARIOS = ("happy_tool_call", "history_check", "read_file_oversized", "parallel_calls", "malformed_args", "oversized_result")
+TOOL_SCENARIOS = ("happy_tool_call", "history_check", "read_file_oversized", "parallel_calls", "malformed_args", "oversized_result", "tap_own_ui")
 SCENARIO_TOOLS = {
     "read_file_oversized": (READ_FILE_TOOL, READ_FILE_ARGUMENTS),
+    # Asks the agent to press Bram's own permission-mode control, which the screen tools must refuse.
+    "tap_own_ui": ("tap", '{"text":"Ask before tools"}'),
 }
 
 
@@ -428,6 +431,10 @@ def describe_request(path, payload):
 
 def record_request(server, entry):
     with server.request_log_lock:
+        # A sequence number that never repeats, so a test can count "entries after my baseline"
+        # even once the capped log has started dropping its oldest entries.
+        server.request_seq = getattr(server, "request_seq", 0) + 1
+        entry["seq"] = server.request_seq
         server.request_log.append(entry)
         del server.request_log[:-MAX_LOG_ENTRIES]
 

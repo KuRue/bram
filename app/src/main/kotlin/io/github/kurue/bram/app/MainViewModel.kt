@@ -491,6 +491,20 @@ data class AppUiState(
      * somewhere else and the card says so.
      */
     val measurementFingerprint: String = "",
+    /** The device's measured DRAM read bandwidth, the ceiling decode is judged against. */
+    val memoryBandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth? = null,
+    /** True while the bandwidth measurement runs. */
+    val measuringBandwidth: Boolean = false,
+    /** Why the last bandwidth measurement could not run, if it could not. */
+    val bandwidthError: String? = null,
+    /** CPU cluster core counts, most capable first, e.g. [2, 6]. */
+    val cpuClusters: List<Int> = emptyList(),
+    /** The profile a benchmark is running for, or null. */
+    val benchmarkingProfileId: String? = null,
+    /** The live step of a running benchmark ("tg128@4096 (3/3)…"). */
+    val benchmarkStatus: String? = null,
+    /** Every recorded benchmark run, newest first. */
+    val benchRuns: List<io.github.kurue.bram.core.domain.BenchRun> = emptyList(),
     /** A quant conversion in flight, so the card can show which model is being converted. */
     val convertingProfileId: String? = null,
     /** Present while auto-configure runs. The dialog is shown for exactly as long as this is. */
@@ -632,6 +646,14 @@ class MainViewModel(
     private val mutableState = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var conversationId = ConversationId(UUID.randomUUID().toString())
+
+    /**
+     * Set once the user picks a conversation themselves (new chat, or one from the list). The
+     * startup restore reads from disk and lands whenever it lands; after an explicit choice it must
+     * not replace the chosen conversation with the most recent one.
+     */
+    @Volatile
+    private var conversationChosen = false
     private var generationJob: Job? = null
     private val statusPushes = StatusPushLedger()
 
@@ -880,7 +902,10 @@ class MainViewModel(
                 ?: PrivacyClass.STANDARD
             var applied = false
             mutableState.update {
-                if (it.isGenerating || it.messages.isNotEmpty()) {
+                // An empty transcript is not proof nobody chose it: tapping New chat right after
+                // launch leaves it empty too, and adopting the disk copy then would send the
+                // user's first message into the old thread.
+                if (conversationChosen || it.isGenerating || it.messages.isNotEmpty()) {
                     it
                 } else {
                     applied = true
@@ -944,6 +969,7 @@ class MainViewModel(
 
     fun startNewConversation() {
         if (mutableState.value.isGenerating) return
+        conversationChosen = true
         conversationId = container.conversationStore.newId()
         hintedDraftSkills.clear()
         container.approvalGate.setMode(PermissionMode.AUTO)
@@ -966,6 +992,7 @@ class MainViewModel(
 
     fun openConversation(id: String) {
         if (mutableState.value.isGenerating) return
+        conversationChosen = true
         viewModelScope.launch {
             val target = ConversationId(id)
             val messages = runCatching { container.conversationStore.load(target) }.getOrDefault(emptyList())
@@ -1105,7 +1132,226 @@ class MainViewModel(
                     cpuValidated = current.cpuValidated,
                     runtimeBackends = runtimeBackends,
                 ),
+                cpuClusters = io.github.kurue.bram.platform.android.CpuTopology.clusters(),
+                memoryBandwidth = it.memoryBandwidth ?: container.deviceBenchStore.load(),
+                benchRuns = it.benchRuns.ifEmpty { container.benchHistoryStore.runs() },
             )
+        }
+    }
+
+    /**
+     * Runs the standard benchmark pass on a profile and records it in the history.
+     *
+     * Loads the profile exactly as chat would (same backend, threads, batch, KV settings), holds
+     * the turn lock so a message sent meanwhile waits instead of sharing the CPU with the timing,
+     * and samples battery power around each test when the phone is unplugged. Refuses while
+     * anything else is measuring, loading, or generating, and under memory pressure.
+     */
+    fun runBenchmark(profileId: String, sustainedMinutes: Int = 0) {
+        val snapshot = mutableState.value
+        val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
+        if (snapshot.isGenerating || snapshot.isLoadingModel || snapshot.isValidatingAccelerator ||
+            snapshot.tuningProfileId != null || snapshot.batchTuneProfileId != null ||
+            snapshot.benchmarkingProfileId != null || snapshot.measuringBandwidth
+        ) {
+            android.util.Log.w(
+                "BramBench",
+                "benchmark refused: generating=${snapshot.isGenerating} loading=${snapshot.isLoadingModel} " +
+                    "validating=${snapshot.isValidatingAccelerator} busy=${snapshot.benchmarkingProfileId ?: snapshot.tuningProfileId}",
+            )
+            return
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            mutableState.update { it.copy(benchmarkingProfileId = profileId, benchmarkStatus = "Preparing…", error = null) }
+            try {
+                sweepGate()?.let { reason ->
+                    mutableState.update { it.copy(error = reason) }
+                    return@launch
+                }
+                container.turnMutex.withLock {
+                    refreshMeasurementFingerprint()
+                    if (!prepareLocalProfile(profileId)) {
+                        mutableState.update { it.copy(error = "Could not load ${profile.name} to benchmark it.") }
+                        return@withLock
+                    }
+                    mutableState.update { it.copy(benchmarkStatus = "Measuring idle power…") }
+                    val baseline = container.energySampler.baseline()
+                    val runStartTemp = container.energySampler.batteryCelsius()
+                    // Filled from the first test's report: what the runtime actually ran with.
+                    var config = ""
+
+                    // One test: wait for the phone to cool back to where the run began (not in a
+                    // sustained run, whose point is the heat), then time it with power sampling.
+                    suspend fun measureTest(
+                        test: io.github.kurue.bram.core.domain.BenchTest,
+                        step: String,
+                        cool: Boolean,
+                    ): io.github.kurue.bram.core.domain.BenchResult {
+                        val cooldownStart = System.currentTimeMillis()
+                        while (cool && System.currentTimeMillis() - cooldownStart < MAX_BENCH_COOLDOWN_MILLIS) {
+                            val now = container.energySampler.batteryCelsius()
+                            if (io.github.kurue.bram.core.domain.Cooldown.ready(now, runStartTemp)) break
+                            mutableState.update {
+                                it.copy(
+                                    benchmarkStatus = "Cooling (%.1f°C, waiting for %.1f°C)…"
+                                        .format(now ?: 0.0, (runStartTemp ?: 0.0) + 1.0),
+                                )
+                            }
+                            delay(5_000)
+                        }
+                        val cooldownMillis = System.currentTimeMillis() - cooldownStart
+                        mutableState.update { it.copy(benchmarkStatus = step) }
+                        refreshDeviceProfile()
+                        val thermalBefore = mutableState.value.deviceProfile?.thermalStatus.orEmpty()
+                        val tempBefore = container.energySampler.batteryCelsius()
+                        val (json, energy) = container.energySampler.measure(baseline) {
+                            container.llamaCppClient.benchmark(
+                                kind = test.kind.wire,
+                                n = test.tokens,
+                                depth = test.depth,
+                                repetitions = test.repetitions,
+                            )
+                        }
+                        refreshDeviceProfile()
+                        if (config.isEmpty()) {
+                            config = io.github.kurue.bram.core.domain.BenchConfig.label(
+                                backend = resolveLoadBackend(profile.backendId).label,
+                                threads = json.optInt("threads"),
+                                decodeThreads = json.optInt("decodeThreads"),
+                                batch = json.optInt("batchTokens"),
+                                ubatch = json.optInt("ubatchTokens"),
+                            )
+                        }
+                        val rates = json.optJSONArray("tokPerSec")
+                        return io.github.kurue.bram.core.domain.BenchResult(
+                            test = test,
+                            tokPerSec = (0 until (rates?.length() ?: 0)).map { rates!!.getDouble(it) },
+                            skipped = json.optString("skipped").takeIf(String::isNotEmpty),
+                            // A depth test's power window also covers its untimed prefill (minutes
+                            // of prompt processing before a few seconds of decode), so its joules
+                            // cannot be divided by the decode rate. Only single-kind tests keep one.
+                            energy = energy.takeIf { test.depth == 0 },
+                            thermalBefore = thermalBefore,
+                            thermalAfter = mutableState.value.deviceProfile?.thermalStatus.orEmpty(),
+                            batteryTempBefore = tempBefore,
+                            batteryTempAfter = container.energySampler.batteryCelsius(),
+                            cooldownMillis = if (cool) cooldownMillis else 0,
+                        )
+                    }
+
+                    val results = if (sustainedMinutes > 0) {
+                        // Back-to-back decode with no rest: the list is the throttling curve.
+                        val decode = io.github.kurue.bram.core.domain.BenchTest(
+                            io.github.kurue.bram.core.domain.BenchTest.Kind.GENERATION,
+                            tokens = 128,
+                            repetitions = 1,
+                        )
+                        val until = System.currentTimeMillis() + sustainedMinutes * 60_000L
+                        buildList {
+                            while (System.currentTimeMillis() < until) {
+                                val left = (until - System.currentTimeMillis()) / 1_000
+                                add(measureTest(decode, "Sustained decode · ${size + 1} · ${left}s left", cool = false))
+                            }
+                        }
+                    } else {
+                        val plan = io.github.kurue.bram.core.domain.BenchPlan.standard(profile.contextTokens)
+                        plan.mapIndexed { index, test ->
+                            measureTest(test, "${test.label} (${index + 1}/${plan.size})…", cool = true)
+                        }
+                    }
+                    val run = io.github.kurue.bram.core.domain.BenchRun(
+                        id = UUID.randomUUID().toString(),
+                        profileId = profile.id,
+                        profileName = profile.name,
+                        backend = resolveLoadBackend(profile.backendId).label,
+                        startedAtEpochMillis = System.currentTimeMillis(),
+                        fingerprint = mutableState.value.measurementFingerprint,
+                        results = results,
+                        sustained = sustainedMinutes > 0,
+                        config = config,
+                    )
+                    container.benchHistoryStore.add(run)
+                    android.util.Log.i(
+                        "BramBench",
+                        "run ${profile.name} on ${run.backend}" + (if (run.sustained) " sustained" else "") + ": " +
+                            results.joinToString { r ->
+                                "${r.test.label}=${"%.1f".format(r.mean)}±${"%.1f".format(r.stdDev)}" +
+                                    (r.joulesPerToken?.let { " %.3fJ/tok".format(it) } ?: "") +
+                                    (r.batteryTempAfter?.let { " %.1fC".format(it) } ?: "") +
+                                    (if (r.cooldownMillis > 0) " cooled ${r.cooldownMillis / 1000}s" else "") +
+                                    (r.skipped?.let { " skipped" } ?: "")
+                            },
+                    )
+                    mutableState.update { it.copy(benchRuns = container.benchHistoryStore.runs()) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(error = "Benchmark failed: ${error.message ?: error::class.java.simpleName}") }
+            } finally {
+                mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
+            }
+        }
+    }
+
+    /** Debug hook (see MainActivity): benchmark a profile by name once the profile list has loaded. */
+    fun debugBenchmarkByName(name: String, sustained: Boolean) {
+        viewModelScope.launch {
+            repeat(600) {
+                val state = mutableState.value
+                val profile = state.profiles.firstOrNull { it.name == name }
+                // Launch restores the last model, and runBenchmark refuses while anything loads.
+                val idle = !state.isLoadingModel && !state.isGenerating && !state.isValidatingAccelerator
+                if (profile != null && idle) {
+                    android.util.Log.i("BramBench", "debug benchmark requested for $name")
+                    runBenchmark(profile.id, sustainedMinutes = if (sustained) 5 else 0)
+                    return@launch
+                }
+                delay(200)
+            }
+            android.util.Log.w("BramBench", "debug benchmark: no profile named $name")
+        }
+    }
+
+    /** Five minutes of back-to-back decode: the throttling curve a long agent run lives on. */
+    fun runSustainedBenchmark(profileId: String) = runBenchmark(profileId, sustainedMinutes = 5)
+
+    /**
+     * Measures the device's DRAM read bandwidth in the inference process and stores it under the
+     * current measurement fingerprint. Refused mid-turn (the model would share the bus) and under
+     * memory pressure (the buffer would push the system into swapping, and so would the number).
+     */
+    fun measureMemoryBandwidth() {
+        val current = mutableState.value
+        if (current.isGenerating || current.measuringBandwidth) return
+        viewModelScope.launch {
+            mutableState.update { it.copy(measuringBandwidth = true, bandwidthError = null) }
+            try {
+                sweepGate()?.let { reason ->
+                    mutableState.update { it.copy(bandwidthError = reason) }
+                    return@launch
+                }
+                refreshMeasurementFingerprint()
+                val raw = container.llamaCppClient.memoryBandwidth()
+                val result = DeviceBenchStore.fromNativeJson(
+                    raw,
+                    measuredAtEpochMillis = System.currentTimeMillis(),
+                    fingerprint = mutableState.value.measurementFingerprint,
+                )
+                if (result == null) {
+                    mutableState.update { it.copy(bandwidthError = "The measurement returned no usable result.") }
+                } else {
+                    container.deviceBenchStore.save(result)
+                    android.util.Log.i("BramBench", "memory bandwidth ${raw}")
+                    mutableState.update { it.copy(memoryBandwidth = result) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(bandwidthError = error.message ?: error::class.java.simpleName) }
+            } finally {
+                mutableState.update { it.copy(measuringBandwidth = false) }
+            }
         }
     }
 
@@ -2144,6 +2390,9 @@ class MainViewModel(
                 streamCacheMb = profile.streamCacheMb,
                 streamDenseAnon = profile.streamDenseAnon,
                 streamOverlap = profile.streamOverlap,
+                // Only a chat load splits decode from prompt threads: the tuning loads measure one
+                // count at a time, and the CPU reference must not move with this choice.
+                decodeThreads = if (profile.decodeThreads > 0) profile.decodeThreads.coerceIn(1, visibleCores) else 0,
             )
         }
         outcome.onSuccess { result ->
@@ -3457,6 +3706,105 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Benchmarks a LiteRT package on each backend with the engine's own timers, in the same pp512
+     * / tg128 shape as the llama.cpp benchmark, recording one run per backend under the profile id
+     * `litert:<package id>` so the history sits beside the GGUF runs of the same model.
+     *
+     * Cools between repetitions like the llama.cpp benchmark. No energy figure: each pass builds its
+     * own engine (loading the weights and compiling kernels), and a battery window around that
+     * would charge setup to the tokens. A backend that fails is recorded as skipped with the reason
+     * rather than failing the run — "GPU does not work here" is a result.
+     */
+    fun runLiteRtBenchmark(modelId: String) {
+        val snapshot = mutableState.value
+        val record = snapshot.litertlmModels.firstOrNull { it.id.value == modelId } ?: return
+        if (snapshot.isGenerating || snapshot.isLoadingLiteRt || snapshot.benchmarkingProfileId != null) return
+        val benchId = "litert:$modelId"
+        val restore = snapshot.litertlmLoadedId == modelId
+        viewModelScope.launch(Dispatchers.Default) {
+            mutableState.update { it.copy(benchmarkingProfileId = benchId, benchmarkStatus = "Preparing…", error = null) }
+            try {
+                container.turnMutex.withLock {
+                    refreshMeasurementFingerprint()
+                    // A GGUF resident in :inference plus LiteRT's own copy of the weights was
+                    // enough for the low-memory killer to take the app mid-benchmark on the S25
+                    // Ultra (1.5 GB + 1.6 GB). The next chat turn reloads its profile anyway, so
+                    // the llama.cpp model is released for the duration rather than restored.
+                    if (mutableState.value.loadedModelId != null) {
+                        mutableState.update { it.copy(benchmarkStatus = "Freeing memory…") }
+                        unloadModelInternal(forget = false)
+                    }
+                    val startTemp = container.energySampler.batteryCelsius()
+                    for (backend in LiteRtBackend.entries) {
+                        val prompt = mutableListOf<Double>()
+                        val decode = mutableListOf<Double>()
+                        var failure: String? = null
+                        var init = 0.0
+                        for (rep in 1..3) {
+                            val cooldownStart = System.currentTimeMillis()
+                            while (System.currentTimeMillis() - cooldownStart < MAX_BENCH_COOLDOWN_MILLIS &&
+                                !io.github.kurue.bram.core.domain.Cooldown.ready(container.energySampler.batteryCelsius(), startTemp)
+                            ) {
+                                mutableState.update { it.copy(benchmarkStatus = "Cooling before ${backend.label}…") }
+                                delay(5_000)
+                            }
+                            mutableState.update { it.copy(benchmarkStatus = "${backend.label} ($rep/3)…") }
+                            val result = runCatching {
+                                container.liteRtEngineManager.benchmark(record, backend, prefillTokens = 512, decodeTokens = 128)
+                            }.getOrElse { error ->
+                                failure = error.message ?: error::class.java.simpleName
+                                null
+                            } ?: break
+                            android.util.Log.i("BramBench", "litert ${backend.label} rep $rep: $result")
+                            prompt += result.prefillTokPerSec
+                            decode += result.decodeTokPerSec
+                            init = result.initSeconds
+                        }
+                        val pp = io.github.kurue.bram.core.domain.BenchTest(io.github.kurue.bram.core.domain.BenchTest.Kind.PROMPT, 512)
+                        val tg = io.github.kurue.bram.core.domain.BenchTest(io.github.kurue.bram.core.domain.BenchTest.Kind.GENERATION, 128)
+                        val run = io.github.kurue.bram.core.domain.BenchRun(
+                            id = UUID.randomUUID().toString(),
+                            profileId = benchId,
+                            profileName = record.displayName,
+                            backend = backend.label,
+                            startedAtEpochMillis = System.currentTimeMillis(),
+                            fingerprint = mutableState.value.measurementFingerprint,
+                            results = listOf(
+                                io.github.kurue.bram.core.domain.BenchResult(pp, prompt, skipped = failure.takeIf { prompt.isEmpty() }),
+                                io.github.kurue.bram.core.domain.BenchResult(tg, decode, skipped = failure.takeIf { decode.isEmpty() }),
+                            ),
+                            config = backend.label + " · init %.1fs".format(init),
+                        )
+                        container.benchHistoryStore.add(run)
+                        android.util.Log.i(
+                            "BramBench",
+                            "run ${record.displayName} on ${backend.label}: pp512=%.1f tg128=%.1f%s".format(
+                                prompt.average().takeIf { !it.isNaN() } ?: 0.0,
+                                decode.average().takeIf { !it.isNaN() } ?: 0.0,
+                                failure?.let { " failed: $it" }.orEmpty(),
+                            ),
+                        )
+                    }
+                    mutableState.update { it.copy(benchRuns = container.benchHistoryStore.runs()) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(error = "Benchmark failed: ${error.message ?: error::class.java.simpleName}") }
+            } finally {
+                mutableState.update { it.copy(benchmarkingProfileId = null, benchmarkStatus = null) }
+                // The benchmark unloaded the resident engine; put it back if chat was using it.
+                if (restore) {
+                    runCatching { container.liteRtEngineManager.load(record) }
+                        .onFailure { mutableState.update { it.copy(litertlmLoadedId = null, litertlmLoadedBackend = null) } }
+                } else if (container.liteRtEngineManager.loadedRecordId == null && mutableState.value.litertlmLoadedId != null) {
+                    mutableState.update { it.copy(litertlmLoadedId = null, litertlmLoadedBackend = null) }
+                }
+            }
+        }
+    }
+
     /** Unloads the LiteRT engine. The llama.cpp service, if it holds a model, is untouched. */
     fun unloadLiteRt() {
         if (mutableState.value.isGenerating) return
@@ -4221,6 +4569,8 @@ class MainViewModel(
         // answer to show for it is run once more with a nudge to answer directly; a truncated
         // reply that does exist settles with a notice.
         var truncated = false
+        // Set when the connection dropped before the server finished; settles with its own notice.
+        var interrupted = false
         var continuationAttempts = 0
         return try {
             // One run of the agent. A length-limited round with no visible answer starts a second
@@ -4457,6 +4807,7 @@ class MainViewModel(
                                     is AgentEvent.Completed -> {
                                         completedMessage = event.message
                                         truncated = event.truncated
+                                        interrupted = event.interrupted
                                         // Extraction runs in the orchestrator just before Completed, so the new
                                         // memory is already stored — refresh so the browser reflects it live.
                                         refreshMemories()
@@ -4511,6 +4862,7 @@ class MainViewModel(
             ) {
                 continuationAttempts += 1
                 truncated = false
+                interrupted = false
                 // The nudge is a system message, not a user one, so the run's memory extraction
                 // still sees the user's real ask instead of extracting the nudge.
                 val continuationMessages = requestMessages +
@@ -4548,7 +4900,7 @@ class MainViewModel(
                 val (visibleReply, reasoningReply) = resolveReply(rawReply, selection.isLocal, reasoningFormat)
                 // A reply that was cut off at the length limit says so, so a short answer is not
                 // mistaken for a finished one.
-                val replyContent = withTruncationNotice(visibleReply, truncated)
+                val replyContent = withTruncationNotice(visibleReply, truncated, interrupted)
                 // Every block the model opened, including one it never closed.
                 val now = System.currentTimeMillis()
                 val thinkingMillis = thinkingMillisTotal + if (thinkingStartedAt > 0) now - thinkingStartedAt else 0L
@@ -4836,6 +5188,7 @@ class MainViewModel(
         snapshot: AppUiState,
         privacyClass: PrivacyClass,
         preferQuality: Boolean = false,
+        ignoreEndpointHealth: Boolean = false,
     ): List<RuntimeSelection> {
         val assignedTargets = snapshot.routingPool.targetIds
         val assignedLocalModels = snapshot.profiles
@@ -4877,7 +5230,10 @@ class MainViewModel(
                         localModel = null,
                         routingLabel = endpoint.displayName,
                         endpointId = endpoint.id,
-                    ) to RoutingEstimates.remoteCandidate(endpoint, available = EndpointHealth.isReachable(endpoint.id)),
+                    ) to RoutingEstimates.remoteCandidate(
+                        endpoint,
+                        available = ignoreEndpointHealth || EndpointHealth.isReachable(endpoint.id),
+                    ),
                 )
             }
         }
@@ -4914,6 +5270,15 @@ class MainViewModel(
                     candidates.firstOrNull { it.second.model.id == fallback.model.id }?.let { add(it.first) }
                 }
             }
+        }
+        // Health demotes an endpoint; it must not make a turn impossible. When the cooldown has
+        // taken out every runnable candidate — the only endpoint configured, or the one the user
+        // picked — refusing outright answered "No profile is ready" for a full minute after one
+        // failed turn. Trying the endpoint anyway costs one round trip and is what the user asked.
+        if (ordered.isEmpty() && !ignoreEndpointHealth &&
+            snapshot.endpoints.any { !EndpointHealth.isReachable(it.id) }
+        ) {
+            return routeSelection(snapshot, privacyClass, preferQuality, ignoreEndpointHealth = true)
         }
         val label = ordered.firstOrNull()?.routingLabel
         if (label != null) {
@@ -5069,6 +5434,10 @@ private const val PROBE_TOKENS = 4
 private val ALLOWED_SWEEP_THERMAL = setOf("none")
 private const val MIN_SWEEP_RAM_BYTES = 1_500_000_000L
 
+// The longest a benchmark waits for the phone to cool between tests. Past it the test runs anyway
+// and the result records how hot it started, rather than a benchmark that never finishes.
+private const val MAX_BENCH_COOLDOWN_MILLIS = 180_000L
+
 /** llama.cpp clamps this to the model's layer count, so it means "offload everything". */
 private const val FULL_GPU_OFFLOAD = 999
 
@@ -5162,11 +5531,26 @@ internal fun shouldContinueAfterTruncation(
  * A truncated reply with no visible text at all is *only* the note: the alternative is an empty
  * message beside the thinking rows, which says nothing about why there is no answer.
  */
-internal fun withTruncationNotice(visible: String, truncated: Boolean): String = when {
-    !truncated -> visible
-    visible.isBlank() -> TRUNCATION_NOTICE
-    else -> visible + "\n\n" + TRUNCATION_NOTICE
+internal fun withTruncationNotice(
+    visible: String,
+    truncated: Boolean,
+    interrupted: Boolean = false,
+): String {
+    // The length limit is the more specific reason when a server reports both.
+    val notice = when {
+        truncated -> TRUNCATION_NOTICE
+        interrupted -> INTERRUPTED_NOTICE
+        else -> return visible
+    }
+    return if (visible.isBlank()) notice else visible + "\n\n" + notice
 }
+
+/**
+ * The marker for a reply whose connection dropped before the server said it was done. Kept apart
+ * from [TRUNCATION_NOTICE]: blaming the length limit for a network drop would send the user to the
+ * wrong setting.
+ */
+internal const val INTERRUPTED_NOTICE = "…[the connection ended before the reply finished]…"
 
 // How long a turn may go without a non-Status event before it counts as stalled. Five minutes
 // is 3x the slowest observed local reload (~90s) and matches the candidate-benchmark hang

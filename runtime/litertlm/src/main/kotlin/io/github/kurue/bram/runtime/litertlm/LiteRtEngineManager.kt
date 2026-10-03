@@ -83,6 +83,46 @@ class LiteRtEngineManager(context: Context) {
         loadedBackend = record.backend
     }
 
+    /**
+     * One LiteRT-LM benchmark pass on [record]: the engine's own timing of a [prefillTokens]
+     * prefill and a [decodeTokens] decode, the same shape as Bram's llama.cpp pp/tg tests so the
+     * two engines compare directly.
+     *
+     * The benchmark builds its own engine (the kernel cache under this package's cacheDir keeps
+     * the rebuild cheap), so the resident engine is unloaded first rather than holding a second
+     * copy of the weights. Speculative decoding follows the backend exactly as [load] sets it, so
+     * the number is the one chat would get. Blocking; call off the main thread.
+     */
+    @OptIn(ExperimentalApi::class)
+    fun benchmark(
+        record: LiteRtModelRecord,
+        backend: LiteRtBackend,
+        prefillTokens: Int,
+        decodeTokens: Int,
+    ): LiteRtBenchmark {
+        unload()
+        val cacheDir = File(cacheRoot, record.id.value).also(File::mkdirs)
+        ExperimentalFlags.enableSpeculativeDecoding = backend == LiteRtBackend.GPU
+        val info = com.google.ai.edge.litertlm.benchmark(
+            record.localPath,
+            backend.toLiteRt(),
+            prefillTokens,
+            decodeTokens,
+            // cacheDir before prompt: swapped, the engine tried to write its XNNPack weight cache
+            // under a directory named after the prompt text and rebuilt it on every pass.
+            cacheDir.absolutePath,
+            "How are you",
+        )
+        return LiteRtBenchmark(
+            prefillTokens = info.lastPrefillTokenCount,
+            decodeTokens = info.lastDecodeTokenCount,
+            prefillTokPerSec = info.lastPrefillTokensPerSecond,
+            decodeTokPerSec = info.lastDecodeTokensPerSecond,
+            initSeconds = info.initTimeInSecond,
+            timeToFirstTokenSeconds = info.timeToFirstTokenInSecond,
+        )
+    }
+
     /** Tears the engine down. Safe to call when nothing is loaded. */
     fun unload() {
         runCatching { conversationRef.getAndSet(null)?.close() }
@@ -221,3 +261,15 @@ class LiteRtEngineManager(context: Context) {
         LiteRtBackend.GPU -> Backend.GPU()
     }
 }
+
+/** What one LiteRT-LM benchmark pass measured, from the engine's own timers. */
+data class LiteRtBenchmark(
+    /** The token counts the engine actually ran, to confirm the pass had the intended shape. */
+    val prefillTokens: Int,
+    val decodeTokens: Int,
+    val prefillTokPerSec: Double,
+    val decodeTokPerSec: Double,
+    /** Engine creation, including model load and kernel compilation (cached after the first). */
+    val initSeconds: Double,
+    val timeToFirstTokenSeconds: Double,
+)

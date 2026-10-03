@@ -373,7 +373,12 @@ fun BramApp(viewModel: MainViewModel) {
                                 onSaveEndpoint = viewModel::saveEndpoint,
                                 onDiscoverRemoteModels = viewModel::discoverRemoteModels,
                                 onRemoveEndpoint = viewModel::removeEndpoint,
+                                onBenchmarkLiteRt = viewModel::runLiteRtBenchmark,
+                                onUnloadModel = viewModel::unloadModel,
+                                onRemoveLiteRt = viewModel::removeLiteRt,
                                 onAutoConfigure = viewModel::autoConfigure,
+                                onBenchmark = { id -> viewModel.runBenchmark(id) },
+                                onSustainedBenchmark = viewModel::runSustainedBenchmark,
                                 onTuneBatch = viewModel::tuneBatch,
                                 onTuneDimension = viewModel::tuneDimension,
                                 tuningDimension = state.tuningDimension,
@@ -446,6 +451,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onBack = { panel = AppPanel.SETTINGS },
                                 onRefreshDiagnostics = viewModel::refreshDeviceProfile,
+                                onMeasureBandwidth = viewModel::measureMemoryBandwidth,
                             )
                             AppPanel.SESSION -> SessionScreen(
                                 state = state,
@@ -976,6 +982,25 @@ private fun ChatTranscript(
                 onEdit = { text -> onEdit(message.id.value, text) },
             )
         }
+        // A turn whose process died (the app killed mid-turn by the system, an update, or a
+        // crash) leaves the prompt saved with nothing after it, and the chat used to just sit
+        // there. Nothing is running, no error explains it, and the user spoke last: say so and
+        // offer the retry that already exists.
+        val unanswered = !state.isGenerating && state.error == null && state.pendingApproval == null &&
+            state.queuedMessages.isEmpty() && visibleMessages.lastOrNull()?.role == MessageRole.USER
+        if (unanswered) {
+            item(key = "unanswered") {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("unanswered-turn")) {
+                    Text(
+                        "No reply — Bram was closed before it answered.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onRegenerate) { Text("Retry") }
+                }
+            }
+        }
         state.pendingApproval?.let { pending ->
             item(key = "approval") {
                 ToolApprovalCard(pending, onResolve = onResolveApproval)
@@ -1174,11 +1199,16 @@ private fun ModelsScreen(
     onSaveEndpoint: (EndpointDraft) -> Unit,
     onDiscoverRemoteModels: (EndpointDraft) -> Unit,
     onRemoveEndpoint: (String) -> Unit,
+    onBenchmarkLiteRt: (String) -> Unit = {},
+    onUnloadModel: () -> Unit = {},
+    onRemoveLiteRt: (String) -> Unit = {},
     onAutoConfigure: (String) -> Unit,
     onTuneBatch: (String) -> Unit,
     onTuneDimension: (String, TuningDimension) -> Unit,
     /** The dimension being measured right now, so its row can say "Tuning…". */
     tuningDimension: TuningDimension?,
+    onBenchmark: (String) -> Unit = {},
+    onSustainedBenchmark: (String) -> Unit = {},
     /** Starts a quant conversion for a profile's file. */
     onConvertQuant: (String, String) -> Unit,
     sheetReadyToScroll: Boolean,
@@ -1282,9 +1312,17 @@ private fun ModelsScreen(
                     onDeleteProfile = { onDeleteProfile(profile.id) },
                     onDuplicate = { onCreateProfile(model) },
                     onAutoConfigure = { onAutoConfigure(profile.id) },
+                    onBenchmark = { onBenchmark(profile.id) },
+                    onSustainedBenchmark = { onSustainedBenchmark(profile.id) },
+                    onUnload = onUnloadModel,
+                    benchmarking = state.benchmarkingProfileId == profile.id,
+                    benchmarkStatus = state.benchmarkStatus.takeIf { state.benchmarkingProfileId == profile.id },
+                    benchRuns = state.benchRuns.filter { it.profileId == profile.id },
+                    currentFingerprint = state.measurementFingerprint,
                     onTuneBatch = { onTuneBatch(profile.id) },
                     onTuneDimension = { dimension -> onTuneDimension(profile.id, dimension) },
                     tuningDimension = tuningDimension,
+                    memoryBandwidth = state.memoryBandwidth,
                     staleMeasurement = state.measurementFingerprint.isNotBlank() &&
                         profile.measuredFingerprint.isNotBlank() &&
                         profile.measuredFingerprint != state.measurementFingerprint,
@@ -1292,6 +1330,19 @@ private fun ModelsScreen(
                     onConvertQuant = { target -> onConvertQuant(profile.id, target) },
                 )
             }
+        }
+        items(state.litertlmModels, key = { "litert:${it.id.value}" }) { record ->
+            LiteRtModelCard(
+                record = record,
+                loaded = state.litertlmLoadedId == record.id.value,
+                benchmarking = state.benchmarkingProfileId == "litert:${record.id.value}",
+                benchmarkStatus = state.benchmarkStatus,
+                busy = state.isGenerating || state.benchmarkingProfileId != null,
+                runs = state.benchRuns.filter { it.profileId == "litert:${record.id.value}" },
+                currentFingerprint = state.measurementFingerprint,
+                onBenchmark = { onBenchmarkLiteRt(record.id.value) },
+                onRemove = { onRemoveLiteRt(record.id.value) },
+            )
         }
         items(state.endpoints, key = { "remote:${it.id}" }) { endpoint ->
             EndpointCard(
@@ -1723,12 +1774,24 @@ private fun ProfileCard(
     onDeleteProfile: () -> Unit,
     onDuplicate: () -> Unit,
     onAutoConfigure: () -> Unit,
+    onBenchmark: () -> Unit = {},
+    onSustainedBenchmark: () -> Unit = {},
+    /** Releases the loaded model, which is what unlocks its load-time settings. */
+    onUnload: () -> Unit = {},
+    /** True while this profile's benchmark runs; [benchmarkStatus] is its live step. */
+    benchmarking: Boolean = false,
+    benchmarkStatus: String? = null,
+    /** This profile's recorded runs, newest first. */
+    benchRuns: List<io.github.kurue.bram.core.domain.BenchRun> = emptyList(),
+    currentFingerprint: String = "",
     onTuneBatch: () -> Unit,
     onTuneDimension: (TuningDimension) -> Unit,
     /** The dimension being measured right now, so its row can say "Tuning…". */
     tuningDimension: TuningDimension?,
     /** True when the profile's measurements were recorded under a different device/build. */
     staleMeasurement: Boolean = false,
+    /** The device's measured bandwidth, for the decode-ceiling pill; null when not measured. */
+    memoryBandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth? = null,
     /** A quant conversion of this profile's file in flight. */
     converting: Boolean = false,
     /** Starts a quant conversion of this profile's file to the given ggml type ("q4_0"). */
@@ -1838,6 +1901,7 @@ private fun ProfileCard(
                         )
                     }
                     ProfilePerformancePill(profile)
+                    ProfileCeilingPill(profile, model, memoryBandwidth)
                 }
             }
 
@@ -1884,9 +1948,49 @@ private fun ProfileCard(
                 // The pills above are the argument for this button: re-measuring is how the choice
                 // of backend changes, and the manual controls sit behind an expander so the card
                 // stays short until someone actually wants to turn a dial.
+                // Load-time settings (backend, context, threads…) are locked while this profile is
+                // the loaded one. There was no way out short of loading another model, so say why
+                // and offer the way.
+                if (loaded && !loading) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Loaded — unload to change backend, context, or threads.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = onUnload,
+                            enabled = !busy,
+                            modifier = Modifier.testTag("unload-profile"),
+                        ) { Text("Unload") }
+                    }
+                }
                 Button(onClick = onAutoConfigure, enabled = !measuring, modifier = Modifier.fillMaxWidth()) {
                     Text("Auto-configure")
                 }
+                // Measures the configuration as it stands, rather than choosing one: the numbers
+                // chat will actually get, kept as a history so a change can be compared.
+                if (benchmarking) {
+                    OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth()) {
+                        Text(benchmarkStatus ?: "Benchmarking…")
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = onBenchmark,
+                            enabled = !measuring,
+                            modifier = Modifier.weight(1f).testTag("benchmark-profile"),
+                        ) { Text("Benchmark") }
+                        // Back-to-back decode for five minutes: the speed a long run settles at.
+                        OutlinedButton(
+                            onClick = onSustainedBenchmark,
+                            enabled = !measuring,
+                            modifier = Modifier.weight(1f).testTag("benchmark-sustained"),
+                        ) { Text("Sustained 5 min") }
+                    }
+                }
+                BenchRunSummary(benchRuns, currentFingerprint, model, memoryBandwidth)
 
                 Row(
                     Modifier
@@ -2132,6 +2236,23 @@ private fun ProfileCard(
                         onDefault = { onUpdateProfile(profile.copy(threads = 0)) },
                         onTune = { onTuneDimension(TuningDimension.THREADS) },
                     )
+                    // Decode can use fewer threads than prompt processing: it stops gaining sooner,
+                    // so extra threads there mostly cost energy. Benchmark to compare.
+                    SectionLabel("Decode threads")
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        val cores = Runtime.getRuntime().availableProcessors()
+                        (listOf(0) + listOf(2, 3, 4, 5, 6, 8).filter { it <= cores }).forEach { count ->
+                            FilterChip(
+                                selected = profile.decodeThreads == count,
+                                onClick = { onUpdateProfile(profile.copy(decodeThreads = count)) },
+                                enabled = !locked,
+                                label = { Text(if (count == 0) "Same" else "$count") },
+                            )
+                        }
+                    }
                     TuningDimensionRow(
                         label = "CPU mask",
                         isDefault = profile.cpuMask.isEmpty(),
@@ -2382,6 +2503,164 @@ private fun ProfilePerformancePill(profile: ModelProfile) {
         "${measurement.label} ${measurement.promptTokPerSec.toInt()}/${measurement.decodeTokPerSec.toInt()}",
         emphasized = true,
     )
+}
+
+/**
+ * A LiteRT-LM package. These were importable and routable but never listed, so there was no way to
+ * see one, compare it, or remove it. The benchmark measures it on CPU and GPU with the engine's own
+ * timers, one history run per backend, in the same pp512/tg128 shape as the GGUF profiles.
+ */
+@Composable
+private fun LiteRtModelCard(
+    record: io.github.kurue.bram.core.domain.LiteRtModelRecord,
+    loaded: Boolean,
+    benchmarking: Boolean,
+    benchmarkStatus: String?,
+    busy: Boolean,
+    runs: List<io.github.kurue.bram.core.domain.BenchRun>,
+    currentFingerprint: String,
+    onBenchmark: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    GlassSurface(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(record.displayName, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "LiteRT-LM · ${record.backend.label} · ${formatBytes(record.fileSizeBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (loaded) {
+                    Text("● In use", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            OutlinedButton(
+                onClick = onBenchmark,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().testTag("benchmark-litert"),
+            ) { Text(if (benchmarking) benchmarkStatus ?: "Benchmarking…" else "Benchmark CPU and GPU") }
+            // One summary per backend: the latest run of each.
+            io.github.kurue.bram.core.domain.LiteRtBackend.entries.forEach { backend ->
+                val latest = runs.firstOrNull { it.backend == backend.label } ?: return@forEach
+                val stale = currentFingerprint.isNotBlank() && latest.fingerprint.isNotBlank() && latest.fingerprint != currentFingerprint
+                Text(
+                    latest.config.ifBlank { backend.label } + if (stale) " · from another build" else "",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                latest.results.forEach { result ->
+                    val failure = result.skipped
+                    if (failure == null) {
+                        MetricRow(result.test.label, "%.1f ± %.1f tok/s".format(result.mean, result.stdDev))
+                    } else {
+                        // A failure reason is long; in the value column it squeezed the label
+                        // into one character per line.
+                        Text(
+                            "${result.test.label}: failed — ${failure.take(160)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            }
+            TextButton(onClick = onRemove, enabled = !busy && !loaded) { Text("Remove") }
+        }
+    }
+}
+
+/**
+ * The latest benchmark run for a profile, one row per test, with the previous comparable run's
+ * number beside it so a change reads as a change. Energy shows only when the run was on battery,
+ * and decode rows show their share of the bandwidth ceiling for dense models.
+ */
+@Composable
+private fun BenchRunSummary(
+    runs: List<io.github.kurue.bram.core.domain.BenchRun>,
+    currentFingerprint: String,
+    model: LocalModelRecord,
+    bandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth?,
+) {
+    val standard = runs.filter { !it.sustained }
+    val sustained = runs.firstOrNull { it.sustained }
+    val latest = standard.firstOrNull()
+    // Only a run from the same device and build is a fair "before". A different configuration is
+    // still shown, but named, so a threads change is not read as a regression or a speedup.
+    val previous = latest?.let { l -> standard.drop(1).firstOrNull { it.fingerprint == l.fingerprint } }
+    val previousDiffers = previous != null && latest != null && previous.config != latest.config
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        sustained?.let { run ->
+            val rates = run.results.filter { it.skipped == null && it.mean > 0.0 }
+            val first = rates.firstOrNull()
+            val last = rates.lastOrNull()
+            if (first != null && last != null) {
+                val temps = listOfNotNull(first.batteryTempBefore, last.batteryTempAfter)
+                MetricRow(
+                    "Sustained",
+                    "%.1f → %.1f tok/s".format(first.mean, last.mean) +
+                        (run.sustainedDrop?.let { " (−%.0f%%)".format(it * 100) } ?: "") +
+                        if (temps.size == 2) " · %.0f→%.0f°C".format(temps[0], temps[1]) else "",
+                )
+            }
+        }
+        if (latest == null) return@Column
+        val stale = currentFingerprint.isNotBlank() && latest.fingerprint.isNotBlank() && latest.fingerprint != currentFingerprint
+        Text(
+            "Benchmark · " + latest.config.ifBlank { latest.backend } + if (stale) " · from another build" else "",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        latest.results.forEach { result ->
+            val before = previous?.results?.firstOrNull { it.test == result.test && it.skipped == null }
+            val value = when {
+                result.skipped != null -> "skipped"
+                else -> buildString {
+                    append("%.1f ± %.1f tok/s".format(result.mean, result.stdDev))
+                    before?.let {
+                        append(" (was %.1f".format(it.mean))
+                        if (previousDiffers) previous?.config?.takeIf(String::isNotBlank)?.let { c -> append(" at $c") }
+                        append(")")
+                    }
+                    if (result.test.kind == io.github.kurue.bram.core.domain.BenchTest.Kind.GENERATION && bandwidth != null &&
+                        io.github.kurue.bram.core.domain.MemoryCeiling.appliesTo(model.architecture)
+                    ) {
+                        io.github.kurue.bram.core.domain.MemoryCeiling
+                            .forDenseModel(model.fileSizeBytes, result.mean, bandwidth)
+                            ?.let { append(" · %.0f%%".format(it.share * 100)) }
+                    }
+                    result.joulesPerToken?.let { append(" · %.2f J/tok".format(it)) }
+                }
+            }
+            MetricRow(result.test.label, value)
+        }
+    }
+}
+
+/**
+ * How close the chosen backend's decode comes to the device's bandwidth ceiling, e.g. "62% of
+ * ceiling". Shown only for dense models with a measured decode and a measured bandwidth: a MoE
+ * reads only its active experts per token, so the file-size ceiling would mislead.
+ */
+@Composable
+private fun ProfileCeilingPill(
+    profile: ModelProfile,
+    model: LocalModelRecord,
+    bandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth?,
+) {
+    bandwidth ?: return
+    if (!io.github.kurue.bram.core.domain.MemoryCeiling.appliesTo(model.architecture)) return
+    val chosenId = profile.backendId.ifBlank { "" }
+    val measurement = profile.measurements.firstOrNull { it.backendId == chosenId }
+        ?: profile.measurements.firstOrNull { it.isReference && chosenId.isBlank() }
+        ?: return
+    val ceiling = io.github.kurue.bram.core.domain.MemoryCeiling.forDenseModel(
+        weightBytes = model.fileSizeBytes,
+        decodeTokPerSec = measurement.decodeTokPerSec,
+        bandwidth = bandwidth,
+    ) ?: return
+    ProfilePill("%.0f%% of %.0f tok/s ceiling".format(ceiling.share * 100, ceiling.ceilingTokPerSec))
 }
 
 /**
@@ -3680,7 +3959,12 @@ private fun MemoriesScreen(
 }
 
 @Composable
-private fun SystemScreen(state: AppUiState, onBack: () -> Unit, onRefreshDiagnostics: () -> Unit) {
+private fun SystemScreen(
+    state: AppUiState,
+    onBack: () -> Unit,
+    onRefreshDiagnostics: () -> Unit,
+    onMeasureBandwidth: () -> Unit = {},
+) {
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
             .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
@@ -3693,7 +3977,7 @@ private fun SystemScreen(state: AppUiState, onBack: () -> Unit, onRefreshDiagnos
             TextButton(onClick = onRefreshDiagnostics) { Text("Refresh") }
         }
         state.deviceProfile?.let { profile ->
-            DeviceSummaryCard(profile)
+            DeviceSummaryCard(profile, state, onMeasureBandwidth)
         } ?: CircularProgressIndicator()
         SectionHeader("Agent foundation")
         GlassSurface(Modifier.fillMaxWidth()) {
@@ -4003,10 +4287,13 @@ private fun ToolApprovalCard(
                     modifier = Modifier.testTag("approval-for-run"),
                     onClick = { onResolve(ToolApprovalDecision.ALLOW_FOR_RUN) },
                 ) { Text("For this run") }
-                TextButton(
-                    modifier = Modifier.testTag("approval-always"),
-                    onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
-                ) { Text("Always") }
+                // Not offered when it would be a blanket grant on a scoped tool (a tap at a point).
+                if (pending.canAllowAlways) {
+                    TextButton(
+                        modifier = Modifier.testTag("approval-always"),
+                        onClick = { onResolve(ToolApprovalDecision.ALLOW_ALWAYS) },
+                    ) { Text("Always") }
+                }
             }
             TextButton(
                 modifier = Modifier.testTag("approval-details"),
@@ -4014,7 +4301,11 @@ private fun ToolApprovalCard(
             ) { Text(if (showDetails) "Hide details" else "Show details") }
             if (showDetails) {
                 Text(
-                    "Always would allow ${pending.scopeLabel}.",
+                    if (pending.canAllowAlways) {
+                        "Always would allow ${pending.scopeLabel}."
+                    } else {
+                        "This call names no specific target, so it can only be allowed once or for this run."
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -4154,7 +4445,11 @@ private fun activityTarget(entry: AgentActivity): String {
 }
 
 @Composable
-private fun DeviceSummaryCard(profile: DeviceProfile) {
+private fun DeviceSummaryCard(
+    profile: DeviceProfile,
+    state: AppUiState,
+    onMeasureBandwidth: () -> Unit,
+) {
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Text("${profile.manufacturer} ${profile.model}", style = MaterialTheme.typography.titleMedium)
@@ -4162,9 +4457,44 @@ private fun DeviceSummaryCard(profile: DeviceProfile) {
             HorizontalDivider()
             MetricRow("RAM available", "${formatBytes(profile.availableRamBytes)} / ${formatBytes(profile.totalRamBytes)}")
             MetricRow("Storage free", "${formatBytes(profile.freeStorageBytes)} / ${formatBytes(profile.totalStorageBytes)}")
-            MetricRow("CPU", "${profile.cpuCoreCount} cores · ${profile.appAbi}")
+            // Cluster shape (most capable first) is what threads and masks get tuned against.
+            val clusters = state.cpuClusters.takeIf { it.size > 1 }?.joinToString("+", prefix = " (", postfix = ")").orEmpty()
+            MetricRow("CPU", "${profile.cpuCoreCount} cores$clusters · ${profile.appAbi}")
             MetricRow("Thermals", profile.thermalStatus)
+            HorizontalDivider()
+            MemoryBandwidthRow(state, onMeasureBandwidth)
         }
+    }
+}
+
+/**
+ * The measured DRAM read bandwidth: the ceiling every dense model's decode speed is judged
+ * against. Stale once the device or build changes, and says so instead of quietly trusting it.
+ */
+@Composable
+private fun MemoryBandwidthRow(state: AppUiState, onMeasure: () -> Unit) {
+    val bandwidth = state.memoryBandwidth
+    val stale = bandwidth != null && state.measurementFingerprint.isNotBlank() &&
+        bandwidth.fingerprint.isNotBlank() && bandwidth.fingerprint != state.measurementFingerprint
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Memory bandwidth", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val detail = when {
+                state.measuringBandwidth -> "Measuring…"
+                bandwidth == null -> "Not measured — the ceiling for decode speed"
+                else -> "%.1f GB/s peak at %d threads".format(bandwidth.peakGbPerSecond, bandwidth.peakThreads) +
+                    if (stale) " · measured on another build, re-measure" else ""
+            }
+            Text(detail, fontWeight = FontWeight.Medium)
+            state.bandwidthError?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+        }
+        TextButton(
+            onClick = onMeasure,
+            enabled = !state.measuringBandwidth && !state.isGenerating,
+            modifier = Modifier.testTag("measure-bandwidth"),
+        ) { Text(if (bandwidth == null) "Measure" else "Re-measure") }
     }
 }
 

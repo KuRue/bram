@@ -24,6 +24,10 @@ set(GGML_RPC OFF CACHE BOOL "" FORCE)
 # the ones Bram wants are added below with their own -march after llama.cpp is fetched.
 if(ANDROID_ABI STREQUAL "arm64-v8a")
     set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+    # fp16 arithmetic + dotprod for all of ggml-cpu (attention, f16/q8_0 KV): Qwen3-4B decode at a
+    # 4K context 2.6 -> 7.0 tok/s on the S25 Ultra. Devices without them are refused before the
+    # library loads (CpuRequirements), rather than crashing on SIGILL.
+    set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "" FORCE)
 endif()
 
 # Adreno acceleration for Milestone 2. The Vulkan backend is validated against the CPU
@@ -348,7 +352,7 @@ if(TARGET ggml-cpu AND ANDROID_ABI STREQUAL "arm64-v8a")
     endif()
 endif()
 
-add_library(bram_llama SHARED bram_llama_jni.cpp expert_stream.cpp)
+add_library(bram_llama SHARED bram_llama_jni.cpp expert_stream.cpp mem_bench.cpp)
 target_compile_features(bram_llama PRIVATE cxx_std_17)
 # The expert-ready hook was injected into ggml-cpu above, so the streamer's overlap path may use it.
 target_compile_definitions(bram_llama PRIVATE BMOE_HAVE_EXPERT_READY_HOOK BMOE_HAVE_EXPERT_BATCH_HOOK)

@@ -222,6 +222,29 @@ class InteractiveApprovalGateTest {
     }
 
     @Test
+    fun `a scoped tool called without a target cannot be always-allowed`() = runTest {
+        // A tap at a point has no text or id to scope by, so "always" would cover every tap.
+        val permissions = FakePermissions()
+        val gate = InteractiveApprovalGate(permissions)
+        val tap = tool(name = "tap", scopeKeys = listOf("text", "id"))
+
+        val first = async { gate.decide(tap, """{"x":10,"y":20}""") }
+        yield()
+        val request = gate.pending.value
+        assertNotNull(request)
+        assertTrue("the card must not offer it", !request!!.canAllowAlways)
+        // A stale notification action can still send it; it allows this call only.
+        request.resolve(ToolApprovalDecision.ALLOW_ALWAYS)
+        assertEquals(ToolApprovalDecision.ALLOW_ONCE, first.await())
+        assertTrue("nothing may be remembered", permissions.allowed.isEmpty())
+
+        // With a target, the scoped grant is still offered.
+        assertTrue(InteractiveApprovalGate.canAllowAlways(tap, """{"text":"Send"}"""))
+        // A tool with no scope keys was always tool-wide by design.
+        assertTrue(InteractiveApprovalGate.canAllowAlways(tool(), "{}"))
+    }
+
+    @Test
     fun `a refusal is not remembered`() = runTest {
         // "Not now" is about one call in one moment. Remembering it would quietly make a tool
         // permanently unusable with nothing on screen saying so.
