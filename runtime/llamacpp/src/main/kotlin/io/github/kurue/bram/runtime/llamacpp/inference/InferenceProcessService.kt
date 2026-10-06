@@ -18,7 +18,11 @@ class InferenceProcessService : Service() {
         Thread(task, "bram-local-inference").apply { priority = Thread.NORM_PRIORITY }
     }
     private val requests = ConcurrentHashMap<String, Future<*>>()
-    private val bridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    /**
+     * The native library, loaded once and remembered either way. See [NativeBackend] and, for why
+     * every binder entry point below asks it through [nativeBridge], [NativeBackendUnavailable].
+     */
+    private val backend = NativeBackend(android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty()) {
         // The Hexagon NPU loader resolves its DSP-side skels through ADSP_LIBRARY_PATH, and reads
         // it when the backend initialises, so it has to be set before the native library loads.
         runCatching {
@@ -44,69 +48,99 @@ class InferenceProcessService : Service() {
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
-        override fun probe(): String = runSerialized {
-            JSONObject(bridge.probe())
-                .put("protocolVersion", PROTOCOL_VERSION)
-                .put("process", ":inference")
-                .put("llamaCppCommit", BuildConfig.LLAMA_CPP_COMMIT)
-                .toString()
+        override fun probe(): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized {
+                JSONObject(bridge.probe())
+                    .put("protocolVersion", PROTOCOL_VERSION)
+                    .put("process", ":inference")
+                    .put("llamaCppCommit", BuildConfig.LLAMA_CPP_COMMIT)
+                    .toString()
+            }
         }
 
-        override fun devices(): String = runSerialized { bridge.devices() }
+        override fun devices(): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized { bridge.devices() }
+        }
 
-        override fun benchmark(requestJson: String?): String = runSerialized {
-            val request = JSONObject(requestJson.orEmpty())
-            bridge.benchmark(
-                if (request.optString("kind") == "tg") 1 else 0,
-                request.optInt("n", 128).coerceIn(1, 8_192),
-                request.optInt("depth", 0).coerceIn(0, 1_048_576),
-                request.optInt("repetitions", 3).coerceIn(1, 20),
-            )
+        override fun benchmark(requestJson: String?): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized {
+                val request = JSONObject(requestJson.orEmpty())
+                bridge.benchmark(
+                    if (request.optString("kind") == "tg") 1 else 0,
+                    request.optInt("n", 128).coerceIn(1, 8_192),
+                    request.optInt("depth", 0).coerceIn(0, 1_048_576),
+                    request.optInt("repetitions", 3).coerceIn(1, 20),
+                )
+            }
         }
 
         // Serialized like everything else: a model decoding at the same time would share the
         // memory bus and halve the number.
-        override fun memoryBandwidth(requestJson: String?): String = runSerialized {
-            val request = JSONObject(requestJson.orEmpty())
-            bridge.memoryBandwidth(
-                request.optInt("bufferMb", 256).coerceIn(16, 1024),
-                request.optInt("maxThreads", Runtime.getRuntime().availableProcessors()).coerceIn(1, 64),
-                request.optInt("passes", 5).coerceIn(1, 20),
-            )
+        override fun memoryBandwidth(requestJson: String?): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized {
+                val request = JSONObject(requestJson.orEmpty())
+                bridge.memoryBandwidth(
+                    request.optInt("bufferMb", 256).coerceIn(16, 1024),
+                    request.optInt("maxThreads", Runtime.getRuntime().availableProcessors()).coerceIn(1, 64),
+                    request.optInt("passes", 5).coerceIn(1, 20),
+                )
+            }
         }
 
-        override fun quantize(requestJson: String?): String = runSerialized {
-            val request = JSONObject(requestJson.orEmpty())
-            bridge.quantize(
-                request.getString("modelPath"),
-                request.getString("outPath"),
-                request.getString("ftype"),
-            )
+        override fun quantize(requestJson: String?): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized {
+                val request = JSONObject(requestJson.orEmpty())
+                bridge.quantize(
+                    request.getString("modelPath"),
+                    request.getString("outPath"),
+                    request.getString("ftype"),
+                )
+            }
         }
 
-        override fun referenceDecode(tokenCount: Int, padTokens: Int): String = runSerialized {
-            bridge.referenceDecode(tokenCount, padTokens)
+        override fun referenceDecode(tokenCount: Int, padTokens: Int): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized { bridge.referenceDecode(tokenCount, padTokens) }
         }
 
-        override fun teacherForced(forcedTokens: IntArray?, padTokens: Int): String = runSerialized {
-            bridge.teacherForced(forcedTokens ?: IntArray(0), padTokens)
+        override fun teacherForced(forcedTokens: IntArray?, padTokens: Int): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized { bridge.teacherForced(forcedTokens ?: IntArray(0), padTokens) }
         }
 
-        override fun parseReply(reply: String?): String = runSerialized {
-            bridge.parseReply(reply.orEmpty())
+        override fun parseReply(reply: String?): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized { bridge.parseReply(reply.orEmpty()) }
         }
 
-        override fun load(requestJson: String): String = runSerialized {
-            loadModel(JSONObject(requestJson))
+        override fun load(requestJson: String): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized { loadModel(bridge, JSONObject(requestJson)) }
         }
 
-        override fun countTokens(requestJson: String): Int = runSerialized {
-            // Counting is about the conversation, not about what tools a later run might offer.
-            val prompt = formatPrompt(JSONObject(requestJson).getJSONArray("messages"), "")
-            bridge.countTokens(prompt)
+        override fun countTokens(requestJson: String): Int {
+            // Zero rather than a throw: counting is what the context budget asks, and a turn that
+            // cannot be counted is still worth running.
+            val bridge = nativeBridge() ?: return 0
+            return runSerialized {
+                // Counting is about the conversation, not about what tools a later run might offer.
+                val prompt = formatPrompt(bridge, JSONObject(requestJson).getJSONArray("messages"), "")
+                bridge.countTokens(prompt)
+            }
         }
 
         override fun generate(requestId: String, requestJson: String, callback: IInferenceCallback) {
+            // A one-way callback cannot be handed an exception, so the absence is answered in kind.
+            val bridge = nativeBridge()
+            if (bridge == null) {
+                emit(callback, requestId, backend.unavailableEvent())
+                return
+            }
             bridge.cancel()
             requests.remove(requestId)?.cancel(true)
             requests[requestId] = executor.submit {
@@ -114,6 +148,7 @@ class InferenceProcessService : Service() {
                     check(loaded != null) { "Load a local model before generating" }
                     val request = JSONObject(requestJson)
                     val prompt = formatPrompt(
+                        bridge,
                         request.getJSONArray("messages"),
                         request.optJSONArray("tools")?.toString().orEmpty(),
                     )
@@ -177,6 +212,7 @@ class InferenceProcessService : Service() {
                             JSONObject().put("type", "status").put("text", "Asking for that as a tool call..."),
                         )
                         val retryPrompt = formatPrompt(
+                            bridge,
                             request.getJSONArray("messages"),
                             toolsJson,
                             requireTool = true,
@@ -273,41 +309,60 @@ class InferenceProcessService : Service() {
         }
 
         override fun cancel(requestId: String) {
+            // Nothing to cancel without a library, and asking would only throw.
+            val bridge = nativeBridge() ?: return
             bridge.cancel()
             requests.remove(requestId)?.cancel(true)
         }
 
-        override fun unload(): String = runSerialized { unloadModel() }
+        override fun unload(): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized { unloadModel(bridge) }
+        }
 
-        override fun state(): String = runSerialized {
-            JSONObject(bridge.state())
-                .put("protocolVersion", PROTOCOL_VERSION)
-                .put("loadedModelId", loaded?.modelId)
-                .put("contextTokens", loaded?.contextTokens ?: 0)
-                .put("cpuValidated", cpuValidated)
-                .toString()
+        override fun state(): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized {
+                JSONObject(bridge.state())
+                    .put("protocolVersion", PROTOCOL_VERSION)
+                    .put("loadedModelId", loaded?.modelId)
+                    .put("contextTokens", loaded?.contextTokens ?: 0)
+                    .put("cpuValidated", cpuValidated)
+                    .toString()
+            }
         }
 
         // The embedder has its own model+context and native mutex, so these run on the Binder
         // thread directly rather than the single-thread chat executor — an embedding must not
         // queue behind a turn, and a turn must not queue behind an embedding.
-        override fun loadEmbedder(modelPath: String?, threads: Int): String =
-            bridge.loadEmbedder(modelPath.orEmpty(), threads)
-
-        override fun embed(text: String?): FloatArray = try {
-            bridge.embed(text.orEmpty())
-        } catch (error: Throwable) {
-            android.util.Log.d("BramEmbed", "native embed threw ${error::class.simpleName}: ${error.message}")
-            throw error
+        override fun loadEmbedder(modelPath: String?, threads: Int): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return bridge.loadEmbedder(modelPath.orEmpty(), threads)
         }
 
-        override fun unloadEmbedder(): String = bridge.unloadEmbedder()
+        // Empty, not a zero vector: the client reads an empty result as "no embedding at all" and
+        // falls back to keyword recall, which is the honest answer without a library.
+        override fun embed(text: String?): FloatArray {
+            val bridge = nativeBridge() ?: return FloatArray(0)
+            return try {
+                bridge.embed(text.orEmpty())
+            } catch (error: Throwable) {
+                android.util.Log.d("BramEmbed", "native embed threw ${error::class.simpleName}: ${error.message}")
+                throw error
+            }
+        }
+
+        override fun unloadEmbedder(): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return bridge.unloadEmbedder()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
-        bridge.cancel()
+        // The teardown must not become the crash: a library that will not load throws here too.
+        runCatching { nativeBridge()?.cancel() }
         requests.values.forEach { it.cancel(true) }
         requests.clear()
         // Never wait on the executor here: a hung native call occupies it forever, and blocking
@@ -317,7 +372,30 @@ class InferenceProcessService : Service() {
         super.onDestroy()
     }
 
-    private fun loadModel(request: JSONObject): String {
+    /**
+     * The loaded library, or null when it will not load — in which case the caller answers from
+     * [backend.unavailableJson] instead of touching it.
+     *
+     * Every binder entry point above goes through here, and that is the whole point: the library
+     * used to be reached by a throwing `lazy`, so an absent one raised an `UnsatisfiedLinkError`
+     * inside `onTransact`, which no amount of client-side error handling can survive — the
+     * `:inference` process dies, the client rebinds, and the next call does it again. Measured on
+     * the emulator, where the APK carries no x86_64 copy of the library: a fresh `:inference` every
+     * 76 ms, twice over, while the app sat there perfectly usable.
+     *
+     * Only this one failure is absorbed. A native call that fails with a model loaded is a
+     * different fault and still reaches the client the way it always has, by killing the process.
+     */
+    private fun nativeBridge(): NativeLlamaBridge? = try {
+        backend.bridge()
+    } catch (unavailable: NativeBackendUnavailable) {
+        // Logged once per attempt rather than once per process on purpose: the reason is the thing
+        // a device-adaptation report needs, and it is not sensitive.
+        android.util.Log.w(TAG, "on-device library unavailable: ${unavailable.reason}")
+        null
+    }
+
+    private fun loadModel(bridge: NativeLlamaBridge, request: JSONObject): String {
         // The identity is parsed and normalized once, here, and compared whole: every setting is
         // part of it, because reusing a context built for another configuration would silently
         // run or validate the wrong thing.
@@ -426,7 +504,7 @@ class InferenceProcessService : Service() {
         }
     }
 
-    private fun unloadModel(): String {
+    private fun unloadModel(bridge: NativeLlamaBridge): String {
         bridge.cancel()
         val result = bridge.unload()
         loaded = null
@@ -435,6 +513,7 @@ class InferenceProcessService : Service() {
     }
 
     private fun formatPrompt(
+        bridge: NativeLlamaBridge,
         messages: JSONArray,
         toolsJson: String,
         requireTool: Boolean = false,
@@ -485,5 +564,6 @@ class InferenceProcessService : Service() {
 
     private companion object {
         const val PROTOCOL_VERSION = 2
+        const val TAG = "BramNative"
     }
 }

@@ -22,7 +22,11 @@ class LlamaCppRuntime(
             !probe.optBoolean("nativeRuntimeLinked") -> RuntimeAvailability(
                 available = false,
                 summary = "Native CPU runtime unavailable",
-                detail = "This APK does not contain a usable llama.cpp library.",
+                // The service says why when it knows — an ABI mismatch, a corrupt library — and
+                // that sentence is more use than a blanket "this APK does not contain one".
+                detail = probe.optString("unavailableReason").ifBlank {
+                    "This APK does not contain a usable llama.cpp library."
+                },
             )
             state.optString("loadedModelId") != record.id.value -> RuntimeAvailability(
                 available = false,

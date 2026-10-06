@@ -28,13 +28,21 @@ Before merging Android or runtime work, also run:
 
 ```bash
 ./gradlew --no-daemon --stacktrace \
+  :core:domain:test \
   :core:agent:test \
+  :runtime:openai:testDebugUnitTest \
+  :runtime:llamacpp:testDebugUnitTest \
+  :runtime:litertlm:testDebugUnitTest \
+  :app:testDebugUnitTest \
   :platform:android:lintDebug \
   :runtime:openai:lintDebug \
   :runtime:llamacpp:lintDebug \
+  :runtime:litertlm:lintDebug \
   :app:lintDebug \
   :app:assembleDebug
 ```
+
+That is the same set GitHub Actions runs. `:runtime:litertlm:testDebugUnitTest` needs a JDK 21 install registered with Gradle; see [Building Bram](docs/BUILDING.md).
 
 See [Building Bram](docs/BUILDING.md) for the pinned toolchain and CI behavior.
 

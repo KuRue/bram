@@ -16,10 +16,10 @@
 | `app` | Compose UI, Bram's default identity, app state, dependency assembly |
 | `core:domain` | Runtime-neutral models and interfaces |
 | `core:agent` | Context planning, routing, execution planning, tool loop |
-| `platform:android` | Device profiling and Keystore persistence |
-| `runtime:openai` | OpenAI-compatible Chat Completions adapter |
-| `runtime:llamacpp` | GGUF catalog, AIDL inference process, pinned llama.cpp/JNI runtime |
 | `platform:android` | Device profiling, conversation storage, Keystore persistence |
+| `runtime:openai` | OpenAI-compatible Chat Completions and Responses adapter |
+| `runtime:llamacpp` | GGUF catalog, AIDL inference process, pinned llama.cpp/JNI runtime |
+| `runtime:litertlm` | LiteRT-LM packages (`.litertlm`); ships in the build, not yet validated per device |
 
 ```mermaid
 flowchart TD
