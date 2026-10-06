@@ -62,11 +62,16 @@ class LlamaCppServiceClient(context: Context) : Closeable {
     /**
      * Embeds one piece of text, or null if the inference process is unreachable or the call fails.
      * Null lets the memory store fall back to keyword recall rather than failing the turn.
+     *
+     * An empty result counts as no embedding: the service answers that way when the native library
+     * is not there, and a zero-length vector is not a point in any space — storing it as one would
+     * silently poison the recall it is meant to improve.
      */
     suspend fun embed(text: String): FloatArray? = withContext(Dispatchers.IO) {
         runCatching { requireService().embed(text) }
             .onFailure { android.util.Log.d("BramEmbed", "embed call failed: ${it::class.simpleName}: ${it.message}") }
             .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
     }
 
     suspend fun unloadEmbedder(): JSONObject = withContext(Dispatchers.IO) {

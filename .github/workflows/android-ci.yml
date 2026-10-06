@@ -31,6 +31,27 @@ jobs:
                   java-version: "17"
                   cache: gradle
 
+            # :runtime:litertlm's unit tests fork a JDK 21 JVM, because the LiteRT-LM AAR ships
+            # Java 21 bytecode. Gradle does not scan the runner's tool cache for JDKs, so this one
+            # has to be pointed at by hand (see the step below). No cache here: two setup-java
+            # steps writing the same cache key would fight over the restore.
+            - name: Set up JDK 21 for the LiteRT-LM tests
+              uses: actions/setup-java@v5
+              with:
+                  distribution: temurin
+                  java-version: "21"
+
+            - name: Register the JDK 21 toolchain with Gradle
+              shell: bash
+              run: |
+                  # Loud if the setup step did not export it: an empty path here would otherwise
+                  # make :runtime:litertlm's tests fail much later with an opaque toolchain error.
+                  : "${JAVA_HOME_21_X64:?setup-java did not export JAVA_HOME_21_X64}"
+                  echo "org.gradle.java.installations.paths=$JAVA_HOME_21_X64" >> "$HOME/.gradle/gradle.properties"
+                  # Gradle itself stays on 17; only the forked test JVM is newer. The last
+                  # setup-java step left JAVA_HOME pointing at 21.
+                  echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+
             - name: Install Android 16 and native toolchains
               shell: bash
               run: |
@@ -44,16 +65,25 @@ jobs:
                     "ndk;28.2.13676358" \
                     "cmake;3.30.5"
 
-            - name: Verify Gradle wrapper and build
+            # Every unit test in the project, not a sample of them. These six modules were the whole
+            # suite as of 2026-10-06 (546 tests); CI used to run two of them, which left every change
+            # to :core:domain, :runtime:openai, :runtime:litertlm and :app unverified until
+            # somebody remembered to run the rest by hand.
+            - name: Verify Gradle wrapper, test, lint, and build
               shell: bash
               run: |
                   chmod +x gradlew
                   ./gradlew --no-daemon --stacktrace \
+                    :core:domain:test \
                     :core:agent:test \
+                    :runtime:openai:testDebugUnitTest \
                     :runtime:llamacpp:testDebugUnitTest \
+                    :runtime:litertlm:testDebugUnitTest \
+                    :app:testDebugUnitTest \
                     :platform:android:lintDebug \
                     :runtime:openai:lintDebug \
                     :runtime:llamacpp:lintDebug \
+                    :runtime:litertlm:lintDebug \
                     :app:lintDebug \
                     :app:assembleDebug
 

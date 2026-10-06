@@ -6,7 +6,7 @@ Bram is an Android project with both managed Kotlin code and native inference co
 
 | Component | Version |
 | --- | ---: |
-| JDK | 17 |
+| JDK | 17 (21 only for the `:runtime:litertlm` unit tests) |
 | Android Gradle Plugin | 9.3.1 |
 | Gradle | 9.5.0 |
 | Android compile / target SDK | 36 |
@@ -33,13 +33,20 @@ Accelerator validation compares candidate output against a deterministic CPU ref
 
 Open the project in Android Studio and let it sync, or run the same core checks used by CI:
 
+The `:runtime:litertlm` unit tests fork a JDK 21 JVM, because the LiteRT-LM AAR ships Java 21 bytecode. Register that install with `org.gradle.java.installations.paths` in `~/.gradle/gradle.properties`. Gradle itself stays on 17.
+
 ```bash
 ./gradlew --no-daemon --stacktrace \
+  :core:domain:test \
   :core:agent:test \
+  :runtime:openai:testDebugUnitTest \
   :runtime:llamacpp:testDebugUnitTest \
+  :runtime:litertlm:testDebugUnitTest \
+  :app:testDebugUnitTest \
   :platform:android:lintDebug \
   :runtime:openai:lintDebug \
   :runtime:llamacpp:lintDebug \
+  :runtime:litertlm:lintDebug \
   :app:lintDebug \
   :app:assembleDebug
 ```
