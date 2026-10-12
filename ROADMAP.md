@@ -679,16 +679,25 @@ quant compatibility with on-device quant conversion offered, and non-Qualcomm ha
 runtime coverage (LiteRT-LM unblocked, Vulkan measured per vendor, ExecuTorch lanes watched).
 Design: `docs/DEVICE_ADAPTATION.md`.
 
-Result so far (2026-08-12): the tuning framework, KleidiAI CPU kernels, and measurement
-fingerprints are implemented and validated on the S25 Ultra and the emulator — every knob
-joins the load identity and obeys the agreement gate, auto-configure runs backend → decode
-dimensions → batch in one pass, and the card records each winner with a dated note. Measured:
-threads 6, aggressive poll, mmap, hexagon defaults; KleidiAI took the LFM2.5 CPU prompt path
-from ~16 to ~86 tok/s, which made the CPU beat the NPU on that model and re-routed the profile
-by measurement. On-device testing also fixed a process-restart race, a per-candidate timeout
-hole, an async profile-reload race, and a stuck-state after auto-configure. Open: the import
-compatibility report and on-device quant conversion (Phase 3), LiteRT-LM/Vulkan/ExecuTorch
-coverage, and the remaining device classes for the four-device exit criterion.
+Result so far (2026-10-12): Phases 1–3 are implemented and validated on the S25 Ultra and the
+emulator — every knob joins the load identity and obeys the agreement gate, auto-configure runs
+backend → decode dimensions → batch in one pass, and the card records each winner with a dated
+note. Measured: threads 6, aggressive poll, mmap, hexagon defaults; KleidiAI took the LFM2.5 CPU
+prompt path from ~16 to ~86 tok/s, which made the CPU beat the NPU on that model and re-routed
+the profile by measurement. The import compatibility report and on-device quant conversion
+landed 2026-08-13 (tensor-type counts at import, per-backend offload shares on the card,
+`llama_model_quantize` conversion in the inference process, validated on the phone — the Q8_0
+output is byte-identical to the emulator's). Template honesty completed that phase: a template
+that cannot render tool definitions now loses them after the first turn with a status line
+saying why, and a file with no chat template says so on the card. Since then, also landed:
+per-profile benchmarking (prompt, decode, decode-at-depth, energy, against a measured
+memory-bandwidth ceiling, thermally honest sustained runs), LiteRT-LM 0.17.1 with package
+listing and benchmarking beside GGUF profiles, and an ARMv8.2 fp16/dotprod CPU build whose
+absence is checked and stated before load instead of crashing. Open: the converted-Q8_0 model
+intermittently hangs in teacher-forced replay under non-default configs at the current pin (the
+timeout, restart, and failure-note machinery contains every observed instance); the remaining
+device classes for the four-device exit criterion, which need non-Snapdragon hardware; Phase 5
+efficiency modes and the Phase 6 report/telemetry.
 
 
 ## Testing matrix

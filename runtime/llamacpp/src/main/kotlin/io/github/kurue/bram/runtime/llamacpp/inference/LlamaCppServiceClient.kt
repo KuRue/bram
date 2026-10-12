@@ -291,6 +291,9 @@ class LlamaCppServiceClient(context: Context) : Closeable {
                         GenerationEvent.Started(
                             runtimeDescription = event.optString("runtimeDescription", "Local CPU"),
                             reasoningFormat = event.optJSONObject("chatFormat")?.toReasoningFormat(),
+                            supportsTools = event.optJSONObject("chatFormat")
+                                ?.takeIf { it.has("supportsTools") }
+                                ?.optBoolean("supportsTools"),
                         ),
                     )
                     "textDelta" -> trySend(GenerationEvent.TextDelta(event.optString("text")))

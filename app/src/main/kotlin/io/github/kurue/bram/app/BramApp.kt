@@ -2045,6 +2045,15 @@ private fun ProfileCard(
                             }
                         }
                     }
+                    if (!model.hasChatTemplate) {
+                        SectionLabel("Compatibility")
+                        Text(
+                            "This file carries no chat template, so Bram renders it with a built-in " +
+                                "fallback that cannot offer the model tools.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
 
                     SectionLabel("Backend")
                     Row(
