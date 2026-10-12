@@ -1,0 +1,156 @@
+name: Android release
+
+on:
+    push:
+        tags:
+            - "v*"
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Existing version tag (e.g. v0.2.0-alpha01)"
+                required: true
+                type: string
+
+permissions:
+    contents: read
+
+concurrency:
+    group: android-release-${{ inputs.tag || github.ref_name }}
+    cancel-in-progress: false
+
+jobs:
+    verify:
+        uses: ./.github/workflows/android-ci.yml
+
+    package:
+        name: Sign APK and prepare draft
+        needs: verify
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        permissions:
+            contents: write
+        env:
+            RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        steps:
+            - name: Validate tag
+              shell: bash
+              run: |
+                  [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+                    echo 'Expected a version tag such as v0.2.0-alpha01' >&2
+                    exit 1
+                  }
+
+            - name: Check out tagged source
+              uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.RELEASE_TAG }}
+                  fetch-depth: 0
+
+            - name: Verify source and release state
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              shell: bash
+              run: |
+                  # Manual retries must verify exactly the same source as the reusable CI job.
+                  test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+                    echo 'Run this workflow on the tag itself, not on a branch.' >&2
+                    exit 1
+                  }
+                  git show-ref --verify "refs/tags/$RELEASE_TAG"
+                  gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+                  python3 - <<'PY'
+                  import json, os
+                  with open(os.environ['RUNNER_TEMP'] + '/releases.json') as f:
+                      releases = json.load(f)
+                  for release in releases:
+                      if release['tag_name'] == os.environ['RELEASE_TAG'] and not release['draft']:
+                          raise SystemExit('This release is already published; its assets must not be replaced.')
+                  PY
+
+            - name: Set up JDK 17
+              uses: actions/setup-java@v5
+              with:
+                  distribution: temurin
+                  java-version: "17"
+                  cache: gradle
+
+            - name: Install Android and native toolchains
+              shell: bash
+              run: |
+                  BRAM_SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+                  set +o pipefail
+                  yes | "$BRAM_SDKMANAGER" --licenses >/dev/null
+                  set -o pipefail
+                  "$BRAM_SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" \
+                    "ndk;28.2.13676358" "cmake;3.30.5"
+
+            - name: Restore release signing key
+              env:
+                  KEYSTORE_BASE64: ${{ secrets.BRAM_RELEASE_KEYSTORE_BASE64 }}
+                  BRAM_RELEASE_STORE_PASSWORD: ${{ secrets.BRAM_RELEASE_STORE_PASSWORD }}
+                  BRAM_RELEASE_KEY_ALIAS: ${{ secrets.BRAM_RELEASE_KEY_ALIAS }}
+                  BRAM_RELEASE_KEY_PASSWORD: ${{ secrets.BRAM_RELEASE_KEY_PASSWORD }}
+              shell: bash
+              run: |
+                  for name in KEYSTORE_BASE64 BRAM_RELEASE_STORE_PASSWORD BRAM_RELEASE_KEY_ALIAS BRAM_RELEASE_KEY_PASSWORD; do
+                    test -n "${!name}" || { echo "Missing signing secret: $name" >&2; exit 1; }
+                  done
+                  umask 077
+                  printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/bram-release.jks"
+
+            - name: Build signed release APK
+              env:
+                  BRAM_RELEASE_KEYSTORE: ${{ runner.temp }}/bram-release.jks
+                  BRAM_RELEASE_STORE_PASSWORD: ${{ secrets.BRAM_RELEASE_STORE_PASSWORD }}
+                  BRAM_RELEASE_KEY_ALIAS: ${{ secrets.BRAM_RELEASE_KEY_ALIAS }}
+                  BRAM_RELEASE_KEY_PASSWORD: ${{ secrets.BRAM_RELEASE_KEY_PASSWORD }}
+              run: ./gradlew --no-daemon --stacktrace :app:lintRelease :app:assembleRelease
+
+            - name: Verify and stage APK
+              shell: bash
+              run: |
+                  python3 - <<'PY'
+                  import json, os, zipfile
+                  with open('app/build/outputs/apk/release/output-metadata.json') as f:
+                      metadata = json.load(f)
+                  elements = metadata['elements']
+                  assert len(elements) == 1, 'Expected one universal phone APK'
+                  assert elements[0]['versionName'] == os.environ['RELEASE_TAG'][1:], 'Tag must match app versionName'
+                  assert elements[0]['versionCode'] > 0, 'versionCode must be positive'
+                  with zipfile.ZipFile('app/build/outputs/apk/release/app-release.apk') as apk:
+                      assert 'lib/arm64-v8a/libbram_llama.so' in apk.namelist(), 'ARM64 local runtime is missing'
+                  PY
+                  "${ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner" verify --verbose --print-certs \
+                    app/build/outputs/apk/release/app-release.apk
+                  mkdir -p dist
+                  cp app/build/outputs/apk/release/app-release.apk "dist/bram-$RELEASE_TAG-arm64.apk"
+                  cd dist
+                  sha256sum *.apk > SHA256SUMS
+
+            - name: Upload signed build artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: bram-release-${{ env.RELEASE_TAG }}
+                  path: dist/*
+                  if-no-files-found: error
+                  retention-days: 30
+
+            - name: Create or update draft release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              shell: bash
+              run: |
+                  if gh release view "$RELEASE_TAG" --json isDraft > "$RUNNER_TEMP/release.json"; then
+                    python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["isDraft"], "Release is already published"' "$RUNNER_TEMP/release.json"
+                    gh release upload "$RELEASE_TAG" dist/* --clobber
+                  else
+                    prerelease=()
+                    if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=(--prerelease); fi
+                    gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --generate-notes \
+                      --title "Bram $RELEASE_TAG" "${prerelease[@]}"
+                  fi
+
+            - name: Remove temporary signing key
+              if: always()
+              shell: bash
+              run: rm -f "$RUNNER_TEMP/bram-release.jks"

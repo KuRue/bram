@@ -162,6 +162,9 @@ Narrow to one class with `-e class io.github.kurue.bram.app.ChatScreenSmokeTest`
 
 `.github/workflows/android-ci.yml` runs the clean-room build and verification path and publishes build artifacts for inspection. Hardware-specific correctness checks are deliberately not treated as CI substitutes: CPU/NPU/GPU validation requires real target hardware.
 
+Signed APKs and draft GitHub releases are prepared by `.github/workflows/android-release.yml`.
+See [APK releases](RELEASING.md) for permanent signing-key setup, version tags, and publishing.
+
 ## Installing a debug build
 
 With a compatible device connected through ADB:

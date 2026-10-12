@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="title desc">
+  <title id="title">Bram — local intelligence, lasting conversations.</title>
+  <desc id="desc">Bram's light theme: a staggered dot field, copper accents, and the app's dotted lowercase b launcher mark.</desc>
+  <!-- Palette: Theme.kt. Field: Background.kt. Mark coordinates: tools/icon.py. -->
+  <defs>
+    <linearGradient id="field" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#FFFFFF"/><stop offset=".5" stop-color="#F4F1EC"/><stop offset="1" stop-color="#E8E3DA"/></linearGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop stop-color="white" stop-opacity=".10"/><stop offset=".5" stop-color="white" stop-opacity=".05"/><stop offset="1" stop-color="white" stop-opacity=".02"/></linearGradient>
+    <pattern id="lattice" width="22" height="44" patternUnits="userSpaceOnUse"><circle cx="0" cy="0" r="1.1" fill="#2A2A31"/><circle cx="22" cy="0" r="1.1" fill="#2A2A31"/><circle cx="11" cy="22" r="1.1" fill="#2A2A31"/><circle cx="0" cy="44" r="1.1" fill="#2A2A31"/><circle cx="22" cy="44" r="1.1" fill="#2A2A31"/></pattern>
+    <mask id="texture"><rect width="1280" height="400" fill="url(#fade)"/></mask>
+  </defs>
+  <rect width="1280" height="400" rx="24" fill="url(#field)"/>
+  <rect width="1280" height="400" rx="24" fill="url(#lattice)" mask="url(#texture)"/>
+  <text x="72" y="79" fill="#8A5A3B" font-family="sans-serif" font-size="15" font-weight="500" letter-spacing="2.5">LOCAL AI · ANDROID</text>
+  <text x="68" y="185" fill="#1C1B19" font-family="sans-serif" font-size="100" font-weight="600" letter-spacing="-4">Bram</text>
+  <text x="72" y="247" fill="#1C1B19" font-family="sans-serif" font-size="29">Local intelligence. Lasting conversations.</text>
+  <text x="72" y="300" fill="#5A554E" font-family="sans-serif" font-size="18">Your models, tools, and memory — at home on your phone.</text>
+  <rect x="72" y="329" width="44" height="3" rx="1.5" fill="#8A5A3B"/>
+  <rect x="842" y="62" width="288" height="276" rx="32" fill="#FFFFFF" fill-opacity=".72" stroke="#BCB5AC" stroke-opacity=".45"/>
+  <g transform="translate(662 -124) scale(6)">
+    <circle cx="49.5" cy="31.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="58.0" cy="31.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="66.5" cy="31.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="36.75" cy="38.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="53.75" cy="38.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="62.25" cy="38.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="70.75" cy="38.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="49.5" cy="46.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="58.0" cy="46.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="66.5" cy="46.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="36.75" cy="53.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="70.75" cy="53.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="49.5" cy="61.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="58.0" cy="61.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="36.75" cy="68.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="53.75" cy="68.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="70.75" cy="68.5" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="66.5" cy="76.0" r="2.3" fill="#5A554E" fill-opacity="0.16"/>
+    <circle cx="41.0" cy="31.0" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="45.25" cy="38.5" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="41.0" cy="46.0" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="45.25" cy="53.5" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="53.75" cy="53.5" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="62.25" cy="53.5" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="41.0" cy="61.0" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="66.5" cy="61.0" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="45.25" cy="68.5" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="62.25" cy="68.5" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="41.0" cy="76.0" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="49.5" cy="76.0" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+    <circle cx="58.0" cy="76.0" r="3.4" fill="#8A5A3B" fill-opacity="1"/>
+  </g>
+</svg>
