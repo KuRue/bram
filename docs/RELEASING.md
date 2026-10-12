@@ -15,7 +15,8 @@ not the optional Hexagon SDK or OpenCL backend. Hardware validation is separate 
 
 Use one permanent **app signing key** for all sideloaded releases. Android accepts updates only
 when the package and signing identity match. Keep an offline backup of the keystore and its
-passwords; losing the key prevents updates to existing installations.
+passwords; losing the key prevents updates to existing installations. See
+[Android app signing](https://developer.android.com/studio/publish/app-signing) for the signing lifecycle.
 
 If Bram already has a release key, use it. Otherwise generate one locally (the command prompts
 for passwords; do not put them in shell history):

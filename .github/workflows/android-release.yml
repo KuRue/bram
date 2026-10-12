@@ -110,13 +110,15 @@ jobs:
               shell: bash
               run: |
                   python3 - <<'PY'
-                  import json, os
+                  import json, os, zipfile
                   with open('app/build/outputs/apk/release/output-metadata.json') as f:
                       metadata = json.load(f)
                   elements = metadata['elements']
                   assert len(elements) == 1, 'Expected one universal phone APK'
                   assert elements[0]['versionName'] == os.environ['RELEASE_TAG'][1:], 'Tag must match app versionName'
                   assert elements[0]['versionCode'] > 0, 'versionCode must be positive'
+                  with zipfile.ZipFile('app/build/outputs/apk/release/app-release.apk') as apk:
+                      assert 'lib/arm64-v8a/libbram_llama.so' in apk.namelist(), 'ARM64 local runtime is missing'
                   PY
                   "${ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner" verify --verbose --print-certs \
                     app/build/outputs/apk/release/app-release.apk
