@@ -1,26 +1,52 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="title desc">
-  <title id="title">Bram — Intelligence, on your terms.</title>
-  <desc id="desc">A dark indigo banner with an abstract network around a phone, representing private, local AI.</desc>
+  <title id="title">Bram — local intelligence, lasting conversations.</title>
+  <desc id="desc">Bram's dark theme: a staggered dot field, copper accents, and the app's dotted lowercase b launcher mark.</desc>
+  <!-- Palette: Theme.kt. Field: Background.kt. Mark coordinates: tools/icon.py. -->
   <defs>
-    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#111629"/><stop offset="1" stop-color="#242342"/></linearGradient>
-    <linearGradient id="accent" x2="1" y2="1"><stop stop-color="#9ca9ff"/><stop offset="1" stop-color="#7be3cf"/></linearGradient>
-    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#fff" stroke-opacity=".035"/></pattern>
+    <linearGradient id="field" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#07070A"/><stop offset=".5" stop-color="#141419"/><stop offset="1" stop-color="#1E1E25"/></linearGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop stop-color="white" stop-opacity=".20"/><stop offset=".5" stop-color="white" stop-opacity=".09"/><stop offset="1" stop-color="white" stop-opacity=".03"/></linearGradient>
+    <pattern id="lattice" width="22" height="44" patternUnits="userSpaceOnUse"><circle cx="0" cy="0" r="1.1" fill="#FFFFFF"/><circle cx="22" cy="0" r="1.1" fill="#FFFFFF"/><circle cx="11" cy="22" r="1.1" fill="#FFFFFF"/><circle cx="0" cy="44" r="1.1" fill="#FFFFFF"/><circle cx="22" cy="44" r="1.1" fill="#FFFFFF"/></pattern>
+    <mask id="texture"><rect width="1280" height="400" fill="url(#fade)"/></mask>
   </defs>
-  <rect width="1280" height="400" rx="24" fill="url(#bg)"/>
-  <rect width="1280" height="400" rx="24" fill="url(#grid)"/>
-  <text x="72" y="87" fill="#7be3cf" font-family="sans-serif" font-size="15" letter-spacing="4">LOCAL AI · ANDROID</text>
-  <text x="68" y="191" fill="#f5f5ff" font-family="sans-serif" font-size="100" font-weight="700" letter-spacing="-4">Bram</text>
-  <text x="72" y="252" fill="#d4d7ee" font-family="sans-serif" font-size="29">Intelligence, on your terms.</text>
-  <text x="72" y="313" fill="#9ca5c2" font-family="sans-serif" font-size="18">Private models. Useful tools. Hardware that earns your trust.</text>
-  <g transform="translate(978 200)" fill="none">
-    <circle r="146" stroke="#9ca9ff" stroke-opacity=".16"/>
-    <circle r="113" stroke="#9ca9ff" stroke-opacity=".2" stroke-dasharray="4 12"/>
-    <path d="M-146 0H-60M60 0H146M0-146V-101M0 101V146M-103-103L-60-60M103 103L60 60" stroke="#7be3cf" stroke-opacity=".5" stroke-width="2"/>
-    <rect x="-59" y="-103" width="118" height="206" rx="23" fill="#171d33" stroke="url(#accent)" stroke-width="3"/>
-    <path d="M-18-86H18" stroke="#9ca9ff" stroke-width="4" stroke-linecap="round"/>
-    <path d="M-28 17L0-27L28 17L0 46Z M-28 17H28 M0-27V46" stroke="url(#accent)" stroke-width="3" stroke-linejoin="round"/>
-    <path d="M-17 84H17" stroke="#9ca9ff" stroke-opacity=".5" stroke-width="3" stroke-linecap="round"/>
-    <g fill="#7be3cf"><circle cx="-146" r="5"/><circle cx="146" r="5"/><circle cy="-146" r="5"/><circle cy="146" r="5"/></g>
-    <g fill="#9ca9ff"><circle cx="-103" cy="-103" r="5"/><circle cx="103" cy="103" r="5"/></g>
+  <rect width="1280" height="400" rx="24" fill="url(#field)"/>
+  <rect width="1280" height="400" rx="24" fill="url(#lattice)" mask="url(#texture)"/>
+  <text x="72" y="79" fill="#D9A47C" font-family="sans-serif" font-size="15" font-weight="500" letter-spacing="2.5">LOCAL AI · ANDROID</text>
+  <text x="68" y="185" fill="#EDEAE5" font-family="sans-serif" font-size="100" font-weight="600" letter-spacing="-4">Bram</text>
+  <text x="72" y="247" fill="#EDEAE5" font-family="sans-serif" font-size="29">Local intelligence. Lasting conversations.</text>
+  <text x="72" y="300" fill="#B5AFA7" font-family="sans-serif" font-size="18">Your models, tools, and memory — at home on your phone.</text>
+  <rect x="72" y="329" width="44" height="3" rx="1.5" fill="#D9A47C"/>
+  <rect x="842" y="62" width="288" height="276" rx="32" fill="#1E1E26" fill-opacity=".72" stroke="#4A4A52" stroke-opacity=".45"/>
+  <g transform="translate(662 -124) scale(6)">
+    <circle cx="49.5" cy="31.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="58.0" cy="31.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="66.5" cy="31.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="36.75" cy="38.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="53.75" cy="38.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="62.25" cy="38.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="70.75" cy="38.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="49.5" cy="46.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="58.0" cy="46.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="66.5" cy="46.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="36.75" cy="53.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="70.75" cy="53.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="49.5" cy="61.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="58.0" cy="61.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="36.75" cy="68.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="53.75" cy="68.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="70.75" cy="68.5" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="66.5" cy="76.0" r="2.3" fill="#B5AFA7" fill-opacity="0.16"/>
+    <circle cx="41.0" cy="31.0" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="45.25" cy="38.5" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="41.0" cy="46.0" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="45.25" cy="53.5" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="53.75" cy="53.5" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="62.25" cy="53.5" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="41.0" cy="61.0" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="66.5" cy="61.0" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="45.25" cy="68.5" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="62.25" cy="68.5" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="41.0" cy="76.0" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="49.5" cy="76.0" r="3.4" fill="#D9A47C" fill-opacity="1"/>
+    <circle cx="58.0" cy="76.0" r="3.4" fill="#D9A47C" fill-opacity="1"/>
   </g>
 </svg>

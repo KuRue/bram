@@ -1,12 +1,16 @@
 <p align="center">
-  <img src="docs/assets/bram-banner.svg" alt="Bram — Intelligence, on your terms. Private local AI for Android." width="100%" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/bram-banner.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/bram-banner-light.svg" />
+    <img src="docs/assets/bram-banner.svg" alt="Bram — Local intelligence. Lasting conversations. The app’s copper dot-lattice mark." width="100%" />
+  </picture>
 </p>
 
 <p align="center">
   <a href="https://github.com/KuRue/bram/actions/workflows/android-ci.yml"><img src="https://github.com/KuRue/bram/actions/workflows/android-ci.yml/badge.svg" alt="Android CI" /></a>
   <a href="https://github.com/KuRue/bram/actions/workflows/android-release.yml"><img src="https://github.com/KuRue/bram/actions/workflows/android-release.yml/badge.svg" alt="Android release" /></a>
-  <img src="https://img.shields.io/badge/Android-10%2B-7be3cf?logo=android&amp;logoColor=white" alt="Android 10 and newer" />
-  <img src="https://img.shields.io/badge/status-alpha-9ca9ff" alt="Alpha software" />
+  <img src="https://img.shields.io/badge/Android-10%2B-8A5A3B?logo=android&amp;logoColor=white" alt="Android 10 and newer" />
+  <img src="https://img.shields.io/badge/status-alpha-6B6259" alt="Alpha software" />
 </p>
 
 <p align="center">
