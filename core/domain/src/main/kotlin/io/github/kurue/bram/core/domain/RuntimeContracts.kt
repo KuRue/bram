@@ -112,6 +112,13 @@ sealed interface GenerationEvent {
         val runtimeDescription: String,
         /** Absent for runtimes that do not report one, such as a remote endpoint. */
         val reasoningFormat: ReasoningFormat? = null,
+        /**
+         * Whether the runtime could actually render the tool definitions this turn. A local
+         * model's chat template may have no tool support, in which case definitions sent to it
+         * never reach the prompt and no call can come back. Absent when the runtime does not
+         * say, and only meaningful on a turn where tools were offered.
+         */
+        val supportsTools: Boolean? = null,
     ) : GenerationEvent
     data class TextDelta(val text: String) : GenerationEvent
     /**

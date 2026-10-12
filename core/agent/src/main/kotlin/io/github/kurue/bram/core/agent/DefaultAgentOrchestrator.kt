@@ -125,6 +125,10 @@ class DefaultAgentOrchestrator(
             emptyList()
         }
         emit(AgentEvent.ToolsSelected(selectedTools.map { it.name }))
+        // Whether the runtime could render those definitions. A local model whose template has no
+        // tool support drops them from the prompt silently, so the first Started event is where
+        // the run learns the truth; until then tools are offered as the descriptor promised.
+        var toolsRenderable = true
 
         repeat(request.maxToolTurns + 1) { turn ->
             var context = contextWindowManager.plan(
@@ -193,7 +197,7 @@ class DefaultAgentOrchestrator(
             runtime.generate(
                 GenerationRequest(
                     messages = context.messages,
-                    tools = selectedTools,
+                    tools = if (toolsRenderable) selectedTools else emptyList(),
                     maxOutputTokens = request.maxOutputTokens,
                     sampler = request.sampler,
                     requestId = generationRequestId,
@@ -204,6 +208,19 @@ class DefaultAgentOrchestrator(
                     is GenerationEvent.Started -> {
                         emit(AgentEvent.Status(event.runtimeDescription))
                         event.reasoningFormat?.let { emit(AgentEvent.Reasoning(it)) }
+                        // Only read on a turn that offered tools: with none offered, a runtime
+                        // reports "no tool grammar" because there was nothing to render, not
+                        // because the model cannot call tools. toolsRenderable in the guard
+                        // keeps the note to one emission for the whole run.
+                        if (selectedTools.isNotEmpty() && toolsRenderable && event.supportsTools == false) {
+                            toolsRenderable = false
+                            emit(
+                                AgentEvent.Status(
+                                    "Tools are disabled for this model on this build: its chat " +
+                                        "template cannot render tool definitions.",
+                                ),
+                            )
+                        }
                     }
                     is GenerationEvent.TextDelta -> {
                         responseText.append(event.text)

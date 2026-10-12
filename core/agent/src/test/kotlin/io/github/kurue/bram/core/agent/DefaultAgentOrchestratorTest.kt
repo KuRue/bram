@@ -168,6 +168,72 @@ class DefaultAgentOrchestratorTest {
     }
 
     @Test
+    fun `a template that cannot render tools loses them after the first turn and says so`() = runBlocking {
+        // The chat template decides at load whether tool definitions ever reach the prompt. When it
+        // cannot, the run learns that from the first Started event: the definitions are dropped for
+        // the rest of the run (they cost context and trigger the recovery paths on call-shaped
+        // prose) and one status line says why, instead of every tool turn silently doing nothing.
+        val runtime = ToollessTemplateRuntime()
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(NoopHandler("asked_about"))),
+            approvalGate = ReadOnlyApprovalGate(),
+        )
+
+        val events = orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("templateless"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Use the tool")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = runtime,
+        ).toList()
+
+        assertTrue("the first turn still offers what the descriptor promised", runtime.requests.first().tools.isNotEmpty())
+        assertTrue("later turns must not carry unusable definitions", runtime.requests.last().tools.isEmpty())
+        assertEquals(
+            "the note fires once for the whole run",
+            1,
+            events.count { it is AgentEvent.Status && it.text.startsWith("Tools are disabled") },
+        )
+        assertTrue(events.any { it is AgentEvent.Completed })
+    }
+
+    @Test
+    fun `a runtime that does not report tool support keeps its tools`() = runBlocking {
+        val runtime = ToollessTemplateRuntime(supportsTools = null)
+        val orchestrator = DefaultAgentOrchestrator(
+            contextWindowManager = ContextWindowManager(),
+            memoryStore = InMemoryMemoryStore(),
+            toolRegistry = StaticToolRegistry(listOf(NoopHandler("asked_about"))),
+            approvalGate = ReadOnlyApprovalGate(),
+        )
+
+        val events = orchestrator.run(
+            request = AgentRunRequest(
+                conversationId = ConversationId("silent-runtime"),
+                messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Use the tool")),
+                identity = AgentIdentity(
+                    id = "bram",
+                    version = "test",
+                    displayName = "Bram",
+                    systemPrompt = "You are Bram.",
+                ),
+            ),
+            runtime = runtime,
+        ).toList()
+
+        assertTrue(runtime.requests.all { it.tools.isNotEmpty() })
+        assertEquals(0, events.count { it is AgentEvent.Status && it.text.startsWith("Tools are disabled") })
+    }
+
+    @Test
     fun `the selected tools reach the generation request`() = runBlocking {
         val runtime = CapturingRuntime()
         val offered = ToolDefinition(name = "only_me", description = "the one tool this run gets", inputSchemaJson = "{}")
@@ -868,6 +934,40 @@ private class StubMemoryExtractor(
         calls++
         if (throwOnCall) error("extractor blew up")
         return result
+    }
+}
+
+/**
+ * Reports a chat template that cannot render tool definitions (or stays silent about it), and
+ * still asks for a tool on its first reply — the shape a bare-call recovery produces — so the run
+ * has a second turn on which the demoted tool list is observable.
+ */
+private class ToollessTemplateRuntime(private val supportsTools: Boolean? = false) : ModelRuntime {
+    override val model = ModelDescriptor(
+        id = ModelId("test"),
+        displayName = "Test",
+        providerName = "Test",
+        modelName = "test",
+        location = ModelLocation.LOCAL,
+        contextWindowTokens = 4_096,
+        capabilities = TOOL_CAPABLE,
+    )
+
+    val requests = mutableListOf<GenerationRequest>()
+    private var generations = 0
+
+    override suspend fun availability() = RuntimeAvailability(available = true, summary = "Ready")
+
+    override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+        requests += request
+        emit(GenerationEvent.Started("Test", supportsTools = supportsTools))
+        if (generations == 0) {
+            emit(GenerationEvent.ToolCallReady(ToolCall(id = "call_1", name = "asked_about", argumentsJson = "{}")))
+        } else {
+            emit(GenerationEvent.TextDelta("Done without it"))
+        }
+        generations++
+        emit(GenerationEvent.Finished("stop"))
     }
 }
 
