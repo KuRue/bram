@@ -46,6 +46,29 @@ android {
         }
     }
 
+    // Release signing is opt-in locally and mandatory in the release workflow. Never fall back
+    // to a debug key: Android updates must retain this signing identity for the app's lifetime.
+    val releaseKeystore = providers.environmentVariable("BRAM_RELEASE_KEYSTORE").orNull
+    if (!releaseKeystore.isNullOrBlank()) {
+        require(file(releaseKeystore).isFile) { "BRAM_RELEASE_KEYSTORE must name an existing keystore" }
+        fun signingSecret(name: String): String =
+            providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() }
+                ?: error("$name is required when BRAM_RELEASE_KEYSTORE is set")
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = signingSecret("BRAM_RELEASE_STORE_PASSWORD")
+                keyAlias = signingSecret("BRAM_RELEASE_KEY_ALIAS")
+                keyPassword = signingSecret("BRAM_RELEASE_KEY_PASSWORD")
+            }
+        }
+        buildTypes {
+            getByName("release") {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         jniLibs {

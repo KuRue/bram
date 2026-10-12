@@ -1,140 +1,79 @@
-# Bram
+<p align="center">
+  <img src="docs/assets/bram-banner.svg" alt="Bram — Intelligence, on your terms. Private local AI for Android." width="100%" />
+</p>
 
-Bram is an Android-first local AI runtime and agent harness. Its goal is to make local models “just work” by profiling the phone, selecting a stable execution plan, and falling back safely across CPU, GPU, NPU, RAM, and storage-assisted execution.
+<p align="center">
+  <a href="https://github.com/KuRue/bram/actions/workflows/android-ci.yml"><img src="https://github.com/KuRue/bram/actions/workflows/android-ci.yml/badge.svg" alt="Android CI" /></a>
+  <a href="https://github.com/KuRue/bram/actions/workflows/android-release.yml"><img src="https://github.com/KuRue/bram/actions/workflows/android-release.yml/badge.svg" alt="Android release" /></a>
+  <img src="https://img.shields.io/badge/Android-10%2B-7be3cf?logo=android&amp;logoColor=white" alt="Android 10 and newer" />
+  <img src="https://img.shields.io/badge/status-alpha-9ca9ff" alt="Alpha software" />
+</p>
 
-The model is only one component. Bram is designed around tool use, durable conversations, context management, hardware-aware inference, versioned skills, scheduled work, and optional OpenAI-compatible remote models.
+<p align="center">
+  <a href="https://github.com/KuRue/bram/releases"><b>Releases</b></a> ·
+  <a href="docs/BUILDING.md">Build it</a> ·
+  <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
-> **Status: local CPU chat works on device.** Import a GGUF, load it, and chat, with durable
-> conversations, background runs, and a transcript that collapses reasoning and tool calls to a
-> line. Validated on a Snapdragon 8 Elite phone and an x86_64 emulator.
->
-> The **Hexagon NPU is validated** on that phone at 95.8% agreement with CPU output and 1.5–1.9x
-> the speed, depending on the run. **Vulkan is not**: on the same device it disagrees with CPU on a quarter of
-> predictions with one offloaded layer and collapses entirely past about seven, while reporting no
-> error. It compiles and can be selected, but Bram does not call it validated.
->
-> Broader autonomous-agent capabilities — memory, skills, and scheduled automations — are built and
-> working. The remaining active work is device adaptation (Milestone 19): the import compatibility
-> report, on-device quant conversion, and wider hardware coverage.
+## Your phone. Your models. Your assistant.
 
-## What makes Bram different
+Bram runs local AI on Android, with durable conversations, tools, memory, and scheduled work.
+Import a GGUF, load a model, and start chatting. When you choose to use a remote model,
+OpenAI-compatible endpoints fit into the same agent loop, behind an explicit privacy policy.
 
-- **Accelerators are validated, not assumed:** a backend must reproduce the CPU reference before Bram calls it usable. This is not theoretical — it is how a GPU backend that reported success while returning garbage was caught.
-- **Hardware-aware planning:** candidate plans account for model weights, KV cache, compute buffers, backend repacking, current memory pressure, and a safety reserve.
-- **Stable fallback:** native inference lives in a separate Android process so a driver or backend crash does not have to kill the conversation UI.
-- **Runtime-neutral agent:** the same tool loop can use llama.cpp, LiteRT-LM, or an OpenAI-compatible endpoint.
-- **Context as a budget:** the transcript remains canonical while summaries, retrieved memories, and KV caches are replaceable projections.
-- **Visible storage assistance:** models larger than safe resident RAM are an explicit, opt-in, extremely slow mode—not a hidden performance failure.
-- **Private by policy:** remote routing must pass an explicit privacy gate; it is never an accidental fallback.
+It profiles your hardware, budgets memory, and tests accelerators against CPU output before
+calling them validated. Native inference runs in a separate process so a backend crash can be
+contained without taking down the conversation UI.
 
-## Engineering highlights
+| Chat that lasts | Tools that do work | Hardware you can trust |
+| :--- | :--- | :--- |
+| Persistent threads, Markdown, streaming, and background runs. | Permission-gated tools, remote MCP, versioned skills, and scheduled automations. | Device profiling, memory-aware plans, accelerator validation, and fallback. |
 
-Bram combines application development, native inference, and systems engineering in one Android codebase:
+## Get Bram
 
-- Kotlin/Jetpack Compose application with durable conversations and background execution.
-- OpenAI-compatible Chat Completions adapter with function/tool support.
-- llama.cpp/JNI local inference in an isolated Android process using AIDL.
-- Device profiling and execution-plan generation across RAM, CPU, Vulkan, and Hexagon NPU capabilities.
-- Correctness-gated accelerator validation instead of trusting backend initialization alone.
-- Context budgeting, prompt/template handling, exact token accounting, streaming, cancellation, and model unload.
-- Android Keystore-backed encryption for remote endpoint credentials.
-- Automated tests, lint, clean-room builds, and APK artifacts through GitHub Actions.
+**Android 10+ · ARM64 phone · bring your own model or endpoint**
 
-## Bram’s default identity
+- **Release builds:** download the APK and `SHA256SUMS` from [Releases](https://github.com/KuRue/bram/releases) when a version is published. The release pipeline prepares signed APKs for review; a draft is visible only to maintainers.
+- **Development builds:** open a successful [Android CI run](https://github.com/KuRue/bram/actions/workflows/android-ci.yml) and download its `bram-debug-…` artifact. GitHub requires sign-in for workflow artifact downloads. Unzip it to get the APK.
+- **Build locally:** follow [Building Bram](docs/BUILDING.md) for the SDK, native toolchain, and emulator instructions.
 
-The harness supplies a versioned `AgentIdentity` to each run. Version `bram/0.1` is intentionally small: Bram is direct, tool-aware, evidence-conscious, and prefers private local execution when policy and capability allow.
+Install the APK, open **Models** to import a GGUF, or configure an OpenAI-compatible endpoint in
+**Settings**. Model files are separate downloads and are not bundled with the app.
 
-The identity is isolated from model adapters in [BramDefaults.kt](app/src/main/kotlin/io/github/kurue/bram/app/BramDefaults.kt). Prompt or identity changes should increment the identity version so future prompt/KV caches can invalidate safely.
+Release and development builds use different signing keys. Android requires the same key to
+update an installed app; back up anything you need before switching between them. CI debug keys
+can also differ between runs. See [release setup](docs/RELEASING.md) for stable signing and publishing.
 
-## Current vertical slice
+## Where things stand
 
-| Area | State |
-|---|---|
-| Compose chat, Models, Settings, and diagnostics | Working |
-| Persisted GGUF import, metadata validation, and SHA-256 | Working |
-| Durable conversations with multiple threads and history | Working |
-| Agent runs that continue while the app is backgrounded | Working |
-| Retry, edit-and-resend, copy, and Markdown rendering | Working |
-| Android RAM, storage, CPU, Vulkan-feature, and thermal profiling | Working |
-| Encrypted-at-rest endpoint API keys using Android Keystore | Working |
-| OpenAI-compatible `/chat/completions` with function tools | Working |
-| Context budgeting and recent-turn preservation | Working |
-| Permission-gated iterative tool loop | Working with constrained permissions |
-| Read-only `device_status` phone tool | Working |
-| Hardware execution-plan generation | Working |
-| Separate `:inference` process and AIDL protocol | Implemented |
-| Pinned ARM64 llama.cpp CPU generation | Working, validated on device |
-| Chat-template application, exact token counts, streaming, cancel, unload | Working |
-| Hexagon NPU backend | Working, validated against CPU output |
-| Vulkan backend | Compiles and runs; fails correctness validation on Adreno 830 |
-| Accelerator validation and layer bisection in-app | Working |
-| Collapsed reasoning and tool activity in the transcript | Working |
-| Context compaction, room-backed memory, FTS and vector recall | Working |
-| Versioned skills, drafts, activation, and rollback | Working |
-| Scheduled automations on the task queue | Working |
-| Remote MCP servers | Working |
-| Per-conversation privacy and remote-fallback policy | Working |
-| OpenAI Responses adapter and capability-aware routing | Working |
-| LiteRT-LM runtime | In development; ships in the build, not yet validated per device |
-| Import compatibility report and on-device quant conversion | In development (Milestone 19) |
-| OpenCL and additional runtimes | Experimental / in development |
+Bram is **alpha software**. Local CPU chat, conversations, tools, memory, skills, and automations
+are implemented. CPU inference has been validated on a Snapdragon 8 Elite phone; the emulator
+covers UI and harness flows.
 
-## Repository layout
+| Runtime / backend | Current evidence |
+| :--- | :--- |
+| llama.cpp CPU | Working and validated on device. |
+| Hexagon NPU | Phone validation measured 95.8% agreement with CPU and 1.5–1.9× speed. Requires an optional proprietary SDK; standard GitHub builds do not include it. |
+| Vulkan | Builds and runs, but fails correctness validation on Adreno 830. Availability does not imply correctness. |
+| LiteRT-LM / OpenCL | Experimental; broader device validation remains open. OpenCL is opt-in at build time. |
 
-| Module | Responsibility |
-|---|---|
-| `app` | Compose UI, Bram’s default identity, app state, dependency assembly |
-| `core:domain` | Runtime-neutral agent, model, memory, tool, and scheduling contracts |
-| `core:agent` | Context planning, routing, execution planning, and the tool loop |
-| `platform:android` | Device profiling, conversation storage, and Keystore persistence |
-| `runtime:openai` | OpenAI-compatible Chat Completions and Responses adapter |
-| `runtime:llamacpp` | GGUF catalog, AIDL process, llama.cpp/JNI runtime |
-| `runtime:litertlm` | LiteRT-LM packages (`.litertlm`); ships in the build, not yet validated per device |
+Device adaptation remains active: efficiency modes, reporting, and wider hardware coverage.
+On-device quant conversion is implemented, with a converted-Q8_0 replay hang still under investigation.
+See the [detailed project overview](docs/PROJECT_OVERVIEW.md) and [roadmap](ROADMAP.md).
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for design details, [ROADMAP.md](ROADMAP.md) for staged implementation work, [SECURITY.md](SECURITY.md) for the current trust boundaries, and [Building Bram](docs/BUILDING.md) for the toolchain and build process.
+## Explore the code
 
-## Build
+| Module | Role |
+| :--- | :--- |
+| `app` | Jetpack Compose UI, app state, and dependency assembly |
+| `core:domain` / `core:agent` | Agent contracts, context budgets, routing, planning, and tool execution |
+| `platform:android` | Device profiling, storage, and encrypted credentials |
+| `runtime:llamacpp` | GGUF import, JNI inference, and isolated native process |
+| `runtime:openai` / `runtime:litertlm` | Remote model adapters and LiteRT-LM integration |
 
-Requirements:
-
-- JDK 17, Android SDK Platform 36, Android SDK Build Tools 36.0.0, NDK 28.2.13676358, CMake 3.30.5
-- JDK 21 as well, only so `:runtime:litertlm`'s unit tests can load the LiteRT-LM AAR (Java 21 bytecode). The app itself still compiles on JDK 17. Point Gradle at the JDK 21 install with `org.gradle.java.installations.paths`.
-- An API 29+ ARM64 device, or an emulator configured for the supported test ABI
-
-The Hexagon backend additionally needs Qualcomm's Hexagon SDK and is off unless `HEXAGON_SDK_ROOT` points at one. Linux/WSL is the recommended environment for native iteration because the Vulkan host tooling needs a working host C++ compiler.
-
-Open the repository in Android Studio and let it sync, or use the checked-in wrapper:
-
-```bash
-./gradlew --no-daemon --stacktrace \
-  :core:domain:test \
-  :core:agent:test \
-  :runtime:openai:testDebugUnitTest \
-  :runtime:llamacpp:testDebugUnitTest \
-  :runtime:litertlm:testDebugUnitTest \
-  :app:testDebugUnitTest \
-  :platform:android:lintDebug \
-  :runtime:openai:lintDebug \
-  :runtime:llamacpp:lintDebug \
-  :runtime:litertlm:lintDebug \
-  :app:lintDebug \
-  :app:assembleDebug
-```
-
-The same clean-room build runs in GitHub Actions and publishes the debug APK as a workflow artifact.
-
-## Security boundaries
-
-- HTTPS is the default for remote endpoints. Cleartext HTTP requires explicit opt-in and is intended only for trusted local networks.
-- API keys are stored through Android Keystore-backed encryption and must never be committed.
-- Tool output is untrusted input to the model.
-- Native model and driver code runs in the isolated inference process.
-- Accelerator correctness is measured against a CPU reference before a backend is considered validated.
-
-See [SECURITY.md](SECURITY.md) before enabling broader tools or running untrusted models.
-
-## Contributing
-
-Bram is at the stage where architectural discipline matters more than feature count. Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing runtime boundaries, identity behavior, tool permissions, or persistence.
+[Architecture](ARCHITECTURE.md) explains the boundaries. [Security](SECURITY.md) documents privacy,
+credentials, and tool trust. [Contributing](CONTRIBUTING.md) covers development expectations.
 
 No open-source license has been selected yet.
