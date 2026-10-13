@@ -18,13 +18,22 @@ when the package and signing identity match. Keep an offline backup of the keyst
 passwords; losing the key prevents updates to existing installations. See
 [Android app signing](https://developer.android.com/studio/publish/app-signing) for the signing lifecycle.
 
-If Bram already has a release key, use it. Otherwise generate one locally (the command prompts
-for passwords; do not put them in shell history):
+If Bram already has a release key, use it. Otherwise generate one locally. Use the **same
+password for the keystore and for the key**: modern `keytool` writes a PKCS12 keystore by default,
+and PKCS12 supports only one password — given a different one for the key it is silently
+discarded, so `BRAM_RELEASE_KEY_PASSWORD` would not match and the release build would fail with a
+`KeytoolException: ... Given final block not properly padded.` that names neither of the two
+passwords as the cause.
 
 ```bash
 keytool -genkeypair -v -keystore bram-release.jks -alias bram \
-  -keyalg RSA -keysize 4096 -validity 10000
+  -keyalg RSA -keysize 4096 -validity 10000 \
+  -storepass "$STORE_PASSWORD" -keypass "$STORE_PASSWORD" \
+  -dname "CN=Bram, O=Bram"
 ```
+
+Pass the passwords through an environment variable or a secret manager rather than the command
+line, so they stay out of shell history and of the project's files.
 
 Keystores are git-ignored. Never commit the key or passwords. Set these repository Actions secrets
 in **Settings → Secrets and variables → Actions**, or through `gh`:
@@ -90,6 +99,43 @@ your local secret manager/environment. Then run:
 The signed APK is `app/build/outputs/apk/release/app-release.apk`. Without a release keystore,
 local `assembleRelease` produces an unsigned APK for inspection; it is not installable until signed.
 Never distribute an APK signed with a temporary test key.
+
+### Smoke-test the pipeline before tagging
+
+The release run is the first time the signing path, the version check, and the APK verification are
+ever exercised. Run them locally first, so a mistake costs a local build rather than a broken tag.
+Use a throwaway keystore — not the permanent one — and never commit it:
+
+```bash
+# 1. Build and sign, exactly as the workflow does.
+BRAM_RELEASE_KEYSTORE=/path/to/throwaway.jks \
+BRAM_RELEASE_STORE_PASSWORD=... BRAM_RELEASE_KEY_ALIAS=bram BRAM_RELEASE_KEY_PASSWORD=... \
+  ./gradlew --no-daemon :app:lintRelease :app:assembleRelease
+
+# 2. The workflow's own checks, against the tag you intend to push (RELEASE_TAG includes the v).
+export RELEASE_TAG=v0.2.0-alpha01
+python3 - <<'PY'
+import json, os, zipfile
+with open('app/build/outputs/apk/release/output-metadata.json') as f:
+    elements = json.load(f)['elements']
+assert len(elements) == 1, 'Expected one universal phone APK'
+assert elements[0]['versionName'] == os.environ['RELEASE_TAG'][1:], 'Tag must match app versionName'
+assert elements[0]['versionCode'] > 0, 'versionCode must be positive'
+with zipfile.ZipFile('app/build/outputs/apk/release/app-release.apk') as apk:
+    assert 'lib/arm64-v8a/libbram_llama.so' in apk.namelist(), 'ARM64 local runtime is missing'
+print('metadata and native-runtime checks: PASS')
+PY
+"$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner" verify --verbose \
+  app/build/outputs/apk/release/app-release.apk
+
+# 3. The staging step, so a bad asset name or a missing checksum fails here instead of on a release.
+mkdir -p dist && cp app/build/outputs/apk/release/app-release.apk "dist/bram-$RELEASE_TAG-arm64.apk"
+( cd dist && sha256sum *.apk > SHA256SUMS && cat SHA256SUMS ) && rm -rf dist
+```
+
+A wrong key password fails here as `KeytoolException: ... Given final block not properly padded`,
+which is the PKCS12 trap in the section above, not a broken keystore. Delete the throwaway keystore
+when you are done, and never let its identity near a published release.
 
 Release APKs and existing debug installs have different signatures. Changing between them
 requires removing the previous installation, which clears its app data. Plan backups first.
