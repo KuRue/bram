@@ -66,10 +66,10 @@ jobs:
                     "ndk;28.2.13676358" \
                     "cmake;3.30.5"
 
-            # Every unit test in the project, not a sample of them. These six modules were the whole
-            # suite as of 2026-10-06 (546 tests); CI used to run two of them, which left every change
-            # to :core:domain, :runtime:openai, :runtime:litertlm and :app unverified until
-            # somebody remembered to run the rest by hand.
+            # Every unit test in the project, not a sample of them. These six modules held 549 tests
+            # on 2026-10-13; CI used to run two of them, which left every change to :core:domain,
+            # :runtime:openai, :runtime:litertlm and :app unverified until somebody remembered to
+            # run the rest by hand.
             - name: Verify Gradle wrapper, test, lint, and build
               shell: bash
               run: |
