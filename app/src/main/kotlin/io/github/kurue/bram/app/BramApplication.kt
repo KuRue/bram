@@ -86,6 +86,7 @@ class AppContainer(application: Application) {
     val liteRtEngineManager = LiteRtEngineManager(application)
     val toolPermissionStore = ToolPermissionStore(application)
     val notificationSettings = NotificationSettingsStore(application)
+    val onboardingStore = OnboardingStore(application)
     val routingSettings = RoutingSettingsStore(application)
 
     /**

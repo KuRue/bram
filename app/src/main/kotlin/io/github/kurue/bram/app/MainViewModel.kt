@@ -27,6 +27,8 @@ import io.github.kurue.bram.core.domain.LITE_RT_CONTEXT_TOKENS
 import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.McpServer
+import io.github.kurue.bram.core.domain.ModelAdvice
+import io.github.kurue.bram.core.domain.ModelAdvisor
 import io.github.kurue.bram.core.domain.MeasurementFingerprint
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
@@ -82,6 +84,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -527,6 +531,15 @@ data class AppUiState(
     val acceleratorBisection: AcceleratorBisection? = null,
     /** Whether a finished backgrounded turn posts the completion alert. */
     val completionAlertsEnabled: Boolean = false,
+    /** Set once the model, LiteRT, and endpoint catalogs have been read at startup. */
+    val catalogsLoaded: Boolean = false,
+    /** Whether the first-run guide has been finished or skipped (persisted). */
+    val onboardingCompleted: Boolean = true,
+    /** The guide reopened from Settings, shown whatever the catalogs hold. */
+    val onboardingReopened: Boolean = false,
+    /** The first-run hardware scan, null until it has run. */
+    val hardwareAdvice: ModelAdvice? = null,
+    val scanningHardware: Boolean = false,
     /** One-shot signal to the activity to ask for the notification permission. */
     val requestNotificationPermission: Boolean = false,
     /** An Android runtime permission a tool call needs, to show to the system dialog. */
@@ -568,6 +581,17 @@ data class AppUiState(
 
     val selectedLiteRtIsLoaded: Boolean
         get() = selectedLiteRtModel?.id?.value == litertlmLoadedId
+
+    /** Whether anything can answer a chat: a GGUF, a LiteRT package, or a server. */
+    val hasAnyModel: Boolean
+        get() = localModels.isNotEmpty() || litertlmModels.isNotEmpty() || endpoints.isNotEmpty()
+
+    /**
+     * The first-run guide shows on a fresh install, once the catalogs are known to be empty (so a
+     * returning user is never flashed the guide before their models load), or when reopened.
+     */
+    val showOnboarding: Boolean
+        get() = onboardingReopened || (!onboardingCompleted && catalogsLoaded && !hasAnyModel)
 
     /** The backend a given model will load onto, falling back to CPU when unavailable. */
     fun backendFor(model: LocalModelRecord): RuntimeBackend =
@@ -690,6 +714,13 @@ class MainViewModel(
 
     init {
         restoreRoutingSettings()
+        mutableState.update { it.copy(onboardingCompleted = container.onboardingStore.completed()) }
+        // Adding the first model or server finishes the guide for good, however it was added.
+        viewModelScope.launch {
+            state.map { it.catalogsLoaded && it.hasAnyModel }.distinctUntilChanged().collect { ready ->
+                if (ready) completeOnboarding()
+            }
+        }
         mutableState.update { it.copy(embeddingModelName = container.embeddingModelStore.modelName()) }
         container.llamaCppClient.processFailureListener = { message ->
             mutableState.update {
@@ -1124,6 +1155,47 @@ class MainViewModel(
                 runCatching { container.liteRtLmStore.storageBytesUsed() }.getOrDefault(0L)
             mutableState.update { it.copy(modelStorageBytes = bytes) }
         }
+    }
+
+    /**
+     * Scans the phone for the first-run guide: the device profile, the CPU's instruction-set
+     * features, and the accelerators this build's runtime enumerates. Asks the runtime afresh
+     * rather than trusting the startup detection, which may not have finished yet.
+     */
+    fun scanHardware() {
+        if (mutableState.value.scanningHardware) return
+        // Set before launching so the guide shows the scan as running from the very first frame.
+        mutableState.update { it.copy(scanningHardware = true) }
+        viewModelScope.launch {
+            val backends = detectBackendsNow()
+            mutableState.update { it.copy(availableBackends = backends) }
+            refreshDeviceProfile()
+            // Whether llama.cpp loaded at all: a build without it for this processor still reports
+            // a CPU backend, and the guide must not recommend a GGUF that cannot run.
+            val linked = runCatching {
+                container.llamaCppClient.probe().let { probe ->
+                    if (probe.has("nativeRuntimeLinked")) probe.getBoolean("nativeRuntimeLinked") else null
+                }
+            }.getOrNull()
+            val advice = runCatching {
+                withContext(Dispatchers.IO) {
+                    val profile = mutableState.value.deviceProfile ?: container.deviceProfiler.snapshot()
+                    ModelAdvisor.advise(HardwareScanner.scan(profile, backends, linked))
+                }
+            }.getOrNull()
+            mutableState.update { it.copy(hardwareAdvice = advice, scanningHardware = false) }
+        }
+    }
+
+    /** Ends the first-run guide, now and on every later launch. */
+    fun completeOnboarding() {
+        container.onboardingStore.markCompleted()
+        mutableState.update { it.copy(onboardingCompleted = true, onboardingReopened = false) }
+    }
+
+    /** Shows the guide again from Settings, keeping any scan already made. */
+    fun reopenOnboarding() {
+        mutableState.update { it.copy(onboardingReopened = true) }
     }
 
     fun refreshDeviceProfile() {
@@ -5120,6 +5192,7 @@ class MainViewModel(
                     endpoints = endpoints,
                     selectedRuntimeId = selected,
                     error = null,
+                    catalogsLoaded = true,
                 )
             }
             // Profiles first: the restore below reads them, and a model imported before profiles
