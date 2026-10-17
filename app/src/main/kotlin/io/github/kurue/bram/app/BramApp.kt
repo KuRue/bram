@@ -381,6 +381,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onRemoveEndpoint = viewModel::removeEndpoint,
                                 onBenchmarkLiteRt = viewModel::runLiteRtBenchmark,
                                 onUnloadModel = viewModel::unloadModel,
+                                onLoadProfile = viewModel::loadProfile,
                                 onRemoveLiteRt = viewModel::removeLiteRt,
                                 onAutoConfigure = viewModel::autoConfigure,
                                 onBenchmark = { id -> viewModel.runBenchmark(id) },
@@ -1231,6 +1232,7 @@ private fun ModelsScreen(
     onRemoveEndpoint: (String) -> Unit,
     onBenchmarkLiteRt: (String) -> Unit = {},
     onUnloadModel: () -> Unit = {},
+    onLoadProfile: (String) -> Unit = {},
     onRemoveLiteRt: (String) -> Unit = {},
     onAutoConfigure: (String) -> Unit,
     onTuneBatch: (String) -> Unit,
@@ -1247,7 +1249,7 @@ private fun ModelsScreen(
     /** Opens directly on the add-a-server form, as the first-run guide asks. */
     startAddingServer: Boolean = false,
 ) {
-    var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
+    var openProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var addingProfile by rememberSaveable { mutableStateOf(startAddingServer) }
     var addingServerFirst by rememberSaveable { mutableStateOf(startAddingServer) }
     var editingEndpointId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -1267,6 +1269,52 @@ private fun ModelsScreen(
             onDiscoverRemoteModels = onDiscoverRemoteModels,
             initialEndpoint = state.endpoints.firstOrNull { it.id == editingEndpointId },
             startWithServer = addingServerFirst,
+        )
+        return
+    }
+    val openProfile = state.profiles.firstOrNull { it.id == openProfileId }
+    val openModel = openProfile?.let { p -> state.localModels.firstOrNull { it.id == p.modelId } }
+    if (openProfile != null && openModel != null) {
+        val profile = openProfile
+        val facts = profileFacts(state, profile, openModel)
+        BackHandler { openProfileId = null }
+        ProfileDetail(
+            profile = profile,
+            model = openModel,
+            loaded = facts.loaded,
+            loading = facts.loading,
+            busy = facts.busy,
+            tuning = state.batchTuneProfileId == profile.id || state.tuningProfileId == profile.id,
+            tuneStatus = state.status?.takeIf {
+                state.batchTuneProfileId == profile.id || state.tuningProfileId == profile.id
+            },
+            backend = facts.backend,
+            availableBackends = state.availableBackends,
+            removesModelOnDelete = state.profiles.count { it.modelId == profile.modelId } == 1,
+            onBack = { openProfileId = null },
+            onLoad = { onLoadProfile(profile.id) },
+            onUnload = onUnloadModel,
+            onUpdateProfile = onUpdateProfile,
+            onDeleteProfile = {
+                openProfileId = null
+                onDeleteProfile(profile.id)
+            },
+            onDuplicate = { onCreateProfile(openModel) },
+            onAutoConfigure = { onAutoConfigure(profile.id) },
+            onBenchmark = { onBenchmark(profile.id) },
+            onSustainedBenchmark = { onSustainedBenchmark(profile.id) },
+            onCancelBenchmark = onCancelBenchmark,
+            benchmarking = state.benchmarkingProfileId == profile.id,
+            benchmarkStatus = state.benchmarkStatus.takeIf { state.benchmarkStatusProfileId == profile.id },
+            benchRuns = state.benchRuns.filter { it.profileId == profile.id },
+            currentFingerprint = state.measurementFingerprint,
+            onTuneBatch = { onTuneBatch(profile.id) },
+            onTuneDimension = { dimension -> onTuneDimension(profile.id, dimension) },
+            tuningDimension = tuningDimension,
+            staleMeasurement = facts.stale,
+            memoryBandwidth = state.memoryBandwidth,
+            converting = state.convertingProfileId == profile.id,
+            onConvertQuant = { target -> onConvertQuant(profile.id, target) },
         )
         return
     }
@@ -1318,53 +1366,18 @@ private fun ModelsScreen(
         items(state.profiles, key = { it.id }) { profile ->
             val model = state.localModels.firstOrNull { it.id == profile.modelId }
             if (model != null) {
-                val backend = RuntimeBackend.fromId(profile.backendId)
-                    .takeIf { it in state.availableBackends } ?: RuntimeBackend.CPU
-                ProfileCard(
+                val facts = profileFacts(state, profile, model)
+                ProfileRow(
                     profile = profile,
                     model = model,
-                    expanded = expandedProfileId == profile.id,
-                    role = when (profile.id) {
-                        state.routingPool.primaryTargetId -> RoutingPoolSlot.PRIMARY
-                        else -> null
-                    },
-                    loaded = state.activeProfileId == profile.id &&
-                        state.loadedModelId == model.id.value && state.cpuValidated,
-                    loading = state.isLoadingModel && state.activeProfileId == profile.id,
-                    busy = state.isGenerating || state.isValidatingAccelerator ||
-                        state.batchTuneProfileId != null || state.tuningProfileId != null ||
-                        state.convertingProfileId != null,
-                    tuning = state.batchTuneProfileId == profile.id || state.tuningProfileId == profile.id,
-                    tuneStatus = state.status?.takeIf {
-                        state.batchTuneProfileId == profile.id || state.tuningProfileId == profile.id
-                    },
-                    backend = backend,
-                    availableBackends = state.availableBackends,
-                    removesModelOnDelete = state.profiles.count { it.modelId == profile.modelId } == 1,
-                    onToggleExpanded = {
-                        expandedProfileId = if (expandedProfileId == profile.id) null else profile.id
-                    },
-                    onUpdateProfile = onUpdateProfile,
-                    onDeleteProfile = { onDeleteProfile(profile.id) },
-                    onDuplicate = { onCreateProfile(model) },
-                    onAutoConfigure = { onAutoConfigure(profile.id) },
-                    onBenchmark = { onBenchmark(profile.id) },
-                    onSustainedBenchmark = { onSustainedBenchmark(profile.id) },
-                    onCancelBenchmark = onCancelBenchmark,
+                    backend = facts.backend,
+                    loaded = facts.loaded,
+                    loading = facts.loading,
+                    busy = facts.busy,
+                    staleMeasurement = facts.stale,
+                    onOpen = { openProfileId = profile.id },
+                    onLoad = { onLoadProfile(profile.id) },
                     onUnload = onUnloadModel,
-                    benchmarking = state.benchmarkingProfileId == profile.id,
-                    benchmarkStatus = state.benchmarkStatus.takeIf { state.benchmarkStatusProfileId == profile.id },
-                    benchRuns = state.benchRuns.filter { it.profileId == profile.id },
-                    currentFingerprint = state.measurementFingerprint,
-                    onTuneBatch = { onTuneBatch(profile.id) },
-                    onTuneDimension = { dimension -> onTuneDimension(profile.id, dimension) },
-                    tuningDimension = tuningDimension,
-                    memoryBandwidth = state.memoryBandwidth,
-                    staleMeasurement = state.measurementFingerprint.isNotBlank() &&
-                        profile.measuredFingerprint.isNotBlank() &&
-                        profile.measuredFingerprint != state.measurementFingerprint,
-                    converting = state.convertingProfileId == profile.id,
-                    onConvertQuant = { target -> onConvertQuant(profile.id, target) },
                 )
             }
         }
@@ -1768,7 +1781,7 @@ private fun AcceleratorValidationCard(
  * 0/0 means llama.cpp's defaults (512/128), which is what Bram ran before the setting existed, so
  * it is the preset an untouched profile matches.
  */
-private data class BatchPreset(
+internal data class BatchPreset(
     val batch: Int,
     val ubatch: Int,
     val label: String,
@@ -1777,7 +1790,7 @@ private data class BatchPreset(
         profile.batchTokens == batch && profile.ubatchTokens == ubatch
 }
 
-private val batchPresets = listOf(
+internal val batchPresets = listOf(
     BatchPreset(0, 0, "Default 512/128"),
     BatchPreset(256, 128, "256/128"),
     BatchPreset(512, 128, "512/128"),
@@ -1793,665 +1806,6 @@ private val batchPresets = listOf(
  * whether it is loaded. Everything else is opt-in, because a phone with several profiles should not
  * open onto a wall of controls.
  */
-@Composable
-private fun ProfileCard(
-    profile: ModelProfile,
-    model: LocalModelRecord,
-    expanded: Boolean,
-    role: RoutingPoolSlot?,
-    loaded: Boolean,
-    loading: Boolean,
-    busy: Boolean,
-    tuning: Boolean,
-    /** The live step while [tuning], shown inline so the measurement is not silent. */
-    tuneStatus: String?,
-    backend: RuntimeBackend,
-    availableBackends: List<RuntimeBackend>,
-    removesModelOnDelete: Boolean,
-    onToggleExpanded: () -> Unit,
-    onUpdateProfile: (ModelProfile) -> Unit,
-    onDeleteProfile: () -> Unit,
-    onDuplicate: () -> Unit,
-    onAutoConfigure: () -> Unit,
-    onBenchmark: () -> Unit = {},
-    onSustainedBenchmark: () -> Unit = {},
-    /** Releases the loaded model, which is what unlocks its load-time settings. */
-    onUnload: () -> Unit = {},
-    /** Stops the benchmark in flight. Only reachable while [benchmarking] is true. */
-    onCancelBenchmark: () -> Unit = {},
-    /** True while this profile's benchmark runs; [benchmarkStatus] is its live step. */
-    benchmarking: Boolean = false,
-    benchmarkStatus: String? = null,
-    /** This profile's recorded runs, newest first. */
-    benchRuns: List<io.github.kurue.bram.core.domain.BenchRun> = emptyList(),
-    currentFingerprint: String = "",
-    onTuneBatch: () -> Unit,
-    onTuneDimension: (TuningDimension) -> Unit,
-    /** The dimension being measured right now, so its row can say "Tuning…". */
-    tuningDimension: TuningDimension?,
-    /** True when the profile's measurements were recorded under a different device/build. */
-    staleMeasurement: Boolean = false,
-    /** The device's measured bandwidth, for the decode-ceiling pill; null when not measured. */
-    memoryBandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth? = null,
-    /** A quant conversion of this profile's file in flight. */
-    converting: Boolean = false,
-    /** Starts a quant conversion of this profile's file to the given ggml type ("q4_0"). */
-    onConvertQuant: (String) -> Unit = {},
-) {
-    // Settings the runtime reads at load time cannot change under a loaded model.
-    val locked = loaded || loading || busy
-    // Measuring reloads the model as part of its work and puts back whatever was loaded when it
-    // finished, so a loaded model is no reason to refuse — only work already in flight is.
-    val measuring = loading || busy
-    var renaming by rememberSaveable(profile.id) { mutableStateOf(false) }
-    var draftName by rememberSaveable(profile.id) { mutableStateOf(profile.name) }
-    var editingPrompt by rememberSaveable(profile.id) { mutableStateOf(false) }
-    var draftPrompt by rememberSaveable(profile.id) { mutableStateOf(profile.systemPrompt) }
-    var showAdvanced by rememberSaveable(profile.id) { mutableStateOf(false) }
-    var confirmDelete by rememberSaveable(profile.id) { mutableStateOf(false) }
-    val deleteSwipeState = rememberSwipeToDismissBoxState(
-        positionalThreshold = { distance -> distance * 0.32f },
-    )
-    val swipeScope = rememberCoroutineScope()
-
-    SwipeToDismissBox(
-        state = deleteSwipeState,
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)),
-        enableDismissFromStartToEnd = false,
-        enableDismissFromEndToStart = !locked,
-        backgroundContent = {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .padding(2.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(MaterialTheme.colorScheme.errorContainer)
-                    .padding(horizontal = 16.dp),
-                contentAlignment = Alignment.CenterEnd,
-            ) {
-                TextButton(
-                    onClick = { confirmDelete = true },
-                    enabled = !locked,
-                ) {
-                    TrashIcon(
-                        tint = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        "Delete",
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            }
-        },
-    ) {
-    GlassSurface(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(
-                Modifier.fillMaxWidth().clickable(onClick = onToggleExpanded),
-                verticalAlignment = Alignment.Top,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            profile.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        if (expanded && !renaming) {
-                            Spacer(Modifier.width(6.dp))
-                            IconButton(
-                                onClick = { renaming = true },
-                                modifier = Modifier.size(28.dp),
-                            ) {
-                                PencilIcon(
-                                    MaterialTheme.colorScheme.onSurfaceVariant,
-                                    Modifier.size(14.dp),
-                                )
-                            }
-                        }
-                    }
-                    Text(
-                        buildString {
-                            append(model.displayName).append(" · ").append(model.quantization)
-                                .append(" · ").append(formatBytes(model.fileSizeBytes))
-                            // A hybrid (SSM/mamba) arch re-decodes the whole thread every turn, so it
-                            // cannot reuse the prompt cache. Tagged so a model picked for a long chat
-                            // can be a transformer, which does.
-                            if (isHybridArchitecture(model.architecture)) append(" · no prompt cache")
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    if (role != null) {
-                        Text(
-                            role.label,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold,
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                    } else if (loaded) {
-                        Text(
-                            "● In use",
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    }
-                    ProfilePerformancePill(profile)
-                    ProfileCeilingPill(profile, model, memoryBandwidth)
-                }
-            }
-
-            AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut(),
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    ProfileSettingPills(profile, backend)
-                    if (staleMeasurement) {
-                        Text(
-                            "These measurements were taken on a different device or build. " +
-                                "Run Auto-configure to re-measure on this one.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                HorizontalDivider()
-
-                if (renaming) {
-                    OutlinedTextField(
-                        value = draftName,
-                        onValueChange = { draftName = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Profile name") },
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
-                                // A nameless profile is unpickable in the list, so an empty field
-                                // keeps the old name rather than producing a blank row.
-                                draftName.trim().takeIf(String::isNotEmpty)?.let { name ->
-                                    onUpdateProfile(profile.copy(name = name))
-                                }
-                                renaming = false
-                            },
-                        ) { Text("Save name") }
-                        TextButton(onClick = { renaming = false }) { Text("Cancel") }
-                    }
-                }
-
-                // The pills above are the argument for this button: re-measuring is how the choice
-                // of backend changes, and the manual controls sit behind an expander so the card
-                // stays short until someone actually wants to turn a dial.
-                // Load-time settings (backend, context, threads…) are locked while this profile is
-                // the loaded one. There was no way out short of loading another model, so say why
-                // and offer the way.
-                if (loaded && !loading) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Loaded — unload to change backend, context, or threads.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(
-                            onClick = onUnload,
-                            enabled = !busy,
-                            modifier = Modifier.testTag("unload-profile"),
-                        ) { Text("Unload") }
-                    }
-                }
-                Button(onClick = onAutoConfigure, enabled = !measuring, modifier = Modifier.fillMaxWidth()) {
-                    Text("Auto-configure")
-                }
-                // Measures the configuration as it stands, rather than choosing one: the numbers
-                // chat will actually get, kept as a history so a change can be compared.
-                if (benchmarking) {
-                    // Cancel sits beside the live step rather than replacing it: a sustained run is
-                    // five minutes of unbroken decode, and the status is what says how far along it
-                    // is, so the way out cannot take its place.
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) {
-                            Text(benchmarkStatus ?: "Benchmarking…")
-                        }
-                        OutlinedButton(
-                            onClick = onCancelBenchmark,
-                            modifier = Modifier.testTag("cancel-benchmark"),
-                        ) { Text("Cancel") }
-                    }
-                } else {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = onBenchmark,
-                            enabled = !measuring,
-                            modifier = Modifier.weight(1f).testTag("benchmark-profile"),
-                        ) { Text("Benchmark") }
-                        // Back-to-back decode for five minutes: the speed a long run settles at.
-                        OutlinedButton(
-                            onClick = onSustainedBenchmark,
-                            enabled = !measuring,
-                            modifier = Modifier.weight(1f).testTag("benchmark-sustained"),
-                        ) { Text("Sustained 5 min") }
-                    }
-                }
-                BenchRunSummary(benchRuns, currentFingerprint, model, memoryBandwidth)
-
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { showAdvanced = !showAdvanced }
-                        .padding(vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    SectionLabel("Advanced settings", Modifier.weight(1f))
-                    Text(
-                        if (showAdvanced) "▲" else "▼",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (showAdvanced) {
-                    if (model.tensorTypeCounts.isNotEmpty()) {
-                        val report = QuantCompatibility.report(model.tensorTypeCounts)
-                        if (report.npu.sharePercent < 100) {
-                            SectionLabel("Quant conversion")
-                            Text(
-                                "The NPU can run ${report.npu.sharePercent}% of this file's weight " +
-                                    "tensors. Convert a separate copy for full NPU compatibility.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                TextButton(onClick = { onConvertQuant("q4_0") }, enabled = !busy && !converting) {
-                                    Text(if (converting) "Converting…" else "To Q4_0")
-                                }
-                                TextButton(onClick = { onConvertQuant("q8_0") }, enabled = !busy && !converting) {
-                                    Text("To Q8_0")
-                                }
-                            }
-                        }
-                    }
-                    if (!model.hasChatTemplate) {
-                        SectionLabel("Compatibility")
-                        Text(
-                            "This file carries no chat template, so Bram renders it with a built-in " +
-                                "fallback that cannot offer the model tools.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-
-                    SectionLabel("Backend")
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        availableBackends.forEach { candidate ->
-                            FilterChip(
-                                selected = candidate == backend,
-                                onClick = {
-                                    onUpdateProfile(
-                                        profile.copy(
-                                            backendId = if (candidate == RuntimeBackend.CPU) "" else candidate.name,
-                                        ),
-                                    )
-                                },
-                                enabled = !locked,
-                                label = { Text(candidate.label) },
-                            )
-                        }
-                    }
-
-                    SectionLabel("Context")
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        contextOptions(model).forEach { tokens ->
-                            FilterChip(
-                                selected = tokens == profile.contextTokens,
-                                onClick = { onUpdateProfile(profile.copy(contextTokens = tokens)) },
-                                enabled = !locked,
-                                label = { Text(formatTokens(tokens)) },
-                            )
-                        }
-                    }
-
-                    SectionLabel("Sampling")
-                    SamplerControls(
-                        profile = profile,
-                        enabled = !busy,
-                        onUpdateProfile = onUpdateProfile,
-                    )
-
-                    // These two are context parameters rather than sampling ones: they change how
-                    // the load builds the attention cache, so the accelerator comparison measures
-                    // them together with the backend choice rather than in isolation.
-                    SectionLabel("Flash attention")
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        FlashAttentionMode.entries.forEach { mode ->
-                            FilterChip(
-                                selected = mode == profile.flashAttention,
-                                onClick = {
-                                    // A quantized V cache needs flash attention, so turning it off
-                                    // also returns the cache to F16 rather than saving an unusable
-                                    // combination.
-                                    val kv = if (mode == FlashAttentionMode.OFF) KvCacheType.F16 else profile.kvCacheType
-                                    onUpdateProfile(
-                                        profile.copy(flashAttention = mode, kvCacheType = kv),
-                                    )
-                                },
-                                enabled = !busy,
-                                label = { Text(mode.label) },
-                            )
-                        }
-                    }
-
-                    SectionLabel("Attention memory")
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        KvCacheType.entries.forEach { type ->
-                            // llama.cpp refuses a quantized V cache without flash attention on,
-                            // so the combination is simply not offered.
-                            val allowed = type == KvCacheType.F16 || profile.flashAttention != FlashAttentionMode.OFF
-                            FilterChip(
-                                selected = type == profile.kvCacheType,
-                                onClick = { onUpdateProfile(profile.copy(kvCacheType = type)) },
-                                enabled = !busy && allowed,
-                                label = { Text(type.label) },
-                            )
-                        }
-                    }
-                    Text(
-                        profile.kvCacheType.summary,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-
-                    // Expert streaming — only for MoE architectures whose routed experts can be
-                    // read from flash. This is what lets a model several times larger than RAM run.
-                    if (isStreamableMoeArchitecture(model.architecture)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            SectionLabel("Stream experts", Modifier.weight(1f))
-                            Checkbox(
-                                checked = profile.streamExperts,
-                                onCheckedChange = { onUpdateProfile(profile.copy(streamExperts = it)) },
-                                enabled = !busy,
-                            )
-                        }
-                        Text(
-                            "Read each token's experts from flash instead of loading the whole " +
-                                "model. Runs a MoE larger than RAM, losslessly, at a cost in speed.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        if (profile.streamExperts) {
-                            SectionLabel("Expert cache")
-                            Row(
-                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                listOf(0 to "Auto", 1024 to "1 GiB", 2048 to "2 GiB", 4096 to "4 GiB")
-                                    .forEach { (mb, label) ->
-                                        FilterChip(
-                                            selected = profile.streamCacheMb == mb,
-                                            onClick = { onUpdateProfile(profile.copy(streamCacheMb = mb)) },
-                                            enabled = !busy,
-                                            label = { Text(label) },
-                                        )
-                                    }
-                            }
-                            Text(
-                                "Reads only each token's routed experts from flash. Auto sizes the cache to " +
-                                    "free RAM and pins the hot dense weights; experts are prefetched on " +
-                                    "background threads while the model computes.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        SectionLabel("Reasoning", Modifier.weight(1f))
-                        Checkbox(
-                            checked = profile.thinkingEnabled,
-                            onCheckedChange = { onUpdateProfile(profile.copy(thinkingEnabled = it)) },
-                            enabled = !busy,
-                        )
-                    }
-
-                    // The batch is a context parameter like flash attention: it changes how the
-                    // prompt is evaluated, so it belongs with the load-time settings rather than
-                    // the sampling ones. It is also the biggest lever on time-to-first-token, so
-                    // the measured option sits right beside the manual presets instead of hiding
-                    // behind the auto-configure flow.
-                    SectionLabel("Batch")
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        batchPresets.forEach { preset ->
-                            FilterChip(
-                                selected = preset.matches(profile),
-                                onClick = {
-                                    onUpdateProfile(
-                                        profile.copy(
-                                            batchTokens = preset.batch,
-                                            ubatchTokens = preset.ubatch,
-                                        ),
-                                    )
-                                },
-                                enabled = !locked,
-                                label = { Text(preset.label) },
-                            )
-                        }
-                    }
-                    Button(
-                        onClick = onTuneBatch,
-                        enabled = !measuring,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(if (tuning) "Tuning…" else "Tune batch")
-                    }
-                    tuneStatus?.let { status ->
-                        Text(
-                            status,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    profile.tuning.firstOrNull { it.dimension == TuningDimension.BATCH }
-                        ?.chosen?.takeIf(String::isNotBlank)?.let { batch ->
-                            Text(
-                                "Batch $batch",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-
-                    // The decode-shaped dimensions follow the batch pattern: a measured choice is a
-                    // label beside a Tune button, and Default is always one tap away. Each one only
-                    // matters on the hardware that exposes it, so the Hexagon row appears only when
-                    // this profile loads onto the NPU.
-                    SectionLabel("Decode tuning")
-                    TuningDimensionRow(
-                        label = "Threads",
-                        isDefault = profile.threads == 0,
-                        chosen = profile.threads.takeIf { it > 0 }?.let { "$it threads" },
-                        measuring = tuningDimension == TuningDimension.THREADS,
-                        enabled = !busy,
-                        onDefault = { onUpdateProfile(profile.copy(threads = 0)) },
-                        onTune = { onTuneDimension(TuningDimension.THREADS) },
-                    )
-                    // Decode can use fewer threads than prompt processing: it stops gaining sooner,
-                    // so extra threads there mostly cost energy. Benchmark to compare.
-                    SectionLabel("Decode threads")
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        val cores = Runtime.getRuntime().availableProcessors()
-                        (listOf(0) + listOf(2, 3, 4, 5, 6, 8).filter { it <= cores }).forEach { count ->
-                            FilterChip(
-                                selected = profile.decodeThreads == count,
-                                onClick = { onUpdateProfile(profile.copy(decodeThreads = count)) },
-                                enabled = !locked,
-                                label = { Text(if (count == 0) "Same" else "$count") },
-                            )
-                        }
-                    }
-                    TuningDimensionRow(
-                        label = "CPU mask",
-                        isDefault = profile.cpuMask.isEmpty(),
-                        chosen = profile.cpuMask.takeIf(String::isNotEmpty)?.let { "0x$it" },
-                        measuring = tuningDimension == TuningDimension.CPU_MASK,
-                        enabled = !busy,
-                        onDefault = {
-                            onUpdateProfile(profile.copy(cpuMask = "", cpuStrict = false))
-                        },
-                        onTune = { onTuneDimension(TuningDimension.CPU_MASK) },
-                    )
-                    TuningDimensionRow(
-                        label = "Poll",
-                        isDefault = profile.poll < 0,
-                        chosen = profile.poll.takeIf { it >= 0 }?.let { "$it" },
-                        measuring = tuningDimension == TuningDimension.POLL,
-                        enabled = !busy,
-                        onDefault = { onUpdateProfile(profile.copy(poll = -1)) },
-                        onTune = { onTuneDimension(TuningDimension.POLL) },
-                    )
-                    SectionLabel("Load mode")
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        LoadMode.entries.forEach { mode ->
-                            FilterChip(
-                                selected = mode == profile.loadMode,
-                                onClick = { onUpdateProfile(profile.copy(loadMode = mode)) },
-                                enabled = !locked,
-                                label = { Text(mode.label) },
-                            )
-                        }
-                        TextButton(
-                            onClick = { onTuneDimension(TuningDimension.LOAD_MODE) },
-                            enabled = !measuring,
-                        ) {
-                            Text(
-                                if (tuningDimension == TuningDimension.LOAD_MODE) "Tuning…" else "Tune",
-                            )
-                        }
-                    }
-                    if (backend == RuntimeBackend.HEXAGON) {
-                        TuningDimensionRow(
-                            label = "Hexagon",
-                            isDefault = profile.hexFlags.isDefault,
-                            chosen = if (profile.hexFlags.isDefault) null else "HMX + host buffers",
-                            measuring = tuningDimension == TuningDimension.HEX_FLAGS,
-                            enabled = !busy,
-                            onDefault = { onUpdateProfile(profile.copy(hexFlags = HexFlags())) },
-                            onTune = { onTuneDimension(TuningDimension.HEX_FLAGS) },
-                        )
-                    }
-
-                    HorizontalDivider()
-                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                        TextButton(onClick = { editingPrompt = !editingPrompt }) {
-                            Text(if (profile.systemPrompt.isBlank()) "Add instructions" else "Instructions")
-                        }
-                        TextButton(onClick = onDuplicate, enabled = !busy) { Text("Duplicate") }
-                    }
-
-                    if (editingPrompt) {
-                        OutlinedTextField(
-                            value = draftPrompt,
-                            onValueChange = { draftPrompt = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            minLines = 3,
-                            maxLines = 8,
-                            label = { Text("Instructions for this profile") },
-                        )
-                        Text(
-                            "Added to Bram's own instructions, not replacing them.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = {
-                                onUpdateProfile(profile.copy(systemPrompt = draftPrompt.trim()))
-                                editingPrompt = false
-                            }) { Text("Save instructions") }
-                            TextButton(onClick = {
-                                draftPrompt = profile.systemPrompt
-                                editingPrompt = false
-                            }) { Text("Cancel") }
-                        }
-                    }
-                }
-
-                Text(
-                    "${model.layerCount.takeIf { it > 0 } ?: "?"} layers · trained context " +
-                        "${formatTokens(model.trainedContextTokens)} · SHA ${model.sha256.take(12)}…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                }
-            }
-        }
-    }
-    }
-
-    if (confirmDelete) {
-        AlertDialog(
-            onDismissRequest = {
-                confirmDelete = false
-                swipeScope.launch { deleteSwipeState.reset() }
-            },
-            title = { Text("Delete ${profile.name}?") },
-            text = {
-                Text(
-                    if (removesModelOnDelete) {
-                        "This is the model's only profile, so its imported model copy will also be removed."
-                    } else {
-                        "This removes the profile and its settings. The imported model stays on this device."
-                    },
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmDelete = false
-                        onDeleteProfile()
-                    },
-                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        confirmDelete = false
-                        swipeScope.launch { deleteSwipeState.reset() }
-                    },
-                ) { Text("Cancel") }
-            },
-        )
-    }
-}
-
 /**
  * The sampling settings, which until now were fixed in the runtime.
  *
@@ -2459,7 +1813,7 @@ private fun ProfileCard(
  * to most people and zero means something specific: the same answer every time.
  */
 @Composable
-private fun SamplerControls(
+internal fun SamplerControls(
     profile: ModelProfile,
     enabled: Boolean,
     onUpdateProfile: (ModelProfile) -> Unit,
@@ -2555,7 +1909,7 @@ enum class RunState { WINNER, LOSER, MEASURING, WAITING, FAILED, REFERENCE }
 
 /** The chosen backend's measured prompt/decode throughput, compact enough for the card header. */
 @Composable
-private fun ProfilePerformancePill(profile: ModelProfile) {
+internal fun ProfilePerformancePill(profile: ModelProfile) {
     val chosenId = profile.backendId.ifBlank { "" }
     val measurement = profile.measurements.firstOrNull { it.backendId == chosenId }
         ?: profile.measurements.firstOrNull { it.isReference && chosenId.isBlank() }
@@ -2655,7 +2009,7 @@ private fun LiteRtModelCard(
  * and decode rows show their share of the bandwidth ceiling for dense models.
  */
 @Composable
-private fun BenchRunSummary(
+internal fun BenchRunSummary(
     runs: List<io.github.kurue.bram.core.domain.BenchRun>,
     currentFingerprint: String,
     model: LocalModelRecord,
@@ -2722,7 +2076,7 @@ private fun BenchRunSummary(
  * reads only its active experts per token, so the file-size ceiling would mislead.
  */
 @Composable
-private fun ProfileCeilingPill(
+internal fun ProfileCeilingPill(
     profile: ModelProfile,
     model: LocalModelRecord,
     bandwidth: io.github.kurue.bram.core.domain.MemoryBandwidth?,
@@ -2937,7 +2291,7 @@ internal fun AutoConfigureOverlay(
  * which is what an untouched profile runs.
  */
 @Composable
-private fun TuningDimensionRow(
+internal fun TuningDimensionRow(
     label: String,
     isDefault: Boolean,
     chosen: String?,
@@ -2974,7 +2328,7 @@ private fun TuningDimensionRow(
 
 /** One quiet profile-summary pill; accent is reserved for the winning performance result. */
 @Composable
-private fun ProfilePill(label: String, emphasized: Boolean = false) {
+internal fun ProfilePill(label: String, emphasized: Boolean = false) {
     Box(
         Modifier
             .clip(RoundedCornerShape(percent = 50))
@@ -2996,7 +2350,7 @@ private fun ProfilePill(label: String, emphasized: Boolean = false) {
 
 /** The effective settings, visible at a glance without reopening each advanced control. */
 @Composable
-private fun ProfileSettingPills(profile: ModelProfile, backend: RuntimeBackend) {
+internal fun ProfileSettingPills(profile: ModelProfile, backend: RuntimeBackend) {
     val batch = profile.batchTokens.takeIf { it > 0 } ?: 512
     val ubatch = profile.ubatchTokens.takeIf { it > 0 } ?: 128
     val settings = buildList {
@@ -4140,7 +3494,7 @@ private fun SystemScreen(
 }
 
 @Composable
-private fun DestinationHeader(title: String, parent: String, onBack: () -> Unit) {
+internal fun DestinationHeader(title: String, parent: String, onBack: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         TextButton(onClick = onBack, contentPadding = PaddingValues(0.dp)) { Text("‹ $parent") }
         SectionHeader(title)
@@ -4984,7 +4338,7 @@ private fun InfoCard(title: String, detail: String) {
 }
 
 @Composable
-private fun ErrorCard(error: String) {
+internal fun ErrorCard(error: String) {
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(Glass.cornerMedium),
@@ -5028,7 +4382,7 @@ internal fun PanelHandle() {
  * because it labels a row of chips rather than opening a section of its own.
  */
 @Composable
-private fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+internal fun SectionLabel(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
         style = MaterialTheme.typography.labelMedium,
@@ -5039,7 +4393,7 @@ private fun SectionLabel(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun MetricRow(label: String, value: String) {
+internal fun MetricRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth()) {
         Text(label, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, fontWeight = FontWeight.Medium)
@@ -5054,7 +4408,7 @@ private fun ReadinessRow(label: String, status: String) {
     }
 }
 
-private fun contextOptions(model: LocalModelRecord): List<Int> {
+internal fun contextOptions(model: LocalModelRecord): List<Int> {
     val maximum = model.trainedContextTokens.takeIf { it > 0 } ?: model.preferredContextTokens
     val standard = listOf(1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072)
     return (standard.filter { it <= maximum } + maximum + model.preferredContextTokens)
@@ -5063,13 +4417,13 @@ private fun contextOptions(model: LocalModelRecord): List<Int> {
         .sorted()
 }
 
-private fun formatBytes(bytes: Long): String {
+internal fun formatBytes(bytes: Long): String {
     val gib = bytes / 1_073_741_824.0
     return if (gib >= 1) String.format(Locale.US, "%.1f GB", gib)
     else String.format(Locale.US, "%.0f MB", bytes / 1_048_576.0)
 }
 
-private fun formatTokens(tokens: Int): String = when {
+internal fun formatTokens(tokens: Int): String = when {
     tokens <= 0 -> "unknown"
     tokens >= 1_000_000 -> String.format(Locale.US, "%.1fM", tokens / 1_000_000.0)
     tokens >= 1_000 -> String.format(Locale.US, "%.0fK", tokens / 1_000.0)
@@ -5088,3 +4442,22 @@ private fun formatSentAt(epochMillis: Long): String {
 }
 
 private fun formatRate(rate: Double?): String = rate?.let { String.format(Locale.US, "%.1f tok/s", it) } ?: "measuring"
+
+/** What the Models list and a profile's detail both need to know about one profile. */
+internal data class ProfileFacts(
+    val backend: RuntimeBackend,
+    val loaded: Boolean,
+    val loading: Boolean,
+    val busy: Boolean,
+    val stale: Boolean,
+)
+
+internal fun profileFacts(state: AppUiState, profile: ModelProfile, model: LocalModelRecord) = ProfileFacts(
+    backend = RuntimeBackend.fromId(profile.backendId).takeIf { it in state.availableBackends } ?: RuntimeBackend.CPU,
+    loaded = state.activeProfileId == profile.id && state.loadedModelId == model.id.value && state.cpuValidated,
+    loading = state.isLoadingModel && state.activeProfileId == profile.id,
+    busy = state.isGenerating || state.isValidatingAccelerator || state.batchTuneProfileId != null ||
+        state.tuningProfileId != null || state.convertingProfileId != null,
+    stale = state.measurementFingerprint.isNotBlank() && profile.measuredFingerprint.isNotBlank() &&
+        profile.measuredFingerprint != state.measurementFingerprint,
+)

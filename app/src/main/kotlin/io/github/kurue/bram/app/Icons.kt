@@ -220,3 +220,29 @@ fun TrashIcon(tint: Color, modifier: Modifier = Modifier) {
         drawPath(body, tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
     }
 }
+
+/** More actions: three stacked dots, the platform's overflow mark. */
+@Composable
+fun MoreIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val radius = size.minDimension * 0.075f
+        val x = size.width / 2f
+        listOf(0.28f, 0.5f, 0.72f).forEach { fraction ->
+            drawCircle(tint, radius, androidx.compose.ui.geometry.Offset(x, size.height * fraction))
+        }
+    }
+}
+
+/** Opens a detail: a light chevron pointing the way the screen will move. */
+@Composable
+fun ChevronRightIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.08f
+        val path = Path().apply {
+            moveTo(size.width * 0.40f, size.height * 0.28f)
+            lineTo(size.width * 0.62f, size.height * 0.5f)
+            lineTo(size.width * 0.40f, size.height * 0.72f)
+        }
+        drawPath(path, tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
+    }
+}
