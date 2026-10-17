@@ -13,8 +13,6 @@ class ActivitySummaryTest {
 
     private val zone = ZoneId.of("America/New_York")
     private val october = YearMonth.of(2026, 10)
-    private val monthStart = ActivitySummary.bounds(october, zone).first
-    private val recordedSince = monthStart - 1
 
     private fun at(day: Int, hour: Int = 12) =
         LocalDate.of(2026, 10, day).atTime(hour, 0).atZone(zone).toInstant().toEpochMilli()
@@ -52,7 +50,7 @@ class ActivitySummaryTest {
                 run("a1", at(3), status = RunStatus.FAILED, root = "turn", output = 20, remote = true),
                 run("a2", at(3, 13), root = "turn", output = 100),
             ),
-            october, zone, recordedSince,
+            october, zone,
         )
         assertEquals(1, month.completedRuns)
         assertEquals(0, month.unfinishedRuns)
@@ -63,11 +61,13 @@ class ActivitySummaryTest {
 
     @Test
     fun `unreported usage is unknown, while a measured zero is zero`() {
-        val unknown = ActivitySummary.month(listOf(run("a", at(5), output = null, input = null)), october, zone, recordedSince)
+        val unknown = ActivitySummary.month(listOf(run("a", at(5), output = null, input = null)), october, zone)
         assertNull(unknown.generatedTokens)
         assertFalse("a run without usage makes the month incomplete", unknown.complete)
+        assertEquals(1, unknown.unmeasuredRuns)
+        assertEquals(0, unknown.legacyRuns)
 
-        val zero = ActivitySummary.month(listOf(run("a", at(5), output = 0, input = 0, measured = true)), october, zone, recordedSince)
+        val zero = ActivitySummary.month(listOf(run("a", at(5), output = 0, input = 0, measured = true)), october, zone)
         assertEquals(0L, zero.generatedTokens)
         assertTrue(zero.complete)
     }
@@ -79,7 +79,7 @@ class ActivitySummaryTest {
         val firstOfNovember = LocalDate.of(2026, 11, 1).atStartOfDay(zone).toInstant().toEpochMilli()
         val month = ActivitySummary.month(
             listOf(run("a", lateHalloween), run("b", firstOfNovember)),
-            october, zone, recordedSince,
+            october, zone,
         )
         assertEquals(1, month.completedRuns)
         assertEquals(mapOf(LocalDate.of(2026, 10, 31) to 1), month.runsPerDay)
@@ -93,7 +93,7 @@ class ActivitySummaryTest {
                 run("c", at(2), status = RunStatus.CANCELLED),
                 run("r", at(2), status = RunStatus.RUNNING),
             ),
-            october, zone, recordedSince,
+            october, zone,
         )
         assertEquals(0, month.completedRuns)
         assertEquals(2, month.unfinishedRuns)
@@ -103,16 +103,17 @@ class ActivitySummaryTest {
     fun `tool calls are executions, summed, and rows from before the count make the month partial`() {
         val month = ActivitySummary.month(
             listOf(run("a", at(1), tools = 3), run("b", at(2), tools = 2), run("old", at(2), tools = null)),
-            october, zone, recordedSince,
+            october, zone,
         )
         assertEquals(5, month.toolCalls)
         assertFalse(month.complete)
+        assertEquals(1, month.legacyRuns)
     }
 
     @Test
-    fun `a month that starts before complete records is marked partial`() {
-        val month = ActivitySummary.month(listOf(run("a", at(20))), october, zone, recordedSince = at(10))
-        assertFalse(month.complete)
+    fun `a month with only fully recorded runs is complete, even on a fresh install`() {
+        val month = ActivitySummary.month(listOf(run("a", at(20))), october, zone)
+        assertTrue(month.complete)
         assertEquals(1, month.completedRuns)
     }
 
@@ -120,7 +121,7 @@ class ActivitySummaryTest {
     fun `completed runs are split by origin`() {
         val month = ActivitySummary.month(
             listOf(run("a", at(1)), run("b", at(2), origin = RunOrigin.TASK), run("c", at(3), origin = RunOrigin.TASK)),
-            october, zone, recordedSince,
+            october, zone,
         )
         assertEquals(mapOf(RunOrigin.CHAT to 1, RunOrigin.TASK to 2), month.completedByOrigin)
     }

@@ -31,10 +31,15 @@ data class MonthActivity(
     /** Completed runs per day of the month, for the chart; days without runs are absent. */
     val runsPerDay: Map<LocalDate, Int>,
     /**
-     * False when part of the month predates complete records (or some runs had no usage), so the
-     * totals undercount; Home says so instead of presenting them as the whole month.
+     * False when some of the month's runs were recorded before usage and tool calls were (or a
+     * runtime did not report usage), so the totals undercount; Home says so instead of presenting
+     * them as the whole month. A fresh install has no such rows and is complete.
      */
     val complete: Boolean,
+    /** Finished runs this month whose runtime reported no token usage. */
+    val unmeasuredRuns: Int = 0,
+    /** Runs written before usage and tool calls were recorded. */
+    val legacyRuns: Int = 0,
 ) {
     val isEmpty: Boolean get() = completedRuns == 0 && unfinishedRuns == 0
 }
@@ -46,15 +51,11 @@ object ActivitySummary {
         month.atDay(1).atStartOfDay(zone).toInstant().toEpochMilli() to
             month.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant().toEpochMilli()
 
-    /**
-     * Summarises [entries] (any order, any range: those outside [month] are ignored).
-     * [recordedSince] is when complete records begin, from the journal.
-     */
+    /** Summarises [entries] (any order, any range: those outside [month] are ignored). */
     fun month(
         entries: List<RunJournalEntry>,
         month: YearMonth,
         zone: ZoneId,
-        recordedSince: Long?,
     ): MonthActivity {
         val (start, end) = bounds(month, zone)
         val inMonth = entries.filter { it.startedAtEpochMillis in start until end }
@@ -73,7 +74,6 @@ object ActivitySummary {
             .groupingBy { it }
             .eachCount()
         val toolCounts = inMonth.mapNotNull { it.toolCalls }
-        val coversMonth = recordedSince != null && recordedSince <= start
         val allMeasured = terminal.all { it.usageMeasured }
         return MonthActivity(
             month = month,
@@ -86,7 +86,9 @@ object ActivitySummary {
             toolCalls = toolCounts.takeIf { it.isNotEmpty() }?.sum(),
             completedByOrigin = byOrigin,
             runsPerDay = perDay,
-            complete = coversMonth && allMeasured && inMonth.all { it.toolCalls != null },
+            complete = allMeasured && inMonth.all { it.toolCalls != null },
+            unmeasuredRuns = terminal.count { !it.usageMeasured },
+            legacyRuns = inMonth.count { it.toolCalls == null },
         )
     }
 }

@@ -79,7 +79,7 @@ class OnboardingOnDeviceTest {
 
         composeRule.onNodeWithTag("onboarding-skip").performScrollTo().performClick()
         composeRule.waitUntil(LAUNCH_TIMEOUT_MS) { !exists("onboarding") }
-        composeRule.onNodeWithTag("composer-field").assertIsDisplayed()
+        composeRule.onNodeWithTag("home").assertIsDisplayed()
         assertTrue(
             "skipping must be remembered",
             prefs(OnboardingStore.PREFERENCES).getBoolean(OnboardingStore.KEY_COMPLETED, false),
@@ -87,7 +87,7 @@ class OnboardingOnDeviceTest {
 
         // A relaunch with still no models goes to the chat, not back to the guide.
         scenario?.recreate()
-        composeRule.waitUntil(LAUNCH_TIMEOUT_MS) { exists("composer-field") }
+        composeRule.waitUntil(LAUNCH_TIMEOUT_MS) { exists("home") }
         composeRule.waitForIdle()
         assertTrue("the guide came back after it was skipped", !exists("onboarding"))
     }
