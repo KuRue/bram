@@ -427,7 +427,10 @@ emulator:
 
 Still to prove, in order:
 
-1. The same on the S25 Ultra (One UI may add policy on top of AOSP).
+1. ~~The same on the S25 Ultra (One UI may add policy on top of AOSP).~~ **Proven 2026-10-17**:
+   `EnginePackProbeOnDeviceTest` passes on the SM-S938U1 under One UI on Android 17 — Bram sees the
+   installed pack, `checkSignatures` matches, and `System.load` of the pack's library succeeds
+   (`nativeloader … libbram_engine_probe.so … : ok`), so One UI adds no policy on top of AOSP.
 2. A real ggml backend from a pack: switch the native build to `GGML_BACKEND_DL`, so `ggml-base`
    and llama.cpp stay in the base APK and each backend is its own library. A pack's backend links
    against the base's `libggml-base.so`, so **a pack must come from the same llama.cpp pin as the
