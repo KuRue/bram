@@ -53,8 +53,9 @@ the OpenAI-compatible runtime for an endpoint.
 A **profile** (`ModelProfile`) is what a person picks: a GGUF plus a backend, context size,
 sampler, reasoning setting, KV and attention settings, tuning knobs, and the measurements behind
 them. Many profiles can point at one file. Import creates a default profile from the file's
-metadata and then auto-configures it: every backend the build and device offer is measured
-against the CPU, and the fastest one that agrees wins.
+metadata and then auto-configures it: eligible backends are measured against
+the CPU, and the fastest one that agrees wins. The current setup pass explicitly excludes Vulkan;
+manual Vulkan profiles and their validation remain available.
 
 Agent identity is separate from model identity. Each run receives an `AgentIdentity` with a stable
 ID, version, display name, and system prompt. Bram (`bram/0.1`, in `BramDefaults.kt`) is the
