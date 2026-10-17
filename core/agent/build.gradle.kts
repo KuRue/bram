@@ -9,5 +9,6 @@ kotlin {
 dependencies {
     implementation(project(":core:domain"))
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.org.json)
     testImplementation(libs.junit)
 }

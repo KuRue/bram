@@ -973,6 +973,9 @@ class MainViewModel(
                 origin = if (task.automationId != null) RunOrigin.AUTOMATION else RunOrigin.TASK,
             )
             try {
+                // The delegate tool needs to know which runtime and root this attempt runs on.
+                container.delegationAnchor.rootRunId = taskRootId
+                container.delegationAnchor.runtime = selection.runtime
                 container.agent().run(request, selection.runtime).collect { event ->
                     when (event) {
                         is AgentEvent.Status -> Unit
@@ -1002,6 +1005,9 @@ class MainViewModel(
                 throw error
             } catch (error: Throwable) {
                 attemptFailure = error.message ?: error::class.java.simpleName
+            } finally {
+                container.delegationAnchor.rootRunId = null
+                container.delegationAnchor.runtime = null
             }
             when {
                 attemptReply != null -> {
@@ -5116,6 +5122,8 @@ class MainViewModel(
                             }
                         }
                         try {
+                            container.delegationAnchor.rootRunId = activeTurnRootId
+                            container.delegationAnchor.runtime = selection.runtime
                             agent.run(
                                 request = AgentRunRequest(
                                     conversationId = conversationId,
@@ -5343,6 +5351,8 @@ class MainViewModel(
                             }
                         } finally {
                             monitor.cancel()
+                            container.delegationAnchor.rootRunId = null
+                            container.delegationAnchor.runtime = null
                         }
                     }
                 } catch (stalled: TurnStalledException) {

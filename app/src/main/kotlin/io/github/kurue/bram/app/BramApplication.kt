@@ -18,6 +18,7 @@ import io.github.kurue.bram.core.domain.SkillSelection
 import io.github.kurue.bram.core.domain.ToolDefinition
 import io.github.kurue.bram.core.domain.ToolHandler
 import io.github.kurue.bram.core.domain.ToolRegistry
+import io.github.kurue.bram.core.agent.DelegateTool
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -158,6 +159,20 @@ class AppContainer(application: Application) {
      */
     val toolSelector = SkillAwareToolSelector(RankingToolSelector(embedder), skillStore)
     val runJournal = SqliteRunJournal(application)
+
+    /**
+     * What a delegation needs to know about the run in flight. The ViewModel sets both slots
+     * around every parent run; see [DelegationAnchor].
+     */
+    val delegationAnchor = DelegationAnchor()
+    private val childAgentRunner = ChildAgentRunner(
+        anchor = delegationAnchor,
+        parentRegistry = { toolRegistry },
+        memoryStore = memoryStore,
+        journal = runJournal,
+        conversationStore = conversationStore,
+    )
+
     /**
      * Built-ins plus whatever MCP servers contribute. Mutable so a server's tools can be swapped in
      * on refresh and dropped when it fails or is removed; the agent reads it per run.
@@ -193,6 +208,7 @@ class AppContainer(application: Application) {
                 TapTool { screenAccess() },
                 TypeTextTool { screenAccess() },
                 ScrollTool { screenAccess() },
+                DelegateTool(childAgentRunner) { delegationAnchor.rootRunId },
             ),
         ),
     )
