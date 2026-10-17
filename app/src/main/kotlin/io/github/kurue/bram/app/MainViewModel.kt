@@ -28,6 +28,12 @@ import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.McpServer
 import io.github.kurue.bram.core.domain.ModelAdvice
+import io.github.kurue.bram.core.domain.ConfigDepth
+import io.github.kurue.bram.core.domain.ConfigWorkload
+import io.github.kurue.bram.core.domain.ConfigurationBudget
+import io.github.kurue.bram.core.domain.ConfigurationPlanner
+import io.github.kurue.bram.core.domain.TrialCostEstimate
+import io.github.kurue.bram.core.domain.TrialScore
 import io.github.kurue.bram.core.domain.ActivitySummary
 import io.github.kurue.bram.core.domain.MonthActivity
 import java.time.YearMonth
@@ -139,6 +145,12 @@ data class AutoConfigureProgress(
     val step: Int,
     val total: Int,
     val current: String,
+    /** What the pass tunes for and how long it may take; see [ConfigurationPlanner]. */
+    val workload: ConfigWorkload = ConfigWorkload.CHAT,
+    val depth: ConfigDepth = ConfigDepth.QUICK,
+    val budgetMillis: Long = 0,
+    /** Monotonic start ([TuningLimits.nowMillis]), for the overlay's elapsed time. */
+    val startedAtMillis: Long = 0,
     /** Every accelerator candidate, in measurement order, so the dialog can show all of them. */
     val candidates: List<String> = emptyList(),
     val results: List<BackendMeasurement> = emptyList(),
@@ -2132,7 +2144,53 @@ class MainViewModel(
      * The result is written to the profile in words, with the date, so the choice can be read and
      * repeated rather than believed.
      */
-    fun autoConfigure(profileId: String) {
+    /**
+     * What one auto-configure pass shares across its steps: the time budget every trial is charged
+     * to, the running estimate of what a trial costs, and CPU references already recorded (keyed
+     * by everything that shapes them), so each setting does not pay for its own. Null outside a
+     * pass, so a manual tune from the Settings tab runs as before, unbudgeted.
+     */
+    private class ConfigurationPass(
+        val budget: ConfigurationBudget,
+        val cost: TrialCostEstimate = TrialCostEstimate(),
+        val references: MutableMap<String, JSONObject> = mutableMapOf(),
+    )
+
+    private var activePass: ConfigurationPass? = null
+
+    /** The pass's CPU reference for this exact workload, recorded once and reused. */
+    private suspend fun passReference(
+        model: LocalModelRecord,
+        profile: ModelProfile,
+        threads: Int,
+        padTokens: Int,
+    ): JSONObject {
+        val pass = activePass ?: return measureCpuReference(model, profile, threads, padTokens)
+        // Everything the reference load and replay depend on; a change to any of them (a KV or
+        // attention winner applied earlier in the pass) means a fresh reference.
+        val key = listOf(
+            model.id.value, threads, padTokens, profile.contextTokens, profile.thinkingEnabled,
+            profile.flashAttention, profile.kvCacheType,
+        ).joinToString("|")
+        pass.references[key]?.let { return it }
+        return measureCpuReference(model, profile, threads, padTokens).also { pass.references[key] = it }
+    }
+
+    /**
+     * Whether the pass can afford one more trial; false outside a pass. A trial is a load plus
+     * the replay, estimated from the trials so far, or from the reference before any has run.
+     */
+    private fun budgetExhausted(referenceMillis: Long): Boolean {
+        val pass = activePass ?: return false
+        val estimate = pass.cost.estimate(fallbackMillis = referenceMillis * 2 + TRIAL_LOAD_ESTIMATE_MILLIS)
+        return !pass.budget.affords(estimate)
+    }
+
+    fun autoConfigure(
+        profileId: String,
+        workload: ConfigWorkload = ConfigWorkload.CHAT,
+        depth: ConfigDepth = ConfigDepth.QUICK,
+    ) {
         val snapshot = mutableState.value
         val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
         val model = snapshot.localModels.firstOrNull { it.id == profile.modelId } ?: return
@@ -2150,10 +2208,17 @@ class MainViewModel(
         }
 
         launchTuning {
+            val pass = ConfigurationPass(ConfigurationBudget(depth.budgetMillis, TuningLimits::nowMillis))
+            activePass = pass
+            try {
             mutableState.update {
                 it.copy(isValidatingAccelerator = true, autoConfigure = AutoConfigureProgress(
                     profileId = profile.id, modelName = profile.name, step = 0, total = 0,
                     current = "Checking device…",
+                    workload = workload,
+                    depth = depth,
+                    budgetMillis = depth.budgetMillis,
+                    startedAtMillis = TuningLimits.nowMillis(),
                 ))
             }
             // Ask the runtime what it can see now rather than trusting what was detected at start.
@@ -2205,11 +2270,16 @@ class MainViewModel(
                         step = 0,
                         total = candidates.size,
                         current = RuntimeBackend.CPU.label,
+                        // Rebuilt once the backends are known: keep what the pass started with.
+                        workload = workload,
+                        depth = depth,
+                        budgetMillis = depth.budgetMillis,
+                        startedAtMillis = it.autoConfigure?.startedAtMillis ?: TuningLimits.nowMillis(),
                         candidates = candidates.map { it.second.label },
                         exclusions = backends.filter { it == RuntimeBackend.VULKAN }
                             .map { "${it.label}: excluded from automatic configuration by the current validation policy." },
                         results = listOf(reference),
-                        plan = autoConfigurePlan(profile, backends, candidates),
+                        plan = autoConfigurePlan(profile, backends, candidates, workload),
                     ),
                 )
             }
@@ -2409,41 +2479,35 @@ class MainViewModel(
             val tuningBackend = resolveLoadBackend(
                 mutableState.value.profiles.firstOrNull { it.id == profile.id }?.backendId.orEmpty(),
             )
-            val dimensions = autoConfigureDimensions(tuningBackend)
+            // The planner's order for this workload, batch included, so a budget that runs out has
+            // been spent on the settings most likely to matter. A step the budget cannot reach is
+            // recorded as untested, never as a result.
+            val dimensions = ConfigurationPlanner.dimensions(workload, npu = tuningBackend == RuntimeBackend.HEXAGON)
             for (dimension in dimensions) {
-                runCatching { runDimensionTune(profile.id, dimension, fromAutoConfigure = true) }
-                    .onFailure { error ->
-                        if (error is CancellationException) {
-                            android.util.Log.d("BramTune", "auto-configure cancelled; stopping the pass")
-                            throw error
-                        }
+                mutableState.update {
+                    it.copy(
+                        autoConfigure = it.autoConfigure?.copy(
+                            phase = if (dimension == TuningDimension.BATCH) AutoConfigurePhase.BATCH else AutoConfigurePhase.TUNING,
+                            measuringIndex = null,
+                            measuringPlanPhase = null,
+                            measuringPlanCandidate = null,
+                            current = "Tuning ${dimension.label.lowercase()}…",
+                        ),
+                    )
+                }
+                runCatching {
+                    if (dimension == TuningDimension.BATCH) runBatchTune(profile.id) else runDimensionTune(profile.id, dimension, fromAutoConfigure = true)
+                }.onFailure { error ->
+                    if (error is CancellationException) {
+                        android.util.Log.d("BramTune", "auto-configure cancelled; stopping the pass")
+                        throw error
                     }
+                }
                 val landed = mutableState.value.profiles.firstOrNull { it.id == profile.id }?.tuning
                     .orEmpty()
                     .sortedByDescending { it.measuredAtEpochMillis }
                 mutableState.update {
                     it.copy(autoConfigure = it.autoConfigure?.copy(dimensions = landed))
-                }
-            }
-
-            // Third phase: the batch, last so it is measured under the configuration the decode
-            // dimensions chose. The best batch depends on the processor; the one button means
-            // configure everything, in order.
-            mutableState.update {
-                it.copy(
-                    autoConfigure = it.autoConfigure?.copy(
-                        phase = AutoConfigurePhase.BATCH,
-                        measuringIndex = null,
-                        measuringPlanPhase = null,
-                        measuringPlanCandidate = null,
-                        current = "Tuning prompt batch…",
-                    ),
-                )
-            }
-            runCatching { runBatchTune(profile.id) }.onFailure { error ->
-                if (error is CancellationException) {
-                    android.util.Log.d("BramTune", "auto-configure cancelled; stopping the pass")
-                    throw error
                 }
             }
             val tuned = mutableState.value.profiles.firstOrNull { it.id == profile.id }
@@ -2474,6 +2538,9 @@ class MainViewModel(
                         },
                     ),
                 )
+            }
+            } finally {
+                activePass = null
             }
         }
     }
@@ -2565,17 +2632,6 @@ class MainViewModel(
         },
     )
 
-    /** The decode-shaped dimensions auto-configure runs, in dependency order. */
-    private fun autoConfigureDimensions(backend: RuntimeBackend): List<TuningDimension> = buildList {
-        add(TuningDimension.THREADS)
-        add(TuningDimension.CPU_MASK)
-        add(TuningDimension.POLL)
-        add(TuningDimension.KV_CACHE)
-        add(TuningDimension.FLASH_ATTENTION)
-        add(TuningDimension.LOAD_MODE)
-        if (backend == RuntimeBackend.HEXAGON) add(TuningDimension.HEX_FLAGS)
-    }
-
     /**
      * Returns the labels of candidates the profile's own saved note recorded as timed out.
      * These hang in the engine — on the S25 Ultra the CPU-mask configs and 8 threads have never
@@ -2602,6 +2658,7 @@ class MainViewModel(
         profile: ModelProfile,
         backends: List<RuntimeBackend>,
         backendCandidates: List<Pair<RuntimeBackend, AcceleratorTarget>>,
+        workload: ConfigWorkload = ConfigWorkload.CHAT,
     ): List<TuningPlanPhase> {
         val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         val clusters = CpuTopology.clusters()
@@ -2610,25 +2667,24 @@ class MainViewModel(
             candidates = backendCandidates.map { it.second.label },
             isBackends = true,
         )
-        val dimensions = autoConfigureDimensions(
-            resolveLoadBackend(profile.backendId),
-        ).map { dimension ->
-            TuningPlanPhase(
-                title = dimension.label,
-                candidates = dimensionCandidates(dimension, profile, visibleCores, clusters)
-                    .map { it.label },
-                dimension = dimension,
-            )
-        }
-        val batchPhase = TuningPlanPhase(
-            title = TuningDimension.BATCH.label,
-            candidates = BATCH_CANDIDATES.map { (batch, ubatch) -> "$batch/$ubatch" },
-            isBatch = true,
+        val order = ConfigurationPlanner.dimensions(
+            workload,
+            npu = resolveLoadBackend(profile.backendId) == RuntimeBackend.HEXAGON,
         )
-        return buildList {
-            add(backendPhase)
-            addAll(dimensions)
-            add(batchPhase)
+        return listOf(backendPhase) + order.map { dimension ->
+            if (dimension == TuningDimension.BATCH) {
+                TuningPlanPhase(
+                    title = TuningDimension.BATCH.label,
+                    candidates = BATCH_CANDIDATES.map { (batch, ubatch) -> "$batch/$ubatch" },
+                    isBatch = true,
+                )
+            } else {
+                TuningPlanPhase(
+                    title = dimension.label,
+                    candidates = dimensionCandidates(dimension, profile, visibleCores, clusters).map { it.label },
+                    dimension = dimension,
+                )
+            }
         }
     }
 
@@ -3059,7 +3115,7 @@ class MainViewModel(
                 // is scored against the same yardstick and "fastest" can never mean "wrong the
                 // same way twice". Reference acquisition has a finite retry allowance shared by
                 // failures, timeouts, and slow results; cancellation also interrupts the retry wait.
-                val cpuRef = measureCpuReference(model, profile, threads)
+                val cpuRef = passReference(model, profile, threads, padTokens = 0)
                 val reference = cpuRef.optJSONArray("tokens").toIntList()
                 check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
                 val forced = reference.toIntArray()
@@ -3081,6 +3137,7 @@ class MainViewModel(
                         .map { it.copy(label = it.label) },
                 )
                 val scored = mutableListOf<BatchScore>()
+                val skippedBatches = mutableSetOf<String>()
                 val batchPlanPhaseIndex = mutableState.value.autoConfigure?.plan
                     ?.indexOfFirst { phase -> phase.isBatch } ?: -1
                 for ((batchIndex, pair) in candidates.withIndex()) {
@@ -3091,6 +3148,13 @@ class MainViewModel(
                         markPlanCandidateTimedOut(batchPlanPhaseIndex, batchIndex)
                         continue
                     }
+                    // Within a pass, a trial that no longer fits the budget is not started.
+                    if (budgetExhausted(referenceMillis)) {
+                        candidates.drop(batchIndex).forEach { (b, u) -> skippedBatches += "$b/$u" }
+                        tried += "$batch/$ubatch and the rest (not tested: time budget)"
+                        break
+                    }
+                    val trialStartedAt = TuningLimits.nowMillis()
                     waitForCooldown()
                     mutableState.update {
                         it.copy(
@@ -3208,13 +3272,37 @@ class MainViewModel(
                     }
                     batchScore.get()?.let { scored += it }
                     tried += "$batch/$ubatch"
+                    activePass?.cost?.observe(TuningLimits.nowMillis() - trialStartedAt)
+                }
+                if (scored.isEmpty() && skippedBatches.size == candidates.size) {
+                    // The budget ran out before the batch: untested, not failed.
+                    val note = DimensionTuneNote(
+                        dimension = TuningDimension.BATCH,
+                        chosen = "Unchanged",
+                        note = "Batch not tested: the configuration's time budget ran out first.",
+                        measuredAtEpochMillis = System.currentTimeMillis(),
+                        results = candidates.map { (b, u) -> TuneCandidateResult("$b/$u", 0.0, 0.0, agreed = false, skipped = true) },
+                    )
+                    container.modelProfileStore.save(
+                        profile.copy(tuning = listOf(note) + profile.tuning.filterNot { it.dimension == TuningDimension.BATCH }),
+                    )
+                    syncProfiles(mutableState.value.localModels, profile.id)
+                    return@runCatching
                 }
                 check(scored.isNotEmpty()) {
                     "None of the batch configurations met the " +
                         "${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% agreement bar " +
                         "against the CPU reference (${tried.joinToString(", ")} all failed)"
                 }
-                val best = scored.minBy { it.promptMillis }
+                // Batch ranks by prompt time. The current batch (512/128 when unset) stays unless a
+                // candidate is clearly faster: on the S25 Ultra six batches measured within noise.
+                val currentLabel = "${profile.batchTokens.takeIf { it > 0 } ?: 512}/${profile.ubatchTokens.takeIf { it > 0 } ?: 128}"
+                val pick = ConfigurationPlanner.pickWinner(
+                    scored.map { TrialScore("${it.batch}/${it.ubatch}", it.promptMillis) },
+                    incumbentLabel = currentLabel,
+                )
+                val best = scored.first { "${it.batch}/${it.ubatch}" == pick?.label }
+                val keptCurrent = "${best.batch}/${best.ubatch}" == currentLabel && scored.size > 1
                 val promptTokens = cpuRef.optInt("promptTokens", 0)
                 val rate = if (best.promptMillis > 0 && promptTokens > 0) {
                     promptTokens * 1000 / best.promptMillis
@@ -3241,16 +3329,22 @@ class MainViewModel(
                         } ?: 0.0,
                         agreed = score != null,
                         winner = score != null && score.batch == best.batch && score.ubatch == best.ubatch,
+                        skipped = "$batch/$ubatch" in skippedBatches,
                     )
                 }
                 val batchNote = DimensionTuneNote(
                     dimension = TuningDimension.BATCH,
                     chosen = "${best.batch}/${best.ubatch}",
                     note = buildString {
-                        append("Tuned batch ${best.batch}/${best.ubatch} on ${backend.label}: ")
+                        append(if ("${best.batch}/${best.ubatch}" == currentLabel) "Kept batch " else "Tuned batch ")
+                        append("${best.batch}/${best.ubatch} on ${backend.label}: ")
                         append("$rate prompt tok/s, ")
                         append("${(best.agreement * comparable).toInt()}/$comparable predictions ")
                         append("match the CPU reference")
+                        if (keptCurrent) {
+                            append(". Kept the current batch: no candidate was more than ")
+                            append("${(ConfigurationPlanner.NOISE_MARGIN * 100).toInt()}% faster")
+                        }
                         append(". Tried ${tried.joinToString(", ")}.")
                     },
                     measuredAtEpochMillis = System.currentTimeMillis(),
@@ -3521,7 +3615,7 @@ class MainViewModel(
             } else {
                 0
             }
-            val cpuRef = measureCpuReference(model, profile, referenceThreads, padTokens)
+            val cpuRef = passReference(model, profile, referenceThreads, padTokens)
             val reference = cpuRef.optJSONArray("tokens").toIntList()
             check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
             val forced = reference.toIntArray()
@@ -3542,6 +3636,7 @@ class MainViewModel(
             val tried = mutableListOf<String>()
             val scored = mutableListOf<DimensionScore>()
             val timedOutCandidates = mutableSetOf<TuningCandidate>()
+            val skippedCandidates = mutableSetOf<TuningCandidate>()
             var agreed = 0
             for ((candidateIndex, candidate) in candidates.withIndex()) {
                 // Skip candidates that hung in a previous sweep: they hang again on this device
@@ -3554,6 +3649,14 @@ class MainViewModel(
                     markPlanCandidateTimedOut(planPhaseIndex, candidateIndex)
                     continue
                 }
+                // Within a pass, a trial that no longer fits the budget is not started: it is
+                // recorded as untested and the remaining candidates are skipped with it.
+                if (budgetExhausted(referenceMillis)) {
+                    skippedCandidates += candidates.drop(candidateIndex)
+                    tried += "${candidate.label} and the rest (not tested: time budget)"
+                    break
+                }
+                val trialStartedAt = TuningLimits.nowMillis()
                 waitForCooldown()
                 val tuned = candidate.apply(profile)
                 val candidateThreads = if (tuned.threads > 0) {
@@ -3674,6 +3777,24 @@ class MainViewModel(
                 }
                 tried += if (agreedNow == null) "${candidate.label} (timed out)" else candidate.label
                 if (agreedNow == true) agreed++
+                activePass?.cost?.observe(TuningLimits.nowMillis() - trialStartedAt)
+            }
+            if (scored.isEmpty() && skippedCandidates.size == candidates.size) {
+                // The budget ran out before this setting: untested is not failed, so no error.
+                val note = DimensionTuneNote(
+                    dimension = dimension,
+                    chosen = "Unchanged",
+                    note = "${dimension.label} not tested: the configuration's time budget ran out first.",
+                    measuredAtEpochMillis = System.currentTimeMillis(),
+                    results = candidates.map { candidate ->
+                        TuneCandidateResult(candidate.label, 0.0, 0.0, agreed = false, skipped = true)
+                    },
+                )
+                container.modelProfileStore.save(
+                    profile.copy(tuning = listOf(note) + profile.tuning.filterNot { it.dimension == dimension }),
+                )
+                syncProfiles(mutableState.value.localModels, profile.id)
+                return@runCatching
             }
             if (scored.isEmpty()) {
                 // Nothing met the bar is a recorded fact, not an error: the note carries
@@ -3686,6 +3807,7 @@ class MainViewModel(
                         decodeTokPerSec = 0.0,
                         agreed = false,
                         timedOut = candidate in timedOutCandidates,
+                        skipped = candidate in skippedCandidates,
                     )
                 }
                 val failedNote = DimensionTuneNote(
@@ -3716,7 +3838,15 @@ class MainViewModel(
                 }
                 return@runCatching
             }
-            val best = scored.minBy { it.totalMillis }
+            // The current setting stays unless a candidate beats it by more than the noise margin:
+            // a smaller difference is not a result, and swapping on it made the choice arbitrary.
+            val incumbent = candidates.firstOrNull { it.apply(profile) == profile }
+            val pick = ConfigurationPlanner.pickWinner(
+                scored.map { TrialScore(it.candidate.label, it.totalMillis) },
+                incumbentLabel = incumbent?.label,
+            )
+            val best = scored.first { it.candidate.label == pick?.label }
+            val keptIncumbent = incumbent != null && best.candidate == incumbent && scored.size > 1
             val winner = best.candidate
             val promptTokens = cpuRef.optInt("promptTokens", 0)
             val promptRate = if (best.promptMillis > 0 && promptTokens > 0) {
@@ -3747,14 +3877,18 @@ class MainViewModel(
                     agreed = score != null,
                     timedOut = candidate in timedOutCandidates,
                     winner = candidate == winner,
+                    skipped = candidate in skippedCandidates,
                 )
             }
             val note = DimensionTuneNote(
                 dimension = dimension,
                 chosen = winner.label,
-                note = "Tuned ${dimension.label} to ${winner.label} on ${backend.label}: " +
+                note = (if (winner == incumbent) "Kept ${dimension.label} at ${winner.label}" else "Tuned ${dimension.label} to ${winner.label}") +
+                    " on ${backend.label}: " +
                     "~$promptRate prompt tok/s, ~$decodeRate decode tok/s, " +
-                    "$agreed of ${candidates.size} candidates matched the CPU reference. " +
+                    "$agreed of ${candidates.size - skippedCandidates.size} tested candidates matched the CPU reference. " +
+                    (if (keptIncumbent) "Kept the current setting: no candidate was more than " +
+                        "${(ConfigurationPlanner.NOISE_MARGIN * 100).toInt()}% faster. " else "") +
                     "Tried ${tried.joinToString(", ")}.",
                 measuredAtEpochMillis = System.currentTimeMillis(),
                 results = candidateResults,
@@ -5765,6 +5899,12 @@ private const val REFERENCE_TIMEOUT_MILLIS = 7 * 60 * 1_000L
 // candidate measurement is bounded: 5 minutes is 30-60x the expected time for a phone-sized
 // model, which turns a hang into a recorded failure instead of a stall.
 private const val CANDIDATE_TIMEOUT_MILLIS = 5 * 60 * 1_000L
+
+/**
+ * What a model load adds to a trial before any trial has been timed, for the budget's first
+ * estimate. Replaced by observed trial times as soon as one completes.
+ */
+private const val TRIAL_LOAD_ESTIMATE_MILLIS = 5_000L
 // The prompt batches the batch sweep compares. The default (512/128) is in the list so there is
 // always a baseline to fall back to, and the wide end covers the Hexagon reference
 // configuration, which runs ubatch 1024. Shared with the overlay's up-front plan.

@@ -97,6 +97,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -149,6 +150,8 @@ import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
 import io.github.kurue.bram.core.domain.QuantCompatibility
 import io.github.kurue.bram.core.domain.TuningDimension
+import io.github.kurue.bram.core.domain.ConfigDepth
+import io.github.kurue.bram.core.domain.ConfigWorkload
 import io.github.kurue.bram.core.domain.TuneCandidateResult
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
@@ -1275,7 +1278,7 @@ private fun ModelsScreen(
     onUnloadModel: () -> Unit = {},
     onLoadProfile: (String) -> Unit = {},
     onRemoveLiteRt: (String) -> Unit = {},
-    onAutoConfigure: (String) -> Unit,
+    onAutoConfigure: (String, ConfigWorkload, ConfigDepth) -> Unit,
     onTuneBatch: (String) -> Unit,
     onTuneDimension: (String, TuningDimension) -> Unit,
     /** The dimension being measured right now, so its row can say "Tuning…". */
@@ -1341,7 +1344,7 @@ private fun ModelsScreen(
                 onDeleteProfile(profile.id)
             },
             onDuplicate = { onCreateProfile(openModel) },
-            onAutoConfigure = { onAutoConfigure(profile.id) },
+            onAutoConfigure = { workload, depth -> onAutoConfigure(profile.id, workload, depth) },
             onBenchmark = { onBenchmark(profile.id) },
             onSustainedBenchmark = { onSustainedBenchmark(profile.id) },
             onCancelBenchmark = onCancelBenchmark,
@@ -2174,6 +2177,26 @@ internal fun AutoConfigureOverlay(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (progress.budgetMillis > 0) {
+                    // An adaptive pass cannot honestly say "step 7 of 42"; it can say how much of
+                    // its time budget is used. Ticks once a second while the pass runs.
+                    var now by remember { mutableStateOf(TuningLimits.nowMillis()) }
+                    LaunchedEffect(progress.finished) {
+                        while (!progress.finished) {
+                            now = TuningLimits.nowMillis()
+                            delay(1_000)
+                        }
+                    }
+                    val elapsed = (now - progress.startedAtMillis).coerceAtLeast(0)
+                    Text(
+                        "${progress.workload.label} · ${progress.depth.label} · " +
+                            if (progress.finished) "budget ${clockText(progress.budgetMillis)}"
+                            else "${clockText(elapsed)} of ${clockText(progress.budgetMillis)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("configure-budget"),
+                    )
+                }
                 progress.exclusions.forEach { reason ->
                     Text(reason, style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2233,8 +2256,11 @@ internal fun AutoConfigureOverlay(
                             else -> progress.measuringPlanPhase == phaseIndex &&
                                 progress.measuringPlanCandidate == candidateIndex
                         }
+                        val untested = (result is TuneCandidateResult && result.skipped) ||
+                            (result == null && progress.finished)
                         val state = when {
                             measuring -> RunState.MEASURING
+                            untested -> RunState.WAITING
                             result == null -> RunState.WAITING
                             result is BackendMeasurement && !result.agrees -> RunState.FAILED
                             result is BackendMeasurement && result.backendId == winnerBackendId -> RunState.WINNER
@@ -2246,6 +2272,7 @@ internal fun AutoConfigureOverlay(
                             label = label,
                             value = when {
                                 measuring -> "Measuring…"
+                                untested -> "not tested"
                                 result == null -> "Waiting"
                                 result is BackendMeasurement && !result.agrees -> "FAIL"
                                 result is TuneCandidateResult && result.timedOut -> "timed out"
@@ -4509,4 +4536,10 @@ private fun AddChoiceRow(title: String, subtitle: String, enabled: Boolean = tru
         }
         ChevronRightIcon(MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(20.dp))
     }
+}
+
+/** "1:05", for the configuration budget. */
+private fun clockText(millis: Long): String {
+    val seconds = millis / 1_000
+    return "%d:%02d".format(seconds / 60, seconds % 60)
 }
