@@ -58,6 +58,8 @@ data class TuneCandidateResult(
     val timedOut: Boolean = false,
     /** Whether this candidate won the sweep. */
     val winner: Boolean = false,
+    /** Not measured: the pass's time budget ran out before it. Not a failure. */
+    val skipped: Boolean = false,
 )
 
 /**

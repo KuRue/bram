@@ -198,7 +198,8 @@ class ModelProfileStore(context: Context) {
                                                 .put("decodeTokPerSec", result.decodeTokPerSec)
                                                 .put("agreed", result.agreed)
                                                 .put("timedOut", result.timedOut)
-                                                .put("winner", result.winner),
+                                                .put("winner", result.winner)
+                                                .put("skipped", result.skipped),
                                         )
                                     }
                                 },
@@ -290,6 +291,7 @@ class ModelProfileStore(context: Context) {
                                             agreed = result.optBoolean("agreed"),
                                             timedOut = result.optBoolean("timedOut"),
                                             winner = result.optBoolean("winner"),
+                                            skipped = result.optBoolean("skipped"),
                                         )
                                     }
                                 }

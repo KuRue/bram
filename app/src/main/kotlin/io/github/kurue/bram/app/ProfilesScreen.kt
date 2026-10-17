@@ -47,6 +47,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.kurue.bram.core.domain.ConfigDepth
+import io.github.kurue.bram.core.domain.ConfigWorkload
 import io.github.kurue.bram.core.domain.FlashAttentionMode
 import io.github.kurue.bram.core.domain.HexFlags
 import io.github.kurue.bram.core.domain.KvCacheType
@@ -202,7 +204,7 @@ internal fun ProfileDetail(
     onUpdateProfile: (ModelProfile) -> Unit,
     onDeleteProfile: () -> Unit,
     onDuplicate: () -> Unit,
-    onAutoConfigure: () -> Unit,
+    onAutoConfigure: (ConfigWorkload, ConfigDepth) -> Unit,
     onBenchmark: () -> Unit,
     onSustainedBenchmark: () -> Unit,
     onCancelBenchmark: () -> Unit,
@@ -219,6 +221,7 @@ internal fun ProfileDetail(
     onConvertQuant: (String) -> Unit,
 ) {
     var tab by rememberSaveable(profile.id) { mutableStateOf(ProfileTab.OVERVIEW) }
+    var workload by rememberSaveable(profile.id) { mutableStateOf(ConfigWorkload.CHAT) }
     var menuOpen by remember { mutableStateOf(false) }
     var renaming by rememberSaveable(profile.id) { mutableStateOf(false) }
     var draftName by rememberSaveable(profile.id) { mutableStateOf(profile.name) }
@@ -348,10 +351,10 @@ internal fun ProfileDetail(
                                     "agrees with the CPU, and can be cancelled. It takes a few minutes.",
                             )
                             OutlinedButton(
-                                onClick = onAutoConfigure,
+                                onClick = { onAutoConfigure(ConfigWorkload.CHAT, ConfigDepth.QUICK) },
                                 enabled = !measuring,
                                 modifier = Modifier.testTag("offer-auto-configure"),
-                            ) { Text("Auto-configure") }
+                            ) { Text("Auto-configure · about 2 min") }
                         }
                     }
                 }
@@ -369,9 +372,31 @@ internal fun ProfileDetail(
             }
 
             ProfileTab.PERFORMANCE -> {
-                Note("Auto-configure measures each backend and setting against the CPU and keeps the fastest that agrees.")
-                Button(onClick = onAutoConfigure, enabled = !measuring, modifier = Modifier.fillMaxWidth()) {
-                    Text("Auto-configure")
+                Note(
+                    "Auto-configure measures backends and settings against the CPU within a time " +
+                        "budget, most important first, and keeps a change only when it is clearly faster.",
+                )
+                SectionLabel("Tune for")
+                ChipRow {
+                    ConfigWorkload.entries.forEach { entry ->
+                        FilterChip(
+                            selected = workload == entry,
+                            onClick = { workload = entry },
+                            label = { Text(entry.label) },
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { onAutoConfigure(workload, ConfigDepth.QUICK) },
+                        enabled = !measuring,
+                        modifier = Modifier.weight(1f).testTag("configure-quick"),
+                    ) { Text("Quick · 2 min") }
+                    OutlinedButton(
+                        onClick = { onAutoConfigure(workload, ConfigDepth.THOROUGH) },
+                        enabled = !measuring,
+                        modifier = Modifier.weight(1f).testTag("configure-thorough"),
+                    ) { Text("Thorough · 10 min") }
                 }
                 if (benchmarking) {
                     // Cancel sits beside the live step: a sustained run is five minutes long, and the
