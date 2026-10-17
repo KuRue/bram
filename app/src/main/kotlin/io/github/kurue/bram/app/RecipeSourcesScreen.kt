@@ -47,7 +47,7 @@ internal fun RecipeSourcesScreen(
         state.error?.let { ErrorCard(it) }
         state.message?.let { Text(it) }
         state.bundled?.let { snapshot ->
-            SourceSnapshotCard(snapshot, "Bundled with Bram · available offline")
+            SourceSnapshotCard(snapshot, "Bundled with Bram · available offline", inspectionTag = "recipe-inspect-bundled")
         }
         state.sources.forEach { source ->
             SourceSnapshotCard(source.current, "External · available offline", source.url)
@@ -105,7 +105,7 @@ internal fun RecipeSourcesScreen(
 }
 
 @Composable
-private fun SourceSnapshotCard(snapshot: RecipeSnapshot, status: String, url: String? = null) {
+private fun SourceSnapshotCard(snapshot: RecipeSnapshot, status: String, url: String? = null, inspectionTag: String = "recipe-inspect") {
     var expanded by rememberSaveable(snapshot.pin) { mutableStateOf(false) }
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -114,7 +114,9 @@ private fun SourceSnapshotCard(snapshot: RecipeSnapshot, status: String, url: St
             Text("Revision ${snapshot.index.revision} · ${snapshot.recipes.size} recipes")
             url?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             SelectionContainer { Text("SHA-256: ${snapshot.pin}", style = MaterialTheme.typography.bodySmall) }
-            TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide recipes" else "Inspect recipes") }
+            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag(inspectionTag)) {
+                Text(if (expanded) "Hide recipes" else "Inspect recipes")
+            }
             if (expanded) snapshot.recipes.forEach { recipe ->
                 Text(recipe.id, style = MaterialTheme.typography.titleSmall)
                 Text("${recipe.maintainer} · ${recipe.evidenceDate}", style = MaterialTheme.typography.bodySmall)

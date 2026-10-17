@@ -182,7 +182,10 @@ class RecipeSources(
     @Synchronized
     fun remove(url: String) {
         val file = fileFor(normalizeUrl(url))
-        require(!file.exists() || file.delete()) { "Could not remove the cached source" }
+        if (file.exists()) {
+            require(file.delete()) { "Could not remove the cached source" }
+            syncDirectory(directory)
+        }
     }
 
     private fun sourceFiles(): List<File> = directory.listFiles { file ->
@@ -216,15 +219,25 @@ class RecipeSources(
                 source.previous?.let { put("previous", encode(it)) }
             }.toString().toByteArray(StandardCharsets.UTF_8)
         require(bytes.size <= MAX_CACHE_FILE_BYTES) { "Recipe source cache file is too large" }
-        require(directory.isDirectory || directory.mkdirs()) { "Could not create recipe source cache" }
+        if (!directory.isDirectory) {
+            require(directory.mkdirs()) { "Could not create recipe source cache" }
+            directory.parentFile?.let(::syncDirectory)
+        }
         val file = fileFor(source.url)
         val temporary = File(directory, "${file.name}.tmp")
         try {
             java.io.FileOutputStream(temporary).use { it.write(bytes); it.fd.sync() }
             Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            syncDirectory(directory)
         } finally {
             temporary.delete()
         }
+    }
+
+    // File fsync protects the contents; directory fsync makes rename/removal durable across a
+    // sudden shutdown. Without it an accepted/removal operation can disappear after a cold boot.
+    private fun syncDirectory(file: File) {
+        java.nio.channels.FileChannel.open(file.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
     }
 
     companion object {

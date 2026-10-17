@@ -42,8 +42,9 @@ Downloads accept HTTPS only, no credentials/query/fragment, and no nonstandard p
 refused. Recipe files must be plain JSON filenames beside the index, without paths or escaped URL
 characters. Limits are 256 KiB per index, 64 KiB per recipe, 16 recipes and 1 MiB per snapshot,
 8 external sources, and two snapshots per source. Each source is stored in one atomically replaced
-file capped at 5 MiB (including JSON encoding), bounding the accepted cache to 40 MiB. Network
-connect/read timeouts are 10 seconds, within a shared 45-second snapshot download budget checked
+file capped at 5 MiB (including JSON encoding), bounding the accepted cache to 40 MiB. Cache writes
+sync both file contents and directory changes, including source removal. Network connect/read
+timeouts are 10 seconds, within a shared 45-second snapshot download budget checked
 between requests and reads. Updates are manual; there is no periodic refresh.
 
 ## The bundled snapshot

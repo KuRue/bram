@@ -21,7 +21,7 @@ class RecipeSourcesNavigationOnDeviceTest {
         compose.onNodeWithText("Settings").performClick()
         compose.onNodeWithText("Recipe sources").performScrollTo().performClick()
         compose.onNodeWithText("Bundled with Bram · available offline").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Inspect recipes").performScrollTo().performClick()
+        compose.onNodeWithTag("recipe-inspect-bundled").performScrollTo().performClick()
         compose.onNodeWithText("samsung-sm-s938-sm8750-lfm2.5-2.6b-q4_0-cpu").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("recipe-source-url").performScrollTo().performTextInput("http://example.org/index.json")
         compose.onNodeWithTag("recipe-source-review").performScrollTo().performClick()
