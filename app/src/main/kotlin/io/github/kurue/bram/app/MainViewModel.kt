@@ -28,6 +28,9 @@ import io.github.kurue.bram.core.domain.LiteRtModelRecord
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.McpServer
 import io.github.kurue.bram.core.domain.ModelAdvice
+import io.github.kurue.bram.core.domain.ActivitySummary
+import io.github.kurue.bram.core.domain.MonthActivity
+import java.time.YearMonth
 import io.github.kurue.bram.core.domain.ModelAdvisor
 import io.github.kurue.bram.core.domain.ImportFit
 import io.github.kurue.bram.core.domain.MeasurementFingerprint
@@ -561,6 +564,13 @@ data class AppUiState(
     val onboardingCompleted: Boolean = true,
     /** The guide reopened from Settings, shown whatever the catalogs hold. */
     val onboardingReopened: Boolean = false,
+    /** Whether Home is showing instead of a chat. Bram opens on Home. */
+    val homeVisible: Boolean = true,
+    /** The month Home's activity card shows, and its totals once read from the journal. */
+    val homeMonth: YearMonth = YearMonth.now(),
+    val homeActivity: MonthActivity? = null,
+    /** When complete activity records begin, for Home's "partial" note. */
+    val activityRecordedSince: Long? = null,
     /** Files picked for import, waiting for the user to confirm; see [StagedImport]. */
     val stagedImport: StagedImport? = null,
     /** The first-run hardware scan, null until it has run. */
@@ -858,6 +868,7 @@ class MainViewModel(
         restoreConversations()
         installTaskRunner()
         refreshRunJournal()
+        refreshHome()
         refreshMcpServers()
         refreshSkills()
         refreshAutomations()
@@ -1111,8 +1122,45 @@ class MainViewModel(
         }
     }
 
+    /** Shows Home and re-reads its totals: work may have finished since it was last shown. */
+    fun showHome() {
+        mutableState.update { it.copy(homeVisible = true) }
+        refreshHome()
+    }
+
+    /** Back to the chat that is open, from Home. */
+    fun hideHome() {
+        mutableState.update { it.copy(homeVisible = false) }
+    }
+
+    /** Moves Home's activity card by [delta] months, never past the current one. */
+    fun shiftHomeMonth(delta: Long) {
+        val target = mutableState.value.homeMonth.plusMonths(delta)
+        if (target.isAfter(YearMonth.now())) return
+        mutableState.update { it.copy(homeMonth = target) }
+        refreshHome()
+    }
+
+    /** Reads the shown month's runs from the journal and summarises them. */
+    fun refreshHome() {
+        viewModelScope.launch {
+            val month = mutableState.value.homeMonth
+            val zone = java.time.ZoneId.systemDefault()
+            val (start, end) = ActivitySummary.bounds(month, zone)
+            val journal = container.runJournal
+            val entries = runCatching { journal.between(start, end) }.getOrDefault(emptyList())
+            val since = runCatching { journal.recordedSince() }.getOrNull()
+            val activity = ActivitySummary.month(entries, month, zone)
+            mutableState.update {
+                // A month changed while this was reading must not be overwritten by the old one.
+                if (it.homeMonth == month) it.copy(homeActivity = activity, activityRecordedSince = since) else it
+            }
+        }
+    }
+
     fun startNewConversation() {
         if (mutableState.value.isGenerating) return
+        mutableState.update { it.copy(homeVisible = false) }
         conversationChosen = true
         conversationId = container.conversationStore.newId()
         hintedDraftSkills.clear()
@@ -1137,6 +1185,7 @@ class MainViewModel(
 
     fun openConversation(id: String) {
         if (mutableState.value.isGenerating) return
+        mutableState.update { it.copy(homeVisible = false) }
         conversationChosen = true
         viewModelScope.launch {
             val target = ConversationId(id)

@@ -22,16 +22,27 @@ class ChatScreenSmokeTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun chatChromeRendersOnLaunch() {
+    fun bramOpensOnHomeAndNewChatOpensTheComposer() {
+        composeRule.onNodeWithTag("home").assertIsDisplayed()
+        composeRule.onNodeWithTag("home-month").assertIsDisplayed()
+        composeRule.onNodeWithTag("menu-button").assertIsDisplayed()
+        composeRule.onNodeWithTag("model-pill").assertIsDisplayed()
+        composeRule.onNodeWithTag("new-chat").performClick()
         composeRule.onNodeWithTag("composer-field").assertIsDisplayed()
         composeRule.onNodeWithText("Message Bram").assertIsDisplayed()
-        composeRule.onNodeWithTag("menu-button").assertIsDisplayed()
-        composeRule.onNodeWithTag("new-chat").assertIsDisplayed()
-        composeRule.onNodeWithTag("model-pill").assertIsDisplayed()
+    }
+
+    @Test
+    fun backFromAChatReturnsHome() {
+        composeRule.onNodeWithTag("new-chat").performClick()
+        composeRule.onNodeWithTag("composer-field").assertIsDisplayed()
+        composeRule.activityRule.scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
+        composeRule.onNodeWithTag("home").assertIsDisplayed()
     }
 
     @Test
     fun composerAcceptsText() {
+        composeRule.onNodeWithTag("new-chat").performClick()
         composeRule.onNodeWithTag("composer-field").performTextInput("hello")
         composeRule.onNodeWithTag("composer-field").assertTextContains("hello")
     }

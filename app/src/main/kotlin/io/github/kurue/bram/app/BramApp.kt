@@ -247,6 +247,10 @@ fun BramApp(viewModel: MainViewModel) {
     LaunchedEffect(panel) {
         if (panel != AppPanel.MODELS) openServerForm = false
     }
+    // Back from a chat goes Home; Back on Home leaves the app as usual.
+    BackHandler(enabled = panel == null && !drawerOpen && !state.homeVisible) {
+        viewModel.showHome()
+    }
     BackHandler(enabled = panel != null || drawerOpen) {
         when {
             panel != null -> panel = null
@@ -268,12 +272,23 @@ fun BramApp(viewModel: MainViewModel) {
                     generating = state.isGenerating,
                     modifier = Modifier.fillMaxSize(),
                 )
-                ChatTranscript(
-                    state = state,
-                    onRegenerate = viewModel::regenerateLastReply,
-                    onEdit = viewModel::editAndResend,
-                    onResolveApproval = viewModel::resolveApproval,
-                )
+                if (state.homeVisible) {
+                    HomeScreen(
+                        state = state,
+                        onNewChat = viewModel::startNewConversation,
+                        onOpenConversation = viewModel::openConversation,
+                        onReturnToChat = viewModel::hideHome,
+                        onShiftMonth = viewModel::shiftHomeMonth,
+                        onRefresh = viewModel::refreshHome,
+                    )
+                } else {
+                    ChatTranscript(
+                        state = state,
+                        onRegenerate = viewModel::regenerateLastReply,
+                        onEdit = viewModel::editAndResend,
+                        onResolveApproval = viewModel::resolveApproval,
+                    )
+                }
             }
 
             // A short fade over the status-bar strip only. The transcript still passes behind the
@@ -308,7 +323,7 @@ fun BramApp(viewModel: MainViewModel) {
                 onPickModel = { panel = if (state.profiles.isEmpty() && state.endpoints.isEmpty()) AppPanel.MODELS else AppPanel.ROUTING },
             )
 
-            ChatComposer(
+            if (!state.homeVisible) ChatComposer(
                 state = state,
                 modifier = Modifier.align(Alignment.BottomCenter),
                 onSend = viewModel::send,
@@ -332,6 +347,10 @@ fun BramApp(viewModel: MainViewModel) {
                     },
                     onOpenPanel = {
                         panel = it
+                        drawerOpen = false
+                    },
+                    onHome = {
+                        viewModel.showHome()
                         drawerOpen = false
                     },
                 )
@@ -746,6 +765,7 @@ private fun BramDrawer(
     onDeleteConversation: (String) -> Unit,
     onNewConversation: () -> Unit,
     onOpenPanel: (AppPanel) -> Unit,
+    onHome: () -> Unit = {},
 ) {
     GlassSurface(
         modifier = modifier.fillMaxHeight().widthIn(max = 320.dp),
@@ -765,6 +785,20 @@ private fun BramDrawer(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(start = 4.dp, top = 8.dp),
             )
+
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onHome).testTag("drawer-home"),
+                shape = RoundedCornerShape(Glass.cornerMedium),
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("⌂", color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.width(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("Home", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
 
             GlassSurface(
                 modifier = Modifier.fillMaxWidth().clickable(onClick = onNewConversation),
