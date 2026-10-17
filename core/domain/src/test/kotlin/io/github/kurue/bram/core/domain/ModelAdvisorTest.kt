@@ -174,4 +174,22 @@ class ModelAdvisorTest {
     fun `the headline reads as a sentence`() {
         assertEquals("A model of about 4B, as a Q4_0 GGUF", ModelAdvisor.advise(scan(ramGb = 11.5)).headline)
     }
+
+    @Test
+    fun `a file's fit uses the same memory shares as the size tiers`() {
+        val gb = 1_000_000_000L
+        assertEquals(MemoryFit.COMFORTABLE, ModelAdvisor.fit(2 * gb, 12 * gb, 100 * gb).memory)
+        assertEquals(MemoryFit.LARGE, ModelAdvisor.fit(5 * gb, 12 * gb, 100 * gb).memory)
+        assertEquals(MemoryFit.TOO_LARGE, ModelAdvisor.fit(6 * gb, 12 * gb, 100 * gb).memory)
+        assertEquals(MemoryFit.UNKNOWN, ModelAdvisor.fit(2 * gb, 0, 100 * gb).memory)
+    }
+
+    @Test
+    fun `storage is checked with headroom, and a full disk says so first`() {
+        val gb = 1_000_000_000L
+        val fit = ModelAdvisor.fit(2 * gb, 12 * gb, 2 * gb)
+        assertFalse(fit.storageOk)
+        assertTrue(fit.summary.contains("storage"))
+        assertTrue(ModelAdvisor.fit(2 * gb, 12 * gb, 3 * gb).storageOk)
+    }
 }

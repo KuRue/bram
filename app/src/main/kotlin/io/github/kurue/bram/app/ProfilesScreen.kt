@@ -140,7 +140,11 @@ internal fun ProfileRow(
                         loading -> StatusChip("Loading")
                         loaded -> StatusChip("Loaded")
                     }
-                    if (staleMeasurement) StatusChip("Re-measure", error = true)
+                    if (staleMeasurement) {
+                        StatusChip("Re-measure", error = true)
+                    } else if (profile.autoConfiguredAtEpochMillis == 0L) {
+                        StatusChip("Not measured")
+                    }
                     profile.measuredSpeed()?.let {
                         Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -332,6 +336,24 @@ internal fun ProfileDetail(
                 }
                 if (staleMeasurement) {
                     Note("Measured on a different device or build. Re-measure under Performance.", error = true)
+                }
+                // Import no longer tunes on its own, so a fresh profile offers it here: optional,
+                // a few minutes, and cancellable.
+                if (profile.autoConfiguredAtEpochMillis == 0L && !staleMeasurement) {
+                    GlassSurface(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Not measured on this phone yet", fontWeight = FontWeight.SemiBold)
+                            Note(
+                                "Auto-configure tries each backend and setting, keeps the fastest one that " +
+                                    "agrees with the CPU, and can be cancelled. It takes a few minutes.",
+                            )
+                            OutlinedButton(
+                                onClick = onAutoConfigure,
+                                enabled = !measuring,
+                                modifier = Modifier.testTag("offer-auto-configure"),
+                            ) { Text("Auto-configure") }
+                        }
+                    }
                 }
                 if (isHybridArchitecture(model.architecture)) {
                     Note("This architecture re-reads the whole conversation each turn, so long chats get slower.")

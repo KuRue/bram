@@ -87,6 +87,21 @@ data class ModelSizeTier(
     val approxQ4FileBytes: Long get() = (maxBillionParams * BYTES_PER_BILLION_PARAMS_Q4).toLong()
 }
 
+enum class MemoryFit { COMFORTABLE, LARGE, TOO_LARGE, UNKNOWN }
+
+/** How one model file fits this phone's memory and free storage. */
+data class ImportFit(val memory: MemoryFit, val storageOk: Boolean) {
+    /** One line for the import confirmation. */
+    val summary: String
+        get() = when {
+            !storageOk -> "Not enough free storage for Bram's copy of this file."
+            memory == MemoryFit.COMFORTABLE -> "Fits this phone's memory comfortably."
+            memory == MemoryFit.LARGE -> "Large for this phone: it should load, but replies will be slower."
+            memory == MemoryFit.TOO_LARGE -> "Probably too large for this phone's memory."
+            else -> "Bram could not read this phone's memory size."
+        }
+}
+
 /** What the first-run screen recommends, and why. */
 data class ModelAdvice(
     val findings: List<ScanFinding>,
@@ -137,6 +152,23 @@ object ModelAdvisor {
 
     /** Headroom over the file size: the import copies the model into Bram's own storage. */
     private const val STORAGE_MARGIN = 1.1
+
+    /**
+     * How a specific file fits this phone, for the import confirmation: the same memory shares the
+     * size tiers use, applied to the real file size, and whether Bram's copy fits in free storage.
+     * Weights are most of a model's memory, so the file size is a fair stand-in; the KV cache and
+     * compute buffers are the headroom the shares leave.
+     */
+    fun fit(fileBytes: Long, totalRamBytes: Long, freeStorageBytes: Long): ImportFit {
+        val storage = fileBytes * STORAGE_MARGIN <= freeStorageBytes
+        val memory = when {
+            totalRamBytes <= 0 -> MemoryFit.UNKNOWN
+            fileBytes <= totalRamBytes * COMFORTABLE_RAM_SHARE -> MemoryFit.COMFORTABLE
+            fileBytes <= totalRamBytes * LARGEST_RAM_SHARE -> MemoryFit.LARGE
+            else -> MemoryFit.TOO_LARGE
+        }
+        return ImportFit(memory, storage)
+    }
 
     fun advise(scan: HardwareScan): ModelAdvice {
         val isArm = scan.primaryAbi == "arm64-v8a"

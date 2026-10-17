@@ -52,9 +52,10 @@ the OpenAI-compatible runtime for an endpoint.
 
 A **profile** (`ModelProfile`) is what a person picks: a GGUF plus a backend, context size,
 sampler, reasoning setting, KV and attention settings, tuning knobs, and the measurements behind
-them. Many profiles can point at one file. Import creates a default profile from the file's
-metadata and then auto-configures it: eligible backends are measured against
-the CPU, and the fastest one that agrees wins. The current setup pass explicitly excludes Vulkan;
+them. Many profiles can point at one file. Import shows the file's size and fit for
+confirmation, then creates a conservative profile from its metadata and loads it. Auto-configure
+is offered on the profile rather than forced: eligible backends are measured against the CPU, and
+the fastest one that agrees wins. The current setup pass explicitly excludes Vulkan;
 manual Vulkan profiles and their validation remain available.
 
 Agent identity is separate from model identity. Each run receives an `AgentIdentity` with a stable

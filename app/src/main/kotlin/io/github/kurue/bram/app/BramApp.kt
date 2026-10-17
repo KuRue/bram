@@ -208,7 +208,7 @@ fun BramApp(viewModel: MainViewModel) {
     // The guide's "Connect a server" opens Models straight on the server form.
     var openServerForm by rememberSaveable { mutableStateOf(false) }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        viewModel.importModels(uris)
+        viewModel.stageImport(uris)
     }
     val skillPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importSkillDocument)
@@ -513,6 +513,13 @@ fun BramApp(viewModel: MainViewModel) {
                     onSkip = viewModel::completeOnboarding,
                 )
             }
+
+            // Above everything, including the guide: both open the same picker.
+            ImportConfirmOverlay(
+                state = state,
+                onImport = viewModel::confirmImport,
+                onCancel = viewModel::cancelImport,
+            )
         }
     }
 }
@@ -1492,32 +1499,20 @@ private fun AddProfileScreen(
         PanelHandle()
         DestinationHeader("Add profile", "Profiles", onBack)
         if (!addingServer) {
-            GlassSurface(Modifier.fillMaxWidth().clickable(enabled = !state.isImporting, onClick = onImport)) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("Model on this phone", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Choose a GGUF (.gguf) or a LiteRT-LM package (.litertlm). For a split GGUF, " +
-                            "select every part (name-00001-of-00005.gguf …) in one go. Bram will inspect " +
-                            "it, test this device, and create a ready-to-use profile.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+            GlassSurface(Modifier.fillMaxWidth()) {
+                Column {
+                    AddChoiceRow(
+                        title = if (state.isImporting) "Importing…" else "Model file on this phone",
+                        subtitle = "A .gguf or .litertlm file. For a split GGUF, pick every part.",
+                        enabled = !state.isImporting,
+                        onClick = onImport,
                     )
-                    Text(
-                        if (state.isImporting) "Importing…" else "Choose a model file  ›",
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold,
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                    AddChoiceRow(
+                        title = "Model on a server",
+                        subtitle = "Any OpenAI-compatible server, such as Ollama or LM Studio.",
+                        onClick = { addingServer = true },
                     )
-                }
-            }
-            GlassSurface(Modifier.fillMaxWidth().clickable { addingServer = true }) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("Model on a server", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Connect an OpenAI-compatible server and use its model as a profile.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text("Connect server  ›", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 }
             }
         } else {
@@ -4461,3 +4456,21 @@ internal fun profileFacts(state: AppUiState, profile: ModelProfile, model: Local
     stale = state.measurementFingerprint.isNotBlank() && profile.measuredFingerprint.isNotBlank() &&
         profile.measuredFingerprint != state.measurementFingerprint,
 )
+
+/** One way to add a model: a title, one line of what it takes, and a chevron. */
+@Composable
+private fun AddChoiceRow(title: String, subtitle: String, enabled: Boolean = true, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(start = 16.dp, top = 14.dp, bottom = 14.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        ChevronRightIcon(MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(20.dp))
+    }
+}

@@ -29,6 +29,7 @@ import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.McpServer
 import io.github.kurue.bram.core.domain.ModelAdvice
 import io.github.kurue.bram.core.domain.ModelAdvisor
+import io.github.kurue.bram.core.domain.ImportFit
 import io.github.kurue.bram.core.domain.MeasurementFingerprint
 import io.github.kurue.bram.core.domain.MessageRole
 import io.github.kurue.bram.core.domain.MemoryKind
@@ -415,6 +416,18 @@ internal fun splitLocalReply(
     return split.visibleText.trim() to reasoning
 }
 
+/**
+ * Model files the user picked, shown for confirmation before anything is copied: what the file is,
+ * how big, and whether it fits this phone. [fit] is null when the phone could not be measured.
+ */
+data class StagedImport(
+    val displayName: String,
+    val totalBytes: Long,
+    val parts: Int,
+    val isLiteRt: Boolean,
+    val fit: ImportFit?,
+)
+
 data class AppUiState(
     val deviceProfile: DeviceProfile? = null,
     val localModels: List<LocalModelRecord> = emptyList(),
@@ -547,6 +560,8 @@ data class AppUiState(
     val onboardingCompleted: Boolean = true,
     /** The guide reopened from Settings, shown whatever the catalogs hold. */
     val onboardingReopened: Boolean = false,
+    /** Files picked for import, waiting for the user to confirm; see [StagedImport]. */
+    val stagedImport: StagedImport? = null,
     /** The first-run hardware scan, null until it has run. */
     val hardwareAdvice: ModelAdvice? = null,
     val scanningHardware: Boolean = false,
@@ -1799,6 +1814,53 @@ class MainViewModel(
 
     fun importModel(uri: Uri) = importModels(listOf(uri))
 
+    /** The picked documents behind [AppUiState.stagedImport]; Uris stay out of UI state. */
+    private var stagedUris: List<Uri> = emptyList()
+
+    /**
+     * Shows what was picked before importing it. Copying a multi-gigabyte file is slow and the
+     * wrong file is easy to pick, so the name, size, and fit come first, with one Import action.
+     */
+    fun stageImport(uris: List<Uri>) {
+        if (uris.isEmpty() || mutableState.value.isImporting) return
+        val resolver = container.appContext.contentResolver
+        val described = uris.map { uri ->
+            runCatching {
+                resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+                    ?.use { c -> if (c.moveToFirst()) c.getString(0).orEmpty() to (if (c.isNull(1)) 0L else c.getLong(1)) else null }
+            }.getOrNull() ?: ("" to 0L)
+        }
+        val totalBytes = described.sumOf { it.second }
+        val first = described.minByOrNull { it.first }?.first.orEmpty()
+        val profile = mutableState.value.deviceProfile ?: container.deviceProfiler.snapshot()
+        stagedUris = uris
+        mutableState.update {
+            it.copy(
+                stagedImport = StagedImport(
+                    displayName = first.ifBlank { "Selected file" },
+                    totalBytes = totalBytes,
+                    parts = uris.size,
+                    isLiteRt = uris.size == 1 && first.endsWith(".litertlm", ignoreCase = true),
+                    fit = ModelAdvisor.fit(totalBytes, profile.totalRamBytes, profile.freeStorageBytes)
+                        .takeIf { totalBytes > 0 },
+                ),
+                error = null,
+            )
+        }
+    }
+
+    fun confirmImport() {
+        val uris = stagedUris
+        if (uris.isEmpty()) return
+        importModels(uris)
+    }
+
+    fun cancelImport() {
+        if (mutableState.value.isImporting) return
+        stagedUris = emptyList()
+        mutableState.update { it.copy(stagedImport = null) }
+    }
+
     /**
      * Imports one or more picked documents: a single GGUF, or every part of a multi-part GGUF.
      * The picker allows multiple selection so a split model (published as
@@ -1829,12 +1891,14 @@ class MainViewModel(
                     }.id.value
                 }
             }.onSuccess { id ->
+                stagedUris = emptyList()
+                mutableState.update { it.copy(stagedImport = null) }
                 if (isLiteRt) {
                     reloadLiteRtModels(selectId = id)
                 } else {
-                    // Import is the novice setup path: metadata creates the baseline profile, then
-                    // Bram measures any processors this phone exposes without asking for tuning.
-                    reloadLocalModels(selectId = id, configureImported = true)
+                    // Metadata creates a conservative profile that loads straight away. Measuring
+                    // the phone takes minutes, so it is offered on the profile, not forced here.
+                    reloadLocalModels(selectId = id)
                 }
             }.onFailure { error ->
                 mutableState.update { it.copy(error = error.message ?: "Could not import the model") }
@@ -5366,7 +5430,7 @@ class MainViewModel(
         }
     }
 
-    private fun reloadLocalModels(selectId: String? = null, configureImported: Boolean = false) {
+    private fun reloadLocalModels(selectId: String? = null) {
         viewModelScope.launch {
             val models = container.localModelStore.list()
             mutableState.update { current ->
@@ -5381,13 +5445,10 @@ class MainViewModel(
             }
             refreshModelStorage()
             syncProfiles(models)
-            val importedProfile = selectId?.let { modelId ->
-                mutableState.value.profiles.firstOrNull {
-                    it.modelId.value == modelId && it.autoConfiguredAtEpochMillis == 0L
-                }
-            }
-            if (configureImported && importedProfile != null) {
-                autoConfigure(importedProfile.id)
+            // A model just imported is the one about to be used, so it loads now, on its
+            // conservative defaults; otherwise this is startup, which restores the last one.
+            if (selectId != null && models.any { it.id.value == selectId }) {
+                loadModel(selectId)
             } else {
                 restoreLastModel()
             }
