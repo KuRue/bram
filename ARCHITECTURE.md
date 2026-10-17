@@ -5,19 +5,19 @@ How Bram is put together, and why. For what works today see the
 
 ## Product principles
 
-1. **Stable before fast.** A backend or tuning choice is measured against the CPU reference before
+1. **Correctness and recovery.** A backend or tuning choice is measured against the CPU reference before
    it is used, and the measurement is recorded against a fingerprint of the device, app build,
    engine, and CPU features, so it expires when any of them change. A failure produces a more
    conservative retry, not a dead chat.
-2. **Local by policy, not by accident.** Each conversation has a privacy class and each run a
+2. **Privacy controls.** Each conversation has a privacy class and each run a
    routing mode. Remote fallback cannot silently receive private content.
-3. **One agent, replaceable runtimes.** Agent behavior, tools, memory, skills, scheduling, and UI
+3. **Runtime-independent agent.** Agent behavior, tools, memory, skills, scheduling, and UI
    do not depend on llama.cpp, LiteRT-LM, or a remote API.
-4. **Context is a budget.** A large model window is available to the planner, but relevance and
+4. **Context budgeting.** A large model window is available to the planner, but relevance and
    predictable output headroom decide what enters a request.
-5. **Generated capabilities start untrusted.** An agent-created skill is a draft until the user
+5. **Skill activation.** An agent-created skill is a draft until the user
    activates it.
-6. **Identity is versioned data.** Bram's persona is supplied to an agent run and versioned
+6. **Versioned identity.** Bram's persona is supplied to an agent run and versioned
    independently of the model, runtime, tools, and UI.
 
 ## Module map
