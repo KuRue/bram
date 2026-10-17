@@ -64,7 +64,7 @@ class HttpsRecipeDownload(
     private val openConnection: (String) -> HttpsURLConnection = { URI(it).toURL().openConnection() as HttpsURLConnection },
 ) : RecipeDownload {
     override fun read(url: String, maxBytes: Int, deadlineNanos: Long): ByteArray {
-        val connection = openConnection(RecipeSources.normalizeUrl(url))
+        val connection = openConnection(RecipeSources.normalizeDocumentUrl(url))
         fun remainingMillis(): Int {
             val remaining = (deadlineNanos - System.nanoTime()) / 1_000_000
             require(remaining > 0) { "Recipe source download exceeded its 45-second budget" }
@@ -234,11 +234,20 @@ class RecipeSources(
             val value = shorthand?.let {
                 "https://raw.githubusercontent.com/${it.groupValues[1]}/${it.groupValues[2]}/${it.groupValues[3]}/index.json"
             } ?: input.trim()
+            val url = normalizeDocumentUrl(value)
+            require(URI(url).rawPath.endsWith("/index.json")) {
+                "Use an HTTPS URL ending in /index.json, or owner/repo@40-character-commit"
+            }
+            return url
+        }
+
+        /** Shared transport rules apply to both the index and its plain recipe filenames. */
+        internal fun normalizeDocumentUrl(value: String): String {
             require(value.length <= 2048) { "Source URL is too long" }
             val uri = URI(value)
             require(uri.scheme == "https" && !uri.host.isNullOrBlank() && uri.rawUserInfo == null &&
                 uri.rawQuery == null && uri.rawFragment == null && uri.port in listOf(-1, 443) &&
-                uri.rawPath.endsWith("/index.json") && uri.normalize() == uri && !uri.rawPath.contains('%')) {
+                uri.rawPath.endsWith(".json") && uri.normalize() == uri && !uri.rawPath.contains('%')) {
                 "Use an HTTPS URL ending in /index.json without credentials, query, or fragment, or owner/repo@40-character-commit"
             }
             return uri.toASCIIString()
