@@ -24,13 +24,18 @@
 
 ## Your phone. Your models. Your assistant.
 
-Bram runs local AI on Android, with durable conversations, tools, memory, and scheduled work.
-Add a GGUF or a LiteRT-LM model, or connect an OpenAI-compatible server, and start chatting.
-Remote models fit into the same agent loop, behind an explicit privacy policy.
+Bram runs AI models on your Android phone, privately, with durable conversations, tools, memory,
+and scheduled work. Add a GGUF or LiteRT-LM model, or connect an OpenAI-compatible server. Bram
+measures your hardware and checks every accelerator against the CPU before trusting it.
 
-It profiles your hardware, budgets memory, and tests accelerators against CPU output before
-using them. Native inference runs in a separate process, so a backend crash is contained without
-taking down the conversation.
+<p align="center">
+  <img src="docs/assets/screenshots/01-chat.png" width="19%" alt="A chat with a local model, showing a collapsed thinking row and a formatted reply" />
+  <img src="docs/assets/screenshots/02-setup.png" width="19%" alt="The setup guide's phone scan: memory, storage, processor, NPU, and GPU, with a model recommendation" />
+  <img src="docs/assets/screenshots/03-tuning.png" width="19%" alt="Auto-configure results: each setting measured, with timed-out candidates shown in red" />
+  <img src="docs/assets/screenshots/04-approval.png" width="19%" alt="An approval card asking whether Bram may schedule a reminder" />
+  <img src="docs/assets/screenshots/05-benchmark.png" width="19%" alt="A model profile with benchmark results: 121 tok/s prompt, 20 tok/s generation" />
+</p>
+<p align="center"><sub>Real captures from a Galaxy S25 Ultra running LFM2.5-2.6B on the CPU.</sub></p>
 
 | Chat that lasts | Tools that do work | Hardware you can trust |
 | :--- | :--- | :--- |
@@ -40,52 +45,29 @@ taking down the conversation.
 
 **Android 10+ · ARM64 · bring your own model or server**
 
-- **Release builds:** download the APK and `SHA256SUMS` from [Releases](https://github.com/KuRue/bram/releases) once a version is published. Release drafts are visible only to maintainers.
-- **Development builds:** open a successful [Android CI run](https://github.com/KuRue/bram/actions/workflows/android-ci.yml) and download its `bram-debug-…` artifact (GitHub requires sign-in), then unzip it to get the APK.
-- **Build it yourself:** see [Building Bram](docs/BUILDING.md).
+- **[Releases](https://github.com/KuRue/bram/releases):** a signed APK and `SHA256SUMS`, once a version is published.
+- **[CI builds](https://github.com/KuRue/bram/actions/workflows/android-ci.yml):** the `bram-debug-…` artifact of any green run (GitHub sign-in required).
+- **[Build it yourself](docs/BUILDING.md).**
 
-On first launch, Bram's setup guide checks what the phone can run — memory, processor, NPU, and
-GPU — and suggests the kind of model to add. Models are separate downloads and are not bundled:
-get a `.gguf` or `.litertlm` file in your browser (for example from Hugging Face) and add it, or
-connect a server such as Ollama or LM Studio. The guide is under **Settings › Setup guide**, and
-models and servers live under **Models**.
-
-On-device models need an ARMv8.2 processor (fp16 and dot-product instructions); Bram says so
-before loading on an older one, and a server still works there.
-
-Release and development builds use different signing keys, and Android only updates an app signed
-with the same key, so switching between them means reinstalling, which clears app data. See
-[APK releases](docs/RELEASING.md).
+On first launch, the setup guide checks your phone and suggests what to add. Models are separate
+downloads: get a `.gguf` or `.litertlm` file (for example from Hugging Face), or connect a server
+such as Ollama or LM Studio. Release and CI builds are signed with different keys; see
+[APK releases](docs/RELEASING.md) before switching between them.
 
 ## Where things stand
 
-Bram is **alpha** software. Local chat, conversations, tools, memory, skills, and automations
-work. Hardware results come from one phone, a Snapdragon 8 Elite Galaxy S25 Ultra; the emulator
-covers the UI and agent flows.
+Bram is **alpha**. Chat, conversations, tools, memory, skills, and automations work; hardware
+results come from one Snapdragon 8 Elite phone.
 
-| Runtime / backend | Current evidence |
+| Backend | Evidence |
 | :--- | :--- |
-| llama.cpp CPU | Validated on device, with Arm's KleidiAI kernels. |
-| Hexagon NPU | Validated at 95.8% agreement with CPU. Needs Qualcomm's SDK at build time, so release builds do not include it. |
-| OpenCL (Adreno) | Validated at 96% agreement. Opt-in at build time. |
-| Vulkan | Builds and runs, but fails correctness validation on the Adreno 830, so it is not used by default. |
-| LiteRT-LM | Ships in the build and runs `.litertlm` packages on CPU or GPU; not yet validated across devices. |
+| llama.cpp CPU | Validated, with Arm KleidiAI kernels |
+| Hexagon NPU | Validated at 95.8% agreement; needs Qualcomm's SDK, so not in release builds |
+| OpenCL (Adreno) | Validated at 96% agreement; opt-in at build time |
+| Vulkan | Fails validation on the Adreno 830; not used by default |
+| LiteRT-LM | Runs `.litertlm` on CPU or GPU; not yet validated across devices |
 
-Open work is device adaptation across more hardware, efficiency modes, and the items on the
-[roadmap](ROADMAP.md). The [project overview](docs/PROJECT_OVERVIEW.md) has the full status.
-
-## Explore the code
-
-| Module | Role |
-| :--- | :--- |
-| `app` | Jetpack Compose UI, app state, built-in tools, and dependency assembly |
-| `core:domain` / `core:agent` | Agent contracts, context budgets, routing, planning, and tool execution |
-| `platform:android` | Device profiling, storage, memory, and encrypted credentials |
-| `runtime:llamacpp` | GGUF import, JNI inference, and the isolated native process |
-| `runtime:openai` / `runtime:litertlm` | Remote model adapter and LiteRT-LM integration |
-
-[Architecture](ARCHITECTURE.md) explains the boundaries. [Security](SECURITY.md) documents privacy,
-credentials, and tool trust. [Contributing](CONTRIBUTING.md) covers development expectations, and
-the [docs index](docs/README.md) lists everything else.
+Full status: [project overview](docs/PROJECT_OVERVIEW.md). What's next: [roadmap](ROADMAP.md).
+How it works: [architecture](ARCHITECTURE.md). Everything else: [docs index](docs/README.md).
 
 No open-source license has been selected yet.
