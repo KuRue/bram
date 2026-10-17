@@ -379,41 +379,90 @@ the schema/recipes, but the owner must choose it; no project license is assumed 
 snapshots make the app's default data reproducible and reviewable. General model
 recommendations are not substitutes for per-model benchmark evidence.
 
-## 7. Hexagon included in release APKs
+## 7. Engine packs: hardware-specific engines installed on demand
 
-Adopt the owner's requirement: every normal ARM64 phone release includes the Hexagon backend and
-the compatible DSP artifacts it needs. Unsupported phones still install and use CPU; Hexagon
-availability, model compatibility, and validation decide whether it can run. "Included" does not
-mean always selected or always loaded. x86_64 emulator/test builds can remain a distinct build path.
+Decided 2026-10-17: Bram should run on many phones and offer every engine that helps them, without
+shipping every vendor's code to every phone. The base APK keeps what works everywhere; everything
+vendor-specific moves into **engine packs**, separate signed APKs that the setup guide offers on
+first open when the phone can use them. This replaces "Hexagon in every release APK": Hexagon is
+always *offered* to Snapdragon phones, inside the Qualcomm pack.
 
-The [Snapdragon instructions at Bram's pinned llama.cpp commit](https://github.com/ggml-org/llama.cpp/blob/a94d563ed801d1da1b8c2432946de07d0231bb3d/docs/backend/snapdragon/README.md)
-already document a toolchain container that includes Hexagon SDK and produces DSP libraries
-including v79. Test that route first rather than assuming hosted CI can never build it. Pin the
-image by digest, verify its provenance and AGP/NDK/SDK compatibility, and inspect the actual SDK's
-redistribution manifests and required notices. A public container's existence does not establish
-that every file inside can be redistributed in Bram. The [Qualcomm SDK page](https://www.qualcomm.com/developer/software/hexagon-npu-sdk)
-links the product license; the exact bundled artifact list needs review before distribution.
+### Shape
 
-If that route is unsuitable, use a provisioned build environment with the approved SDK, isolated
-from untrusted PR execution. Do not run arbitrary fork workflows on the shared development box
-with signing credentials. PR tests can use ordinary hosted CPU builds; a protected release job
-must build the full phone artifact before signing/publishing.
+An engine pack is an APK that carries native libraries and a manifest entry describing them. It has
+no launcher icon and no code of its own. Bram finds installed packs, checks they are signed with
+Bram's own key, and loads their libraries into its isolated `:inference` process, the way apps load
+WebView's libraries from the WebView package.
 
-Release acceptance gates:
+Packs do **not** run their own inference process. A pack process could not open Bram's model files:
+they live in Bram's private storage, and handing a descriptor across apps hits the same
+scoped-storage re-open failure Milestone 1 recorded. Loading the pack's libraries into Bram's own
+process keeps models where they are and keeps the existing AIDL contract unchanged.
 
-1. Enable `bram.requireHexagon=true` and fail if the SDK is absent; no silent CPU-only release.
-2. In a clean native build, verify the ARM64 host backend and required v79/other supported DSP
-   artifacts exist inside the APK, have the expected architecture, and have their notices. A Gradle
-   flag alone cannot prove packaging; stale CMake caches were already a problem here.
-3. On the S25 Ultra, confirm backend enumeration, model load, short CPU-reference validation,
-   representative prompt/decode, cancellation, and CPU fallback after a deliberate backend failure.
-4. Confirm installation/CPU operation on an emulator or other supported non-Hexagon environment;
-   unsupported Qualcomm hardware must fail gracefully. Do not claim other vendors tested without
-   the corresponding hardware evidence.
-5. Only then update README/build/release docs from "not included" to the actual shipped capability.
+| Package | Contents | Who gets it |
+| --- | --- | --- |
+| Base Bram | UI, agent, llama.cpp core and CPU backends (one library per CPU instruction-set level, chosen at runtime), Vulkan, LiteRT-LM CPU/GPU, Kotlin/JNI glue for every engine | Everyone |
+| Qualcomm pack | ggml Hexagon backend and its DSP libraries, ggml OpenCL backend, Qualcomm runtime libraries for ExecuTorch/LiteRT NPU | Snapdragon phones |
+| MediaTek pack | ExecuTorch/LiteRT NeuroPilot backends | Dimensity phones |
+| Samsung pack | ExecuTorch Exynos backend | Exynos phones |
+| MLC pack | MLC LLM GPU runtime | Adreno/Mali GPUs, optional |
 
-This is a build/distribution prerequisite, not a reason to delay Home or copy cleanup. No new SDK
-terms are accepted, signing secrets changed, or releases published by this planning patch.
+The base APK alone always works offline on CPU. A pack never replaces the CPU path; it adds
+backends that still have to pass Bram's CPU-agreement check before they are used.
+
+### Mechanism (proven on the emulator, 2026-10-17)
+
+`engines/probe` is a minimal pack, exercised by `EnginePackProbeOnDeviceTest`. On the Android 16
+emulator:
+
+- **Discovery.** A pack declares a marker service with the `io.github.kurue.bram.ENGINE_PACK`
+  intent action and its metadata (engine id, libraries, contract version). Bram declares that
+  action in `<queries>`. Package visibility only counts **exported** components, so the marker is
+  exported and guarded by a signature-level permission; it is never started (the pack has no code).
+- **Trust.** `checkSignatures(bram, pack)` must return `SIGNATURE_MATCH`. A pack signed by anyone
+  else is ignored.
+- **Loading.** `System.load` of a library in the pack's `nativeLibraryDir` succeeds in Bram's
+  linker namespace (`…/engine.probe…/lib/x86_64/libbram_engine_probe.so … : ok`), and JNI binds to
+  Bram's classes.
+
+Still to prove, in order:
+
+1. The same on the S25 Ultra (One UI may add policy on top of AOSP).
+2. A real ggml backend from a pack: switch the native build to `GGML_BACKEND_DL`, so `ggml-base`
+   and llama.cpp stay in the base APK and each backend is its own library. A pack's backend links
+   against the base's `libggml-base.so`, so **a pack must come from the same llama.cpp pin as the
+   Bram it serves**; the contract version in its metadata enforces that, and a mismatched pack is
+   ignored with a message asking to update it. The same switch enables
+   `GGML_CPU_ALL_VARIANTS` for phones older than ARMv8.2.
+3. Hexagon from a pack: the DSP libraries are found through `ADSP_LIBRARY_PATH`, which must point
+   at the pack's library directory. Verified only on the phone.
+4. Non-ggml engines (ExecuTorch, MLC, LiteRT NPU): their Kotlin/JNI wrappers live in the base, the
+   heavy native libraries in the pack, loaded the same way.
+
+### Installing packs
+
+- **First open:** the setup guide reads the chip and offers only the packs that apply, with their
+  size ("This phone has a Snapdragon NPU. Add the Qualcomm engine, about 30 MB?"). Later, from
+  Settings › Engines, which lists installed packs, their versions, and what they enabled.
+- **GitHub releases:** pack APKs are release assets beside Bram, signed with the same key, with
+  checksums. Bram downloads one and hands it to Android's installer, which asks the user to confirm
+  (this needs `REQUEST_INSTALL_PACKAGES` and the "install unknown apps" permission for Bram).
+- **Google Play:** each pack can be its own listing, or the same libraries can ship as Play Feature
+  Delivery modules targeted by chip. Play forbids downloading code from anywhere else, so the
+  in-app download path is for GitHub builds only.
+- **Updates:** a pack updates independently, but must match Bram's contract version; Bram says
+  which pack needs updating rather than loading an incompatible one.
+
+### Qualcomm SDK terms
+
+The Qualcomm pack carries files built with, and possibly copied from, Qualcomm's Hexagon SDK. The
+[Snapdragon instructions at the pinned llama.cpp commit](https://github.com/ggml-org/llama.cpp/blob/a94d563ed801d1da1b8c2432946de07d0231bb3d/docs/backend/snapdragon/README.md)
+document a toolchain container that includes the SDK. Before any pack is distributed, the owner
+must review the SDK's license and redistribution terms and the notices the pack has to carry. Local
+builds for testing on the owner's phone do not distribute anything. Release gates for the pack:
+`bram.requireHexagon=true` fails a build without the SDK; the pack's APK is checked for the backend
+and v79 DSP libraries; and the S25 Ultra confirms enumeration, load, CPU-reference agreement,
+cancellation, and CPU fallback after a deliberate backend failure.
 
 ## 8. Delivery sequence and gates
 
@@ -421,7 +470,7 @@ terms are accepted, signing secrets changed, or releases published by this plann
 | --- | --- | --- | --- |
 | 0 | Factual docs, banners, screenshot captions; this plan | None | Existing captures preserved, local links/SVG checked, no product claims added |
 | 1 | Bound setup retries/cooldown/native deadlines; explain excluded backends | Existing sweep | Slow/padded references terminate, Cancel works, partial results survive, no false success |
-| 2 | Full ARM64 Hexagon release build and artifact gate | SDK/provenance review | Clean signed APK contains backend/DSP files; real-phone validation and CPU fallback |
+| 2 | Engine packs: probe (done), `GGML_BACKEND_DL` native split with CPU variants, Qualcomm pack (Hexagon + OpenCL), install flow, then MediaTek/Samsung/MLC packs | Phone access; SDK terms review before distribution | Packs discovered only when Bram-signed; mismatched contract refused; backends from a pack pass CPU agreement on the S25 Ultra; base APK alone still works |
 | 3 | Shared compact components; Profiles/Add model/intro redesign | Slice 1 for configuration entry point | Fewer visible actions, accessible icons, no mandatory tuning, large-font/device tests |
 | 4 | Run journal extension, agent/task identity, inference resource arbiter | Existing journal/queue | Idempotent usage, cancellation ownership, safe schema migrations, no simultaneous local loads |
 | 5 | Home destination and monthly/recent views | Slice 4 | Correct totals/unknowns, fast offline launch, notification routing, recent activity dedup |
@@ -435,7 +484,7 @@ the first adaptive implementation with a local fixture before the public source 
 Do not make an entire redesign wait for the federation UI. Agent definitions can land with the
 run contracts; automation management does not need to wait for full child-agent execution.
 
-**First implementation batch:** slice 1, the Hexagon build spike/gate, and compact Profiles/Add
+**First implementation batch:** slice 1, the engine-pack mechanism and Qualcomm pack, and compact Profiles/Add
 model navigation. Then the run journal/arbiter and Home, followed by adaptive configuration and
 recipes, then the automation/delegation expansion. Prefer small reviewable PRs with a migration
 and verification story each. This is an order of work, not a calendar estimate without prototypes.

@@ -16,6 +16,12 @@ android {
         testInstrumentationRunner = "io.github.kurue.bram.app.test.BramTestRunner"
     }
 
+    // Opt-in: `-Pbram.applicationIdSuffix=.dev` gives a debug build its own package, so it installs
+    // beside a release Bram on a real phone without replacing it or touching its data.
+    providers.gradleProperty("bram.applicationIdSuffix").orNull?.takeIf { it.isNotBlank() }?.let { suffix ->
+        buildTypes { getByName("debug") { applicationIdSuffix = suffix } }
+    }
+
     buildFeatures {
         compose = true
     }

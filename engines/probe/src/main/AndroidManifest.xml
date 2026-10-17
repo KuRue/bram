@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Exported components are what package visibility counts, so the marker is exported; this
+         signature permission means only apps signed with Bram's key can address it. -->
+    <permission
+        android:name="io.github.kurue.bram.permission.ENGINE_PACK"
+        android:protectionLevel="signature" />
+    <!-- No launcher activity: a pack is not an app the user opens. The marker service is never
+         started (the pack has no code); its intent filter is how Bram discovers installed packs
+         under package visibility, and the meta-data says what the pack carries. -->
+    <application
+        android:extractNativeLibs="true"
+        android:hasCode="false"
+        android:label="Bram engine probe">
+        <service
+            android:name="io.github.kurue.bram.engine.PackMarker"
+            android:exported="true"
+            android:permission="io.github.kurue.bram.permission.ENGINE_PACK">
+            <intent-filter>
+                <action android:name="io.github.kurue.bram.ENGINE_PACK" />
+            </intent-filter>
+            <meta-data android:name="io.github.kurue.bram.engine.id" android:value="probe" />
+            <meta-data android:name="io.github.kurue.bram.engine.libraries" android:value="bram_engine_probe" />
+            <meta-data android:name="io.github.kurue.bram.engine.abi" android:value="1" />
+        </service>
+    </application>
+</manifest>

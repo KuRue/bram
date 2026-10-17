@@ -190,6 +190,25 @@ procedure, including the cold boot and the mock server, is in
 - The rest (chat shell, conversation history, memory, skills, the agent folder, alarms and
   notifications, Termux snippets, and `:inference` survival) need neither the mock nor a model.
 
+### Engine packs
+
+`engines/probe` is a minimal engine pack: an APK with one native library that Bram discovers,
+signature-checks, and loads (see [the design](PRODUCT_PLAN.md#7-engine-packs-hardware-specific-engines-installed-on-demand)).
+`EnginePackProbeOnDeviceTest` exercises it and skips when it is not installed:
+
+```bash
+./gradlew :engines:probe:assembleDebug
+adb install -r engines/probe/build/outputs/apk/debug/probe-debug.apk
+```
+
+A pack must be signed with the same key as the Bram it serves.
+
+### Testing on a phone that has a release Bram
+
+`-Pbram.applicationIdSuffix=.dev` builds the debug app as `io.github.kurue.bram.app.dev` (and its
+tests as `….dev.test`), so it installs beside a release Bram without replacing it or its data.
+Uninstall it afterwards with `adb uninstall io.github.kurue.bram.app.dev`.
+
 ## CI
 
 `.github/workflows/android-ci.yml` runs every module's unit tests, lint, and the debug build on each
