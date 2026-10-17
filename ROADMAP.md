@@ -49,9 +49,16 @@ Design: [DEVICE_ADAPTATION.md](docs/DEVICE_ADAPTATION.md).
 
 ## Next
 
-- **First-run guide follow-ups.** Confirm the arm64 recommendation on the real phone; keep the
-  example model families in `ModelAdvisor.tiers` current; lead with "Connect a server" when no
-  local model can run.
+- **Auto-configure can retry forever.** The KV-cache and attention steps time a reference padded
+  with 1,024 tokens against the 30-second limit meant for an unpadded one, and slow references are
+  retried without a cap. On the emulator it parked 10 times in 28 minutes; a slow phone would too.
+  Scale the limit to the prompt and cap the retries.
+- **Auto-configure skipped Vulkan on the S25 Ultra** (2026-10-17): the scan enumerated it, but the
+  sweep's Backends section came back empty. Find out why before trusting the "Vulkan fails" line on
+  newer builds.
+- **First-run guide follow-ups.** Keep the example model families in `ModelAdvisor.tiers` current;
+  lead with "Connect a server" when no local model can run. (The arm64 recommendation was confirmed
+  on the S25 Ultra on 2026-10-17: 12 GB → about 4B comfortable, 8B at a push; ARMv8.6 with i8mm.)
 - **The rest of Milestone 17.** Device-specific compiled caches for LiteRT-LM, speculative
   decoding, and task-specific worker models.
 - **Retire the legacy HTTP reader.** OkHttp has been the default since #49/#50; the
@@ -76,8 +83,7 @@ Design: [DEVICE_ADAPTATION.md](docs/DEVICE_ADAPTATION.md).
 
 These cannot be checked on the emulator and are batched for the S25 Ultra: Hexagon NPU correctness
 and speed, Adreno OpenCL and Vulkan, real-model speed, thermals, and memory, the ARMv8.2
-fp16/dotprod requirement check, a cancelled benchmark leaving the model usable, and the first-run
-guide's arm64 recommendation.
+fp16/dotprod requirement check, and a cancelled benchmark leaving the model usable.
 
 ## Testing matrix
 
