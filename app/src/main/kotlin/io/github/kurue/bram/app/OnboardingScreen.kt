@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -57,7 +58,11 @@ internal fun OnboardingOverlay(
     onConnectServer: () -> Unit,
     onSkip: () -> Unit,
 ) {
-    var started by rememberSaveable { mutableStateOf(state.hardwareAdvice != null) }
+    // The scan is local, quick, and asks for nothing, so it runs as the guide opens instead of
+    // waiting behind a welcome page.
+    LaunchedEffect(Unit) {
+        if (state.hardwareAdvice == null && !state.scanningHardware) onScan()
+    }
     // Reopened from Settings with models already present: the guide is done once one more lands.
     val modelCountAtOpen = remember {
         state.localModels.size + state.litertlmModels.size + state.endpoints.size
@@ -80,8 +85,7 @@ internal fun OnboardingOverlay(
             .testTag("onboarding"),
         contentAlignment = Alignment.Center,
     ) {
-        // Opaque, unlike the glass panels: the guide sits over a scrim rather than the chat field,
-        // and glass over a scrim left dark theme text on a dark card.
+        // Opaque, unlike the glass panels: the guide sits over a scrim rather than the chat field.
         Box(
             Modifier
                 .widthIn(max = 520.dp)
@@ -96,44 +100,14 @@ internal fun OnboardingOverlay(
                     .padding(22.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                if (!started) {
-                    Introduction(
-                        onScan = {
-                            started = true
-                            onScan()
-                        },
-                        onSkip = onSkip,
-                    )
-                } else {
-                    ScanResults(state, onAddModelFile, onConnectServer, onSkip, onRescan = onScan)
-                }
+                Setup(state, onAddModelFile, onConnectServer, onSkip, onRescan = onScan)
             }
         }
     }
 }
 
 @Composable
-private fun Introduction(onScan: () -> Unit, onSkip: () -> Unit) {
-    Text("Welcome to Bram", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-    Text(
-        "Bram runs AI models on this phone, privately. It can also use a model on a server you trust.",
-        style = MaterialTheme.typography.bodyLarge,
-    )
-    Text(
-        "To start, Bram checks what this phone can run (memory, processor, NPU, and GPU) and " +
-            "suggests the kind of model to add. Nothing is downloaded or sent anywhere.",
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Button(onClick = onScan, modifier = Modifier.fillMaxWidth().testTag("onboarding-scan")) {
-        Text("Check this phone")
-    }
-    TextButton(onClick = onSkip, modifier = Modifier.fillMaxWidth().testTag("onboarding-skip")) {
-        Text("Skip for now")
-    }
-}
-
-@Composable
-private fun ScanResults(
+private fun Setup(
     state: AppUiState,
     onAddModelFile: () -> Unit,
     onConnectServer: () -> Unit,
@@ -141,16 +115,19 @@ private fun ScanResults(
     onRescan: () -> Unit,
 ) {
     val advice = state.hardwareAdvice
-    val deviceName = state.deviceProfile?.let { "${it.manufacturer} ${it.model}".trim() }.orEmpty()
-    Text("This phone", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-    if (deviceName.isNotBlank()) {
-        Text(deviceName, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    var showDetails by rememberSaveable { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Set up Bram", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Run models on this phone, privately, or use a server you choose.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     when {
-        state.scanningHardware -> {
+        state.scanningHardware || (advice == null && state.deviceProfile == null) -> {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                Text("Checking memory, processor, NPU, and GPU…")
+                Text("Checking this phone…")
             }
         }
         advice == null -> {
@@ -161,53 +138,57 @@ private fun ScanResults(
             TextButton(onClick = onRescan) { Text("Try again") }
         }
         else -> {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("onboarding-findings")) {
-                advice.findings.forEach { FindingRow(it) }
-            }
-            HorizontalDivider()
             Recommendation(advice)
+            TextButton(
+                onClick = { showDetails = !showDetails },
+                contentPadding = PaddingValues(0.dp),
+                modifier = Modifier.testTag("onboarding-details"),
+            ) { Text(if (showDetails) "Hide details" else "Details") }
+            if (showDetails) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("onboarding-findings")) {
+                    advice.findings.forEach { FindingRow(it) }
+                    advice.reasons.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+                    advice.alternatives.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+                }
+            }
         }
     }
 
-    state.importProgress?.let { progress ->
-        val share = if (progress.totalBytes > 0) " · ${progress.bytesRead * 100 / progress.totalBytes}%" else ""
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            Text("${progress.stage}$share", modifier = Modifier.testTag("onboarding-import-progress"))
-        }
-    }
-    state.error?.let { error ->
-        Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-    }
-
+    // What can run here decides the order: a phone that cannot run a local model leads with the
+    // server, with the file (for a LiteRT package) second.
     val canRunLocally = advice?.canRunLocally ?: true
-    if (advice?.canImportFiles ?: true) {
-        val addLabel: @Composable () -> Unit = { Text(if (state.isImporting) "Adding…" else "Add a model file") }
-        val addModifier = Modifier.fillMaxWidth().testTag("onboarding-add-file")
-        if (canRunLocally) {
-            Button(onClick = onAddModelFile, enabled = !state.isImporting, modifier = addModifier) { addLabel() }
+    val canImport = advice?.canImportFiles ?: true
+    val addFile: @Composable (Boolean) -> Unit = { primary ->
+        val modifier = Modifier.fillMaxWidth().testTag("onboarding-add-file")
+        if (primary) {
+            Button(onClick = onAddModelFile, enabled = !state.isImporting, modifier = modifier) { Text("Add a model file") }
         } else {
-            OutlinedButton(onClick = onAddModelFile, enabled = !state.isImporting, modifier = addModifier) { addLabel() }
+            OutlinedButton(onClick = onAddModelFile, enabled = !state.isImporting, modifier = modifier) { Text("Add a model file") }
         }
-        Text(
-            "A GGUF (.gguf) or a LiteRT-LM package (.litertlm). Bram has no downloads of its own " +
-                "yet: get the file in your browser, for example from Hugging Face, then add it here.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
-    val serverButton: @Composable () -> Unit = { Text("Connect a server") }
-    if (canRunLocally) {
-        OutlinedButton(
-            onClick = onConnectServer,
-            enabled = !state.isImporting,
-            modifier = Modifier.fillMaxWidth().testTag("onboarding-connect-server"),
-        ) { serverButton() }
-    } else {
-        Button(
-            onClick = onConnectServer,
-            modifier = Modifier.fillMaxWidth().testTag("onboarding-connect-server"),
-        ) { serverButton() }
+    val connect: @Composable (Boolean) -> Unit = { primary ->
+        val modifier = Modifier.fillMaxWidth().testTag("onboarding-connect-server")
+        if (primary) {
+            Button(onClick = onConnectServer, modifier = modifier) { Text("Connect a server") }
+        } else {
+            OutlinedButton(onClick = onConnectServer, modifier = modifier) { Text("Connect a server") }
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (canRunLocally) {
+            addFile(true)
+            connect(false)
+        } else {
+            connect(true)
+            if (canImport) addFile(false)
+        }
+        if (canImport) {
+            Text(
+                "A .gguf or .litertlm file you have downloaded, for example from Hugging Face.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
     TextButton(
         onClick = onSkip,
@@ -248,7 +229,7 @@ private fun Recommendation(advice: ModelAdvice) {
             .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
             .padding(16.dp)
             .testTag("onboarding-recommendation"),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text(
             if (advice.canRunLocally) "Start with" else "Best option",
@@ -258,19 +239,14 @@ private fun Recommendation(advice: ModelAdvice) {
         Text(advice.headline, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         val examples = (advice.comfortable ?: advice.largest)?.examples.orEmpty()
         if (examples.isNotEmpty()) {
-            Text(
-                "For example ${examples.joinToString()}. Look for a file name ending in Q4_0.gguf.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            Text("For example ${examples.take(3).joinToString()}.", style = MaterialTheme.typography.bodyMedium)
         }
-        advice.reasons.forEach { reason ->
-            Text("• $reason", style = MaterialTheme.typography.bodySmall)
-        }
-        if (advice.alternatives.isNotEmpty()) {
-            Text("Also works", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-            advice.alternatives.forEach { alternative ->
-                Text("• $alternative", style = MaterialTheme.typography.bodySmall)
-            }
+        // One line about the phone itself, from the same findings the details expand.
+        val phone = advice.findings
+            .filter { it.title in setOf("Memory", "Storage", "Processor") }
+            .joinToString(" · ") { it.summary }
+        if (phone.isNotBlank()) {
+            Text(phone, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
