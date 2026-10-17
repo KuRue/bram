@@ -62,13 +62,15 @@ class OnboardingOnDeviceTest {
     fun theGuideScansThePhoneRecommendsAModelAndStaysGoneWhenSkipped() {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         composeRule.waitUntil(LAUNCH_TIMEOUT_MS) { exists("onboarding") }
-        composeRule.onNodeWithText("Welcome to Bram").assertIsDisplayed()
+        composeRule.onNodeWithText("Set up Bram").assertIsDisplayed()
 
-        composeRule.onNodeWithTag("onboarding-scan").performClick()
+        // The scan runs as the guide opens; the findings sit behind Details.
         composeRule.waitUntil(SCAN_TIMEOUT_MS) { exists("onboarding-recommendation") }
-        composeRule.onNodeWithTag("onboarding-findings").assertIsDisplayed()
-        composeRule.onNodeWithText("Memory").assertIsDisplayed()
-        composeRule.onNodeWithText("NPU").assertIsDisplayed()
+        assertTrue("findings start collapsed", !exists("onboarding-findings"))
+        composeRule.onNodeWithTag("onboarding-details").performClick()
+        composeRule.onNodeWithTag("onboarding-findings").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Memory").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("NPU").performScrollTo().assertIsDisplayed()
         // The advice itself depends on the device ("Start with" on a phone, "Best option" where
         // GGUF cannot run, like this emulator), so only its presence is asserted here; its content
         // is covered by ModelAdvisorTest.
@@ -94,7 +96,6 @@ class OnboardingOnDeviceTest {
     fun connectAServerOpensTheServerFormAndBackReturnsToTheGuide() {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         composeRule.waitUntil(LAUNCH_TIMEOUT_MS) { exists("onboarding") }
-        composeRule.onNodeWithTag("onboarding-scan").performClick()
         composeRule.waitUntil(SCAN_TIMEOUT_MS) { exists("onboarding-recommendation") }
 
         composeRule.onNodeWithTag("onboarding-connect-server").performScrollTo().performClick()
