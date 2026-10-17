@@ -63,8 +63,9 @@ PR verification has no access to these signing secrets.
 
 1. Update `versionName` and increase `versionCode` in `app/build.gradle.kts`. The name must match
    the tag without its `v` prefix; the code must be greater than every previous published code.
-2. Merge the change after verification. Complete the focused device and cold-AVD gates before
-   deciding to distribute it, plus any hardware-specific checks needed for the release.
+2. Merge the change after verification. Complete the focused device and cold-AVD gates
+   ([Contributing › Verification](../CONTRIBUTING.md#verification)) before deciding to distribute
+   it, plus any hardware-specific checks needed for the release.
 3. When authorized to prepare the release, tag that exact commit and push the tag:
 
    ```bash

@@ -1,6 +1,13 @@
 # Device adaptation plan — on-device tuning, compatibility, and coverage across hardware
 
-Status: planned. Research date: 2026-08-12. Companion to [PERFORMANCE_OPTIONS.md](PERFORMANCE_OPTIONS.md).
+Status: **phases 1–3 shipped** (tuning framework, fingerprints and sweep gates, import
+compatibility and quant conversion), with implementation notes and measurements at the end of this
+file. Phases 4–6 are open and tracked on the [roadmap](../ROADMAP.md). Research date: 2026-08-12.
+Companion to [PERFORMANCE_OPTIONS.md](PERFORMANCE_OPTIONS.md).
+
+Measurements here were taken at llama.cpp `132753bf`. The pin moved to `a94d563e` on 2026-08-13 to
+fix hangs under strict CPU masks and with eight threads; the measurement fingerprint makes profiles
+measured at the old pin ask to be re-measured.
 Target device classes: any ARM64 Android phone/tablet Bram can be installed on — Snapdragon
 (Adreno + Hexagon), Dimensity (Mali/Immortalis + APU), Tensor (Mali-G + TPU), Exynos (Mali +
 NPU), low-RAM devices, and the x86_64 emulator.

@@ -1,6 +1,11 @@
 # Cancellable streaming on Android — client decision
 
-Status: **decision pending (Ku)**. Research only; no dependency added, no production code changed.
+Status: **decided and implemented — OkHttp.** The generation path moved in #49 and the model
+catalog in #50; OkHttp is the default client in `runtime:openai`. The `HttpURLConnection` reader is
+still selectable through `RemoteClientMode.useLegacyHttpUrlConnection` as the rollback described
+below, and is due to be removed (see the [roadmap](../ROADMAP.md)). The app-module clients
+(`McpClient`, `WebTool`) still use `HttpURLConnection`. The rest of this page is the research as
+written before the decision.
 
 ## The defect this has to solve
 

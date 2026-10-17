@@ -1,25 +1,36 @@
 # Architecture
 
+How Bram is put together, and why. For what works today see the
+[project overview](docs/PROJECT_OVERVIEW.md); for what is next, the [roadmap](ROADMAP.md).
+
 ## Product principles
 
-1. **Stable before fast.** Every execution plan is probation-tested and cached against the device, driver, engine, and model fingerprints. A failure produces a more conservative retry, not a dead chat.
-2. **Local by policy, not by accident.** Each request has an explicit privacy class and routing mode. Remote fallback cannot silently receive private content.
-3. **One agent, replaceable runtimes.** Agent behavior, tools, memory, skills, scheduling, and UI do not depend on llama.cpp or a remote API.
-4. **Context is a budget.** A large model window is available to the planner, but relevance and predictable output headroom decide what enters a request.
-5. **Generated capabilities start untrusted.** An agent-created skill is a draft until its permissions, tests, and content are reviewed or an explicit policy activates it.
-6. **Identity is versioned data.** Bram's persona is supplied to an agent run and versioned independently of the model, runtime, tools, and UI.
+1. **Stable before fast.** A backend or tuning choice is measured against the CPU reference before
+   it is used, and the measurement is recorded against a fingerprint of the device, app build,
+   engine, and CPU features, so it expires when any of them change. A failure produces a more
+   conservative retry, not a dead chat.
+2. **Local by policy, not by accident.** Each conversation has a privacy class and each run a
+   routing mode. Remote fallback cannot silently receive private content.
+3. **One agent, replaceable runtimes.** Agent behavior, tools, memory, skills, scheduling, and UI
+   do not depend on llama.cpp, LiteRT-LM, or a remote API.
+4. **Context is a budget.** A large model window is available to the planner, but relevance and
+   predictable output headroom decide what enters a request.
+5. **Generated capabilities start untrusted.** An agent-created skill is a draft until the user
+   activates it.
+6. **Identity is versioned data.** Bram's persona is supplied to an agent run and versioned
+   independently of the model, runtime, tools, and UI.
 
 ## Module map
 
 | Module | Responsibility |
 |---|---|
-| `app` | Compose UI, Bram's default identity, app state, dependency assembly |
-| `core:domain` | Runtime-neutral models and interfaces |
-| `core:agent` | Context planning, routing, execution planning, tool loop |
-| `platform:android` | Device profiling, conversation storage, Keystore persistence |
-| `runtime:openai` | OpenAI-compatible Chat Completions and Responses adapter |
-| `runtime:llamacpp` | GGUF catalog, AIDL inference process, pinned llama.cpp/JNI runtime |
-| `runtime:litertlm` | LiteRT-LM packages (`.litertlm`); ships in the build, not yet validated per device |
+| `app` | Compose UI, view model, built-in tools, task queue and services, Bram's default identity, dependency assembly |
+| `core:domain` | Runtime-neutral models and pure logic: contracts, routing pool, skills, cron, tuning, compatibility and model advice |
+| `core:agent` | Orchestrator and tool loop, context planning, routing, execution planning |
+| `platform:android` | Device profiling, conversation storage, SQLite memory and run journal, Keystore-backed stores |
+| `runtime:openai` | OpenAI-compatible Chat Completions and Responses adapter over OkHttp |
+| `runtime:llamacpp` | GGUF catalog and import, the `:inference` process and its AIDL protocol, pinned llama.cpp/JNI |
+| `runtime:litertlm` | LiteRT-LM packages (`.litertlm`), loaded in the app process on CPU or GPU |
 
 ```mermaid
 flowchart TD
@@ -27,80 +38,139 @@ flowchart TD
     ORCH --> CTX["Context + memory planner"]
     ORCH --> TOOLS["Tool + skill registry"]
     ORCH --> ROUTER["Model router"]
-    ROUTER --> LOCAL["Local runtime process"]
-    ROUTER --> REMOTE["OpenAI-compatible runtime"]
+    ROUTER --> LOCAL["llama.cpp in :inference"]
+    ROUTER --> LITERT["LiteRT-LM"]
+    ROUTER --> REMOTE["OpenAI-compatible endpoint"]
     LOCAL --> PLAN["Hardware execution planner"]
 ```
 
-## Model and runtime registry
+## Models, profiles, and runtimes
 
-A `ModelDescriptor` is the user-visible model identity. A `ModelRuntime` is one way to execute it. This allows the same logical model to have multiple runtime variants, such as Q4_0 Hexagon, Q4_K_M Adreno, CPU safe mode, or a remote endpoint.
+A `ModelDescriptor` is the user-visible model identity and a `ModelRuntime` is one way to run it:
+the llama.cpp runtime for an imported GGUF, the LiteRT-LM runtime for a `.litertlm` package, or
+the OpenAI-compatible runtime for an endpoint.
 
-Agent identity is separate from model identity. Each run receives an `AgentIdentity` containing a stable ID, version, display name, and system prompt. Bram is the bundled default, but alternate user or skill-specific identities can use the same orchestrator. Prompt-prefix and KV caches must include the agent identity ID and version in their fingerprints.
+A **profile** (`ModelProfile`) is what a person picks: a GGUF plus a backend, context size,
+sampler, reasoning setting, KV and attention settings, tuning knobs, and the measurements behind
+them. Many profiles can point at one file. Import creates a default profile from the file's
+metadata and then auto-configures it: every backend the build and device offer is measured
+against the CPU, and the fastest one that agrees wins.
 
-Runtime capabilities are probed, not inferred only from the phone model. A persisted validation key should eventually contain:
+Agent identity is separate from model identity. Each run receives an `AgentIdentity` with a stable
+ID, version, display name, and system prompt. Bram (`bram/0.1`, in `BramDefaults.kt`) is the
+bundled default.
 
-```text
-device fingerprint + OS build + driver fingerprint + engine build
-+ model hash + quantization + context/KV settings + backend split
-+ agent identity ID/version
-```
+Runtime capabilities are probed, not inferred from the phone's model name. `MeasurementFingerprint`
+combines the device hash, the app build, the llama.cpp commit, and the CPU feature flags; a profile
+measured under a different fingerprint says so and asks to be re-measured.
 
-The planner may propose CPU, GPU, NPU, hybrid, and storage-assisted candidates. "Uses all hardware" means every viable backend is considered and benchmarked; it does not imply that CPU, GPU, and NPU should always run simultaneously.
+The execution planner proposes CPU, GPU, NPU, hybrid, and storage-assisted candidates from the
+model's weights, KV cache, compute buffers, and the current memory headroom. "Uses all hardware"
+means every viable backend is considered and measured; it does not mean CPU, GPU, and NPU always
+run at once.
+
+The first-run guide uses the same facts from the other direction: `ModelAdvisor` (core:domain)
+takes the RAM, free storage, CPU features, enumerated accelerators, and whether llama.cpp loaded at
+all, and recommends a format, quant, and size before any model exists.
 
 ## Context and memory
 
-The transcript remains canonical and is never destructively summarized. Derived layers are replaceable:
+The transcript is canonical and is never destructively summarized. Derived layers are replaceable:
 
 | Layer | Purpose | Prompt behavior |
 |---|---|---|
-| Recent transcript | Exact local conversational state | Preserved verbatim first |
-| Working summary | Older active-thread state | Included when older turns are omitted |
-| Semantic facts | Stable preferences and facts | Retrieved by relevance and policy |
-| Episodic memory | Prior events/outcomes | Retrieved for related tasks |
-| Skill state | Procedures and assets | Loaded only when selected |
-| Runtime cache | KV/prefix cache | Reused only when its fingerprint matches |
+| Recent transcript | Exact conversational state, including tool calls and results | Preserved verbatim first; a call and its result are trimmed together |
+| Working summary | What fell out of the window | Included when older turns are omitted |
+| Facts, episodes, user instructions | Memories extracted from conversations | Retrieved by relevance |
+| Skills | User-authored procedures | Active skills only, under their own section |
+| Runtime cache | KV/prefix cache | Reused only for the same load identity and a matching prefix |
 
-`ContextWindowManager` reserves output tokens before admitting input. It records which messages or memories were included and omitted so the UI can eventually explain context decisions. Exact tokenizer counts should come from the selected local runtime or endpoint when available; the scaffold uses a conservative heuristic fallback.
+`ContextWindowManager` reserves output tokens before admitting input, and records what it included
+and omitted. The local runtime supplies exact token counts; remote endpoints fall back to a
+conservative estimate. The prompt is layered — identity, then profile instructions and skills, then
+memories — and nothing lower can displace the harness prompt.
 
-When a conversation exceeds the window, the intended sequence is:
+When a conversation exceeds the window, the newest coherent turn group is kept and the omitted
+stretch is compacted by one bounded summarization pass into a `WORKING_SUMMARY` memory that keeps
+the IDs of the messages it replaced. A failed compaction never fails the run.
 
-1. Keep system policy and the newest coherent turn group.
-2. Retrieve task-relevant memories.
-3. Include the current working summary.
-4. Compact omitted turns asynchronously into a new versioned summary.
-5. Preserve references from summaries/memories back to source message IDs.
+Memories live in SQLite with an FTS index (`PersistentMemoryStore`). With an optional local
+embedding model designated, recall fuses the keyword and vector rankings; without one it is keyword
+recall alone. Tool results entering the transcript are capped by `ToolResultBudget` at roughly a
+quarter of the context window, with a marker naming the original size.
 
 ## Agent loop
 
-The loop supports multiple model/tool turns with a hard turn budget. Tools expose JSON schemas and required permissions. Before execution, the permission gate can allow once, allow for the run, require confirmation, or deny. Tool output is treated as untrusted content and returned to the model with its tool-call ID.
+`DefaultAgentOrchestrator` runs up to `maxToolTurns` model/tool rounds (six by default). Each run:
 
-Built-in tool families can later include files selected through Android's Storage Access Framework, device status, local HTTP, app intents, notifications, and constrained shell-like operations implemented as typed APIs. Arbitrary shell access should not be a default mobile capability.
+1. selects tools once — a core set plus embedding-ranked extras within a budget proportional to the
+   context window, with `tool_search` reaching anything not offered, and the tools an active skill
+   declares added back;
+2. plans the context, generates, and parses tool calls;
+3. validates each call's arguments against its schema, then asks the approval gate;
+4. runs approved calls under a per-tool timeout (read-only batches concurrently), and returns each
+   result to the model, with its call ID, as untrusted content.
+
+The gate's permission mode is per conversation: **Ask when needed** (`AUTO`: read-only tools run,
+side effects ask), **Always ask** (`MANUAL`), and **Auto-approve** (`BYPASS`). Decisions are once,
+for this run, or always for a scope; an "always" grant holds even under Always ask, and an
+unanswered ask times out into a recorded refusal. A call recovered from plain text is never matched
+by a remembered grant. Auto-approve runs everything without asking, except a recovered call once
+the conversation holds content someone else authored (a fetched page, another app's screen),
+because then the "call" may be the model repeating what it read.
+
+The built-in tools are platform APIs rather than a filesystem: device status, notes and app files,
+web search and fetch, clipboard, notifications and reminders, intents, contacts, calendar, weather,
+memory search, skills, a user-granted document folder, screen reading and interaction through an
+accessibility service Bram's user enables, and Termux. Remote MCP servers add their tools through
+the same gate. Arbitrary shell access is not a built-in capability; see below.
 
 ## Skills
 
-Skills are versioned packages rather than free-form prompt snippets:
+A skill is a versioned, user-authored procedure in a `SKILL.md`-style document: front matter with
+`name`, `version`, and `description` (and optionally `author`, `tools`, and `permissions`), then the
+instructions. `SkillLibrary` (core:domain) owns the lifecycle and `PersistentSkillStore` keeps it in
+one `skills.json` with a schema version, atomic writes, and quarantine of a corrupt file.
 
-```text
-skills/<skill-id>/<version>/
-  manifest.json
-  instructions.md
-  tests/
-  assets/
-```
+- A skill a user imports is active; a new version of a known skill lands as a draft.
+- The agent can propose a skill (`propose_skill`); its drafts stay drafts until the user activates
+  them, and review shows a diff against the active version.
+- Versions are monotonic, approval is tracked per version, and rollback restores the newest
+  approved one.
+- Active skills are rendered into the prompt as authored text, not code: a skill cannot act on its
+  own or override what the user asks. Declared permissions are recorded for review and still ask at
+  the gate.
 
-The manifest declares model requirements, tool dependencies, requested permissions, entry instructions, version, author (`user`, `agent`, or `bundled`), and lifecycle state (`draft`, `active`, `disabled`, `quarantined`). Agent-created changes produce a new draft version. Activation is a separate policy decision, making rollback and auditing straightforward.
+## Tasks, automations, and background work
 
-## Automation and "cron"
+Android is not a Unix server and cannot promise unrestricted cron execution, so scheduled work is
+built from alarms and a queue:
 
-Android is not a Unix server and cannot promise unrestricted cron execution. The scheduler contract maps work according to intent:
+- **Tasks** (`AgentTaskRunner`) are named prompts that run one at a time on the application scope,
+  each in its own conversation. A task due while no model is loaded is deferred until one loads.
+- **Automations** are five-field cron schedules (`Cron`, core:domain). `AutomationRunner` gives each
+  one a one-shot `setAndAllowWhileIdle` alarm for its next fire and chains the next on firing; the
+  fire enqueues a task. A `BootReceiver` re-arms everything after a reboot or app update, since
+  Android clears alarms then.
+- **Reminders** from `schedule_notification` use exact alarms when the user has granted them and
+  inexact ones otherwise.
 
-- WorkManager for persistent, deferrable, constrained work.
-- A chain of one-shot jobs for calendar-like cron expressions.
-- AlarmManager only for user-visible tasks that truly require exact timing and have the required permission.
-- A foreground service for a user-noticeable inference run that must continue while the app is not visible.
+The model runs in `:inference`; what needs protecting is the work driving it. Agent runs belong to
+an application-scoped coroutine scope, and a foreground service holds the process for the loaded
+model's lifetime — started on load, stopped on unload or when `:inference` dies — with the model,
+backend, and current phase in its notification. A remote turn holds the service only for its own
+duration. Stopping is a user action, not a consequence of navigation.
 
-Every autonomous run needs a time/token/tool budget, network and charging constraints, a model-routing policy, and a user-visible result or failure record.
+Every unattended run has a tool-turn budget, a routing policy, and a journal entry
+(`SqliteRunJournal`) with its outcome.
+
+## Conversations
+
+Conversations are stored as one JSON file each with a rebuildable index, rather than a single
+blob: a thread grows without bound, and rewriting every conversation to append a message would slow
+down as Bram is used. Messages carry ordered activity entries for reasoning and tool calls, so the
+transcript can collapse agent work to a line without discarding it, and assistant tool calls and
+tool results are stored with matching IDs so later turns replay them.
 
 ## Process and failure isolation
 
@@ -114,14 +184,19 @@ The AIDL control plane uses JSON payloads so the contract can evolve before the 
 stabilizes. Token deltas currently use one-way Binder callbacks. Once physical profiling identifies
 Binder overhead, deltas can move to a pipe/shared-memory transport while control remains in AIDL.
 
-A load is identified by model, context, offload plan, backend filter, and reasoning setting
-together. Treating any of these as incidental is not safe: an early version keyed only on model and
+A load is identified by model, context, offload plan, backend filter, reasoning setting, KV-cache
+and attention settings, batch sizes, and every tuning knob together. Treating any of these as
+incidental is not safe: an early version keyed only on model and
 context, so switching from CPU to GPU silently reused the CPU-resident model and reported the
 accelerator as agreeing perfectly with itself.
 
 Model bytes are copied into app-private storage at import and loaded from that path. Handing native
 code a `/proc/self/fd` path for a document-provider descriptor does not work under scoped storage,
 which refuses the re-open that llama.cpp performs internally.
+
+When the native library cannot load at all — absent for the device's ABI, or corrupt — every binder
+call answers with `nativeRuntimeLinked: false` and a reason instead of letting the
+`UnsatisfiedLinkError` kill `:inference` on a binder thread.
 
 ## Accelerator validation
 
@@ -138,18 +213,6 @@ agreement.
 This is not defensive over-engineering. A GPU backend on the target device reports success, raises
 no driver error, and returns all-zero logits past a handful of offloaded layers. A speed comparison
 called it working.
-
-## Conversations and background work
-
-Conversations are stored as one JSON file each with a rebuildable index, rather than a single blob:
-a thread grows without bound, and rewriting every conversation to append a message would slow down
-as Bram is used. Messages carry ordered activity entries for reasoning and tool calls, so the
-transcript can collapse agent work to a line without discarding it.
-
-Agent runs belong to an application-scoped coroutine scope and hold a foreground service for their
-duration. The model already executes in `:inference`; what needs protecting is the work driving it,
-which would otherwise be cancelled when the screen goes away. Stopping is a user action, not a
-consequence of navigation.
 
 ## Running code on Android
 
@@ -180,13 +243,26 @@ all ordinary outcomes, and Bram reports them as conditions rather than failures.
 
 ## Remote providers and routing
 
-The first remote adapter targets the widely supported `POST /chat/completions` contract, including function tools. The domain API does not expose Chat Completions types, so a later Responses adapter or another provider does not leak into the agent.
+`OpenAiCompatibleRuntime` speaks both Chat Completions and the Responses API, chosen per endpoint,
+with tool calls, SSE streaming, and reasoning surfaced as Thinking rows. It runs on OkHttp so that
+Stop cancels a stream parked in a socket read; the reasoning is in
+[the networking decision](docs/NETWORKING-CLIENT-DECISION.md). The domain API exposes no wire
+types, and provider quirks live in one `ProviderProfile`.
 
-Automatic routing scores only candidates that pass hard gates:
+Errors are classified: 408, 429, 5xx, and connection failures are retried with backoff before any
+token arrives; other 4xx responses are configuration errors, not retried. `EndpointHealth` marks a
+failing endpoint down for 60 seconds so routing skips it.
 
-- Privacy and whether remote use is permitted.
-- Required modalities, tool calling, context size, and structured output.
-- Runtime availability and current memory/thermal state.
-- User priorities such as local-only, fastest, battery-saving, or best-quality.
+Every turn is routed. The **routing pool** assigns profiles to roles — Primary, Power, and a server
+profile — and `RoutingWorkloadClassifier` sends a demanding request (substantial code, a long
+request, several weak signals together) to Power and everything else to Primary.
+`RuleBasedModelRouter` then scores only candidates that pass hard gates:
 
-Later scoring can add measured latency, quality evaluations, battery cost, endpoint price, network status, and speculative local/remote races. Background outsourcing must remain visible in the run record and obey the conversation's privacy policy.
+- the conversation's privacy class (Local only rejects every remote candidate) and the routing mode
+  (Auto, Local only, Remote only);
+- required capabilities such as tool calling, and context size;
+- availability, including endpoint health and whether a local model can load.
+
+The rest of the eligible candidates are kept in score order as fallbacks, so a turn that fails on
+its first pick retries down the list, never across a hard gate, with the status line naming the
+runtime that took over.
