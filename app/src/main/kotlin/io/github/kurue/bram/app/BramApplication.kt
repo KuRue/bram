@@ -77,6 +77,9 @@ class AppContainer(application: Application) {
     val skillStore = PersistentSkillStore(application)
     val localModelStore = LocalModelStore(application)
     val modelProfileStore = ModelProfileStore(application)
+    val recipeSources = RecipeSources(java.io.File(application.filesDir, "recipe-sources"), { name ->
+        application.assets.open("hardware-recipes/official-v1/$name").use { it.readBytes() }
+    })
     /** LiteRT packages (`.litertlm` files) are tracked like GGUFs but in their own catalog. */
     val liteRtLmStore = LiteRtLmStore(application)
     /**
