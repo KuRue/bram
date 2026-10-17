@@ -34,7 +34,7 @@ feature status is in the [project overview](docs/PROJECT_OVERVIEW.md).
 ## Planned product work
 
 The owner’s requested navigation, profile/import UI, adaptive configuration, Home activity,
-automations, child agents, hardware recipes, and mandatory Hexagon release packaging are
+automations, child agents, hardware recipes, and engine packs are
 planned in [Product and execution plan](docs/PRODUCT_PLAN.md). This is a proposal with delivery
 slices and acceptance gates; the application changes have not shipped.
 
@@ -79,10 +79,13 @@ Design: [DEVICE_ADAPTATION.md](docs/DEVICE_ADAPTATION.md).
 
 ## Release build requirement
 
-- **Include Hexagon in normal ARM64 phone releases.** Requested by the owner on 2026-10-17.
-  Verify the pinned Snapdragon toolchain/SDK route, enforce `bram.requireHexagon=true`, check
-  packaged host/DSP artifacts and notices, and validate the actual APK on the S25 Ultra.
-  Current releases still omit it; see the [build plan](docs/PRODUCT_PLAN.md#7-hexagon-included-in-release-apks).
+- **Engine packs.** Decided 2026-10-17: vendor engines ship as separate signed APKs that Bram offers
+  on first open when the phone can use them — Qualcomm (Hexagon, OpenCL, QNN), MediaTek, Samsung,
+  MLC — and loads into `:inference` after a signature check. The mechanism is proven on the
+  Android 16 emulator (`engines/probe`); next are the S25 Ultra check, the `GGML_BACKEND_DL` native
+  split (which also brings CPU variants for older phones), and the Qualcomm pack. Distribution waits
+  on the owner's review of Qualcomm's SDK terms. See the
+  [design](docs/PRODUCT_PLAN.md#7-engine-packs-hardware-specific-engines-installed-on-demand).
 
 ## Needs a decision from the owner
 

@@ -24,6 +24,10 @@
          RUN_COMMAND service cannot be reached without this. -->
     <queries>
         <package android:name="com.termux" />
+        <!-- Engine packs: signed APKs carrying native backends Bram loads on demand. -->
+        <intent>
+            <action android:name="io.github.kurue.bram.ENGINE_PACK" />
+        </intent>
     </queries>
 
     <application
