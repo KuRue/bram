@@ -297,7 +297,10 @@ class PersistentMemoryStore(
     }
 }
 
-internal class MemoryDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+internal class MemoryDatabase(
+    context: Context,
+    name: String = DB_NAME,
+) : SQLiteOpenHelper(context, name, null, DB_VERSION) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -343,6 +346,7 @@ internal class MemoryDatabase(context: Context) : SQLiteOpenHelper(context, DB_N
             )
             """.trimIndent(),
         )
+        addRunJournalV2Columns(db)
         // One embedding per memory (L2-normalized floats, little-endian). Joined to memory_records
         // by id for the cosine pass; kept out of the FTS/content table so keyword and semantic
         // retrieval are independent.
@@ -356,7 +360,26 @@ internal class MemoryDatabase(context: Context) : SQLiteOpenHelper(context, DB_N
         )
     }
 
+    /**
+     * Columns Home's activity totals need. Added as nullable/defaulted so older rows stay valid;
+     * `journal_version` 1 marks a row written before they existed, which Home reports as partial
+     * coverage instead of inventing its usage.
+     */
+    private fun addRunJournalV2Columns(db: SQLiteDatabase) {
+        listOf(
+            "root_run_id TEXT",
+            "origin TEXT",
+            "model_name TEXT",
+            "remote INTEGER",
+            "tool_calls INTEGER",
+            "usage_measured INTEGER",
+            "journal_version INTEGER NOT NULL DEFAULT 1",
+        ).forEach { db.execSQL("ALTER TABLE run_journal ADD COLUMN $it") }
+        db.execSQL("CREATE INDEX IF NOT EXISTS run_journal_started ON run_journal(started_at)")
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 3) addRunJournalV2Columns(db)
         if (oldVersion < 2) {
             db.execSQL(
                 """
@@ -369,8 +392,8 @@ internal class MemoryDatabase(context: Context) : SQLiteOpenHelper(context, DB_N
         }
     }
 
-    private companion object {
+    companion object {
         const val DB_NAME = "bram_memory.db"
-        const val DB_VERSION = 2
+        const val DB_VERSION = 3
     }
 }

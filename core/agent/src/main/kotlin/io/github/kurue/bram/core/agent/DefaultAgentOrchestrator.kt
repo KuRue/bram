@@ -32,6 +32,10 @@ import io.github.kurue.bram.core.domain.toRecord
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
+import io.github.kurue.bram.core.domain.ModelLocation
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -77,7 +81,11 @@ class DefaultAgentOrchestrator(
         val journalId = UUID.randomUUID().toString()
         var inputTokensTotal = 0L
         var outputTokensTotal = 0L
+        // Null-versus-zero matters for usage: a runtime that reported nothing is unknown, not free.
+        var usageMeasured = false
         var toolTurns = 0
+        // Tool executions that actually ran, not model rounds or refused calls.
+        val toolExecutions = AtomicInteger(0)
 
         suspend fun upsertJournal(status: RunStatus, error: String? = null) {
             runCatching {
@@ -86,255 +94,269 @@ class DefaultAgentOrchestrator(
                         id = journalId,
                         conversationId = request.conversationId,
                         startedAtEpochMillis = startedAt,
-                        finishedAtEpochMillis = System.currentTimeMillis(),
+                        finishedAtEpochMillis = if (status == RunStatus.RUNNING) null else System.currentTimeMillis(),
                         status = status,
                         toolTurns = toolTurns,
-                        inputTokens = inputTokensTotal.takeIf { it > 0 }?.toInt(),
-                        outputTokens = outputTokensTotal.takeIf { it > 0 }?.toInt(),
+                        inputTokens = inputTokensTotal.toInt().takeIf { usageMeasured },
+                        outputTokens = outputTokensTotal.toInt().takeIf { usageMeasured },
                         error = error,
+                        rootRunId = request.rootRunId ?: journalId,
+                        origin = request.origin,
+                        modelName = runtime.model.displayName,
+                        remote = runtime.model.location == ModelLocation.REMOTE,
+                        toolCalls = toolExecutions.get(),
+                        usageMeasured = usageMeasured,
                     ),
                 )
             }
         }
 
-        val workingMessages = request.messages.toMutableList()
-        // Recall is an enhancement, not a step the run depends on — exactly like extraction
-        // below. A query the store cannot handle (a too-short message that collapses to an empty
-        // FTS expression, a corrupt index, etc.) must take the turn down with it, so swallow it.
-        val workingSummary = runCatching { memoryStore.workingSummary(request.conversationId) }.getOrNull()
-        val memories = runCatching { memoryStore.search(request.conversationId, request.memoryQuery, limit = 8) }
-            .getOrDefault(emptyList())
-        val allowedForRun = mutableSetOf<String>()
-        // Seeded from the history, not assumed fresh: a page fetched three turns ago is still in
-        // the context this run generates from.
-        var untrustedContext = hasUntrustedContent(workingMessages)
-        var compacted = false
-        // Tools are chosen once per run, from the ask that started it. Mid-run re-selection would
-        // let the set change under the model's feet (a tool it planned to chain vanishing after a
-        // tool result), and the query the run started with stays the best statement of its intent.
-        //
-        // A runtime that does not support tool calling is offered none: sending definitions to a
-        // server or engine that cannot use them costs context and can error on strict hosts.
-        val selectedTools = if (ModelCapability.TOOL_CALLING in runtime.model.capabilities) {
-            toolSelector.select(
-                query = request.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
-                contextWindowTokens = runtime.model.contextWindowTokens,
-                available = toolRegistry.definitions(),
-            )
-        } else {
-            emptyList()
-        }
-        emit(AgentEvent.ToolsSelected(selectedTools.map { it.name }))
-        // Whether the runtime could render those definitions. A local model whose template has no
-        // tool support drops them from the prompt silently, so the first Started event is where
-        // the run learns the truth; until then tools are offered as the descriptor promised.
-        var toolsRenderable = true
-
-        repeat(request.maxToolTurns + 1) { turn ->
-            var context = contextWindowManager.plan(
-                systemPrompt = request.identity.systemPrompt,
-                profileInstructions = request.profileInstructions,
-                transcript = workingMessages,
-                contextWindowTokens = runtime.model.contextWindowTokens,
-                requestedOutputTokens = request.maxOutputTokens,
-                workingSummary = workingSummary,
-                retrievedMemories = memories,
-                runtimeTokenCount = runtime::countTokens,
-            )
-            // Messages fell out of the context window. Instead of dropping them, summarise them
-            // into the working summary, then re-plan: the summary replaces what was omitted, so a
-            // long conversation keeps one dense record rather than a gap. Done once per run — after
-            // compaction nothing is omitted, so a second pass would summarize nothing.
-            if (!compacted && context.omittedMessageIds.isNotEmpty()) {
-                compacted = true
-                val omitted = workingMessages.filter { it.id in context.omittedMessageIds }
-                emit(AgentEvent.Status("Compacting ${omitted.size} earlier messages…"))
-                summarizeOmitted(request, runtime, omitted)?.let { summary ->
-                    runCatching {
-                        memoryStore.put(
-                            request.conversationId,
-                            MemoryRecord(
-                                id = "summary-${UUID.randomUUID()}",
-                                kind = MemoryKind.WORKING_SUMMARY,
-                                text = summary,
-                                importance = 1.0,
-                                sourceMessageIds = omitted.mapNotNull { it.id },
-                            ),
-                        )
-                    }
-                    emit(AgentEvent.Status("Compacted ${omitted.size} earlier messages into a working summary."))
-                    // Re-plan with the fresh summary in the fixed head, so the model sees it this
-                    // turn rather than the next one.
-                    context = contextWindowManager.plan(
-                        systemPrompt = request.identity.systemPrompt,
-                        profileInstructions = request.profileInstructions,
-                        transcript = workingMessages,
-                        contextWindowTokens = runtime.model.contextWindowTokens,
-                        requestedOutputTokens = request.maxOutputTokens,
-                        workingSummary = memoryStore.workingSummary(request.conversationId),
-                        retrievedMemories = memories,
-                        runtimeTokenCount = runtime::countTokens,
-                    )
-                }
+        upsertJournal(RunStatus.RUNNING)
+        try {
+            val workingMessages = request.messages.toMutableList()
+            // Recall is an enhancement, not a step the run depends on — exactly like extraction
+            // below. A query the store cannot handle (a too-short message that collapses to an empty
+            // FTS expression, a corrupt index, etc.) must take the turn down with it, so swallow it.
+            val workingSummary = runCatching { memoryStore.workingSummary(request.conversationId) }.getOrNull()
+            val memories = runCatching { memoryStore.search(request.conversationId, request.memoryQuery, limit = 8) }
+                .getOrDefault(emptyList())
+            val allowedForRun = mutableSetOf<String>()
+            // Seeded from the history, not assumed fresh: a page fetched three turns ago is still in
+            // the context this run generates from.
+            var untrustedContext = hasUntrustedContent(workingMessages)
+            var compacted = false
+            // Tools are chosen once per run, from the ask that started it. Mid-run re-selection would
+            // let the set change under the model's feet (a tool it planned to chain vanishing after a
+            // tool result), and the query the run started with stays the best statement of its intent.
+            //
+            // A runtime that does not support tool calling is offered none: sending definitions to a
+            // server or engine that cannot use them costs context and can error on strict hosts.
+            val selectedTools = if (ModelCapability.TOOL_CALLING in runtime.model.capabilities) {
+                toolSelector.select(
+                    query = request.messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
+                    contextWindowTokens = runtime.model.contextWindowTokens,
+                    available = toolRegistry.definitions(),
+                )
+            } else {
+                emptyList()
             }
-            emit(
-                AgentEvent.ContextPrepared(
-                    estimatedInputTokens = context.estimatedInputTokens,
-                    omittedMessageCount = context.omittedMessageIds.size,
-                ),
-            )
+            emit(AgentEvent.ToolsSelected(selectedTools.map { it.name }))
+            // Whether the runtime could render those definitions. A local model whose template has no
+            // tool support drops them from the prompt silently, so the first Started event is where
+            // the run learns the truth; until then tools are offered as the descriptor promised.
+            var toolsRenderable = true
 
-            val responseText = StringBuilder()
-            val toolCalls = mutableListOf<ToolCall>()
-            var failure: GenerationEvent.Failed? = null
-            var finishReason: String? = null
-
-            // Minted here and published while the call is live, so cancel() can reach this exact
-            // request rather than guessing at one. Left set if the run throws, which is harmless:
-            // cancelling a finished request is a no-op on every runtime.
-            val generationRequestId = UUID.randomUUID().toString()
-            inFlight.set(runtime to generationRequestId)
-            runtime.generate(
-                GenerationRequest(
-                    messages = context.messages,
-                    tools = if (toolsRenderable) selectedTools else emptyList(),
-                    maxOutputTokens = request.maxOutputTokens,
-                    sampler = request.sampler,
-                    requestId = generationRequestId,
-                    sessionId = request.conversationId.value,
-                ),
-            ).collect { event ->
-                when (event) {
-                    is GenerationEvent.Started -> {
-                        emit(AgentEvent.Status(event.runtimeDescription))
-                        event.reasoningFormat?.let { emit(AgentEvent.Reasoning(it)) }
-                        // Only read on a turn that offered tools: with none offered, a runtime
-                        // reports "no tool grammar" because there was nothing to render, not
-                        // because the model cannot call tools. toolsRenderable in the guard
-                        // keeps the note to one emission for the whole run.
-                        if (selectedTools.isNotEmpty() && toolsRenderable && event.supportsTools == false) {
-                            toolsRenderable = false
-                            emit(
-                                AgentEvent.Status(
-                                    "Tools are disabled for this model on this build: its chat " +
-                                        "template cannot render tool definitions.",
+            repeat(request.maxToolTurns + 1) { turn ->
+                var context = contextWindowManager.plan(
+                    systemPrompt = request.identity.systemPrompt,
+                    profileInstructions = request.profileInstructions,
+                    transcript = workingMessages,
+                    contextWindowTokens = runtime.model.contextWindowTokens,
+                    requestedOutputTokens = request.maxOutputTokens,
+                    workingSummary = workingSummary,
+                    retrievedMemories = memories,
+                    runtimeTokenCount = runtime::countTokens,
+                )
+                // Messages fell out of the context window. Instead of dropping them, summarise them
+                // into the working summary, then re-plan: the summary replaces what was omitted, so a
+                // long conversation keeps one dense record rather than a gap. Done once per run — after
+                // compaction nothing is omitted, so a second pass would summarize nothing.
+                if (!compacted && context.omittedMessageIds.isNotEmpty()) {
+                    compacted = true
+                    val omitted = workingMessages.filter { it.id in context.omittedMessageIds }
+                    emit(AgentEvent.Status("Compacting ${omitted.size} earlier messages…"))
+                    summarizeOmitted(request, runtime, omitted)?.let { summary ->
+                        runCatching {
+                            memoryStore.put(
+                                request.conversationId,
+                                MemoryRecord(
+                                    id = "summary-${UUID.randomUUID()}",
+                                    kind = MemoryKind.WORKING_SUMMARY,
+                                    text = summary,
+                                    importance = 1.0,
+                                    sourceMessageIds = omitted.mapNotNull { it.id },
                                 ),
                             )
                         }
-                    }
-                    is GenerationEvent.TextDelta -> {
-                        responseText.append(event.text)
-                        emit(AgentEvent.TextDelta(event.text))
-                    }
-                    is GenerationEvent.ReasoningDelta -> emit(AgentEvent.ReasoningDelta(event.text))
-                    is GenerationEvent.ToolCallReady -> toolCalls += event.call
-                    is GenerationEvent.Usage -> {
-                        event.usage.inputTokens?.let { inputTokensTotal += it }
-                        event.usage.outputTokens?.let { outputTokensTotal += it }
-                        emit(AgentEvent.Usage(event.usage))
-                    }
-                    is GenerationEvent.Metrics -> emit(AgentEvent.Metrics(event.metrics))
-                    is GenerationEvent.Failed -> failure = event
-                    is GenerationEvent.Finished -> finishReason = event.finishReason
-                }
-            }
-
-            failure?.let {
-                emit(AgentEvent.Failed(it.message, it.recoverable))
-                upsertJournal(RunStatus.FAILED, it.message)
-                return@flow
-            }
-
-            val assistantMessage = ConversationMessage(
-                role = MessageRole.ASSISTANT,
-                content = responseText.toString(),
-                toolCalls = toolCalls,
-            )
-
-            if (toolCalls.isEmpty()) {
-                // The reply has fully streamed above. Before declaring the turn done, pull durable
-                // memories out of this exchange so they are retrievable next turn. Best-effort at
-                // every layer: a failed extraction or a failed write is dropped, never surfaced —
-                // recall is an enhancement, not a step the run depends on.
-                request.messages.lastOrNull { it.role == MessageRole.USER }?.let { userMessage ->
-                    runCatching {
-                        memoryExtractor.extract(
-                            conversationId = request.conversationId,
-                            userMessage = userMessage,
-                            assistantReply = responseText.toString(),
-                            runtime = runtime,
+                        emit(AgentEvent.Status("Compacted ${omitted.size} earlier messages into a working summary."))
+                        // Re-plan with the fresh summary in the fixed head, so the model sees it this
+                        // turn rather than the next one.
+                        context = contextWindowManager.plan(
+                            systemPrompt = request.identity.systemPrompt,
+                            profileInstructions = request.profileInstructions,
+                            transcript = workingMessages,
+                            contextWindowTokens = runtime.model.contextWindowTokens,
+                            requestedOutputTokens = request.maxOutputTokens,
+                            workingSummary = memoryStore.workingSummary(request.conversationId),
+                            retrievedMemories = memories,
+                            runtimeTokenCount = runtime::countTokens,
                         )
-                    }.getOrDefault(emptyList()).forEach { extracted ->
-                        runCatching {
-                            memoryStore.put(request.conversationId, extracted.toRecord(userMessage.id))
-                        }
                     }
                 }
-                // The caller decides what to do about a cut-off reply — continuing it, marking it,
-                // or both — but only the runtime knows it happened, so it is carried on the event.
                 emit(
-                    AgentEvent.Completed(
-                        assistantMessage,
-                        truncated = isLengthLimited(finishReason),
-                        interrupted = finishReason == GenerationEvent.Finished.CONNECTION_CLOSED,
+                    AgentEvent.ContextPrepared(
+                        estimatedInputTokens = context.estimatedInputTokens,
+                        omittedMessageCount = context.omittedMessageIds.size,
                     ),
                 )
-                upsertJournal(RunStatus.SUCCEEDED)
-                return@flow
-            }
 
-            toolTurns += 1
-            if (turn >= request.maxToolTurns) {
-                emit(AgentEvent.Failed("Agent reached the configured tool-turn limit", recoverable = true))
-                upsertJournal(RunStatus.FAILED, "Tool-turn limit reached")
-                return@flow
-            }
+                val responseText = StringBuilder()
+                val toolCalls = mutableListOf<ToolCall>()
+                var failure: GenerationEvent.Failed? = null
+                var finishReason: String? = null
 
-            workingMessages += assistantMessage
-            val parallelBatch = toolCalls.size > 1 &&
-                toolCalls.all { toolRegistry.find(it.name)?.definition?.readOnly == true }
-            if (parallelBatch) {
-                // Read-only calls cannot interfere with each other, so a reply that asks for
-                // several runs them together. Approvals still resolve first, in reply order: the
-                // cards are a sequence for the user, not for the tools.
-                val prepared = toolCalls.map { call ->
-                    emit(AgentEvent.ToolStarted(call))
-                    prepareTool(call, allowedForRun, untrustedContext)
+                // Minted here and published while the call is live, so cancel() can reach this exact
+                // request rather than guessing at one. Left set if the run throws, which is harmless:
+                // cancelling a finished request is a no-op on every runtime.
+                val generationRequestId = UUID.randomUUID().toString()
+                inFlight.set(runtime to generationRequestId)
+                runtime.generate(
+                    GenerationRequest(
+                        messages = context.messages,
+                        tools = if (toolsRenderable) selectedTools else emptyList(),
+                        maxOutputTokens = request.maxOutputTokens,
+                        sampler = request.sampler,
+                        requestId = generationRequestId,
+                        sessionId = request.conversationId.value,
+                    ),
+                ).collect { event ->
+                    when (event) {
+                        is GenerationEvent.Started -> {
+                            emit(AgentEvent.Status(event.runtimeDescription))
+                            event.reasoningFormat?.let { emit(AgentEvent.Reasoning(it)) }
+                            // Only read on a turn that offered tools: with none offered, a runtime
+                            // reports "no tool grammar" because there was nothing to render, not
+                            // because the model cannot call tools. toolsRenderable in the guard
+                            // keeps the note to one emission for the whole run.
+                            if (selectedTools.isNotEmpty() && toolsRenderable && event.supportsTools == false) {
+                                toolsRenderable = false
+                                emit(
+                                    AgentEvent.Status(
+                                        "Tools are disabled for this model on this build: its chat " +
+                                            "template cannot render tool definitions.",
+                                    ),
+                                )
+                            }
+                        }
+                        is GenerationEvent.TextDelta -> {
+                            responseText.append(event.text)
+                            emit(AgentEvent.TextDelta(event.text))
+                        }
+                        is GenerationEvent.ReasoningDelta -> emit(AgentEvent.ReasoningDelta(event.text))
+                        is GenerationEvent.ToolCallReady -> toolCalls += event.call
+                        is GenerationEvent.Usage -> {
+                            if (event.usage.inputTokens != null || event.usage.outputTokens != null) usageMeasured = true
+                            event.usage.inputTokens?.let { inputTokensTotal += it }
+                            event.usage.outputTokens?.let { outputTokensTotal += it }
+                            emit(AgentEvent.Usage(event.usage))
+                        }
+                        is GenerationEvent.Metrics -> emit(AgentEvent.Metrics(event.metrics))
+                        is GenerationEvent.Failed -> failure = event
+                        is GenerationEvent.Finished -> finishReason = event.finishReason
+                    }
                 }
-                val results = coroutineScope {
-                    prepared.map { preparedCall ->
-                        async { preparedCall.call to runTool(preparedCall) }
-                    }.awaitAll()
+
+                failure?.let {
+                    emit(AgentEvent.Failed(it.message, it.recoverable))
+                    upsertJournal(RunStatus.FAILED, it.message)
+                    return@flow
                 }
-                for ((call, result) in results) {
-                    workingMessages += ConversationMessage(
-                        role = MessageRole.TOOL,
-                        content = ToolResultBudget.apply(result, runtime.model.contextWindowTokens),
-                        toolCallId = call.id,
+
+                val assistantMessage = ConversationMessage(
+                    role = MessageRole.ASSISTANT,
+                    content = responseText.toString(),
+                    toolCalls = toolCalls,
+                )
+
+                if (toolCalls.isEmpty()) {
+                    // The reply has fully streamed above. Before declaring the turn done, pull durable
+                    // memories out of this exchange so they are retrievable next turn. Best-effort at
+                    // every layer: a failed extraction or a failed write is dropped, never surfaced —
+                    // recall is an enhancement, not a step the run depends on.
+                    request.messages.lastOrNull { it.role == MessageRole.USER }?.let { userMessage ->
+                        runCatching {
+                            memoryExtractor.extract(
+                                conversationId = request.conversationId,
+                                userMessage = userMessage,
+                                assistantReply = responseText.toString(),
+                                runtime = runtime,
+                            )
+                        }.getOrDefault(emptyList()).forEach { extracted ->
+                            runCatching {
+                                memoryStore.put(request.conversationId, extracted.toRecord(userMessage.id))
+                            }
+                        }
+                    }
+                    // The caller decides what to do about a cut-off reply — continuing it, marking it,
+                    // or both — but only the runtime knows it happened, so it is carried on the event.
+                    emit(
+                        AgentEvent.Completed(
+                            assistantMessage,
+                            truncated = isLengthLimited(finishReason),
+                            interrupted = finishReason == GenerationEvent.Finished.CONNECTION_CLOSED,
+                        ),
                     )
-                    // Once outside content is in the conversation it stays in it, so this only ever
-                    // goes one way within a run. A failed or denied call brought nothing back.
-                    if (bringsUntrustedContent(call, result)) untrustedContext = true
-                    emit(AgentEvent.ToolFinished(call, result))
+                    upsertJournal(RunStatus.SUCCEEDED)
+                    return@flow
                 }
-            } else {
-                for (call in toolCalls) {
-                    emit(AgentEvent.ToolStarted(call))
-                    val result = executeTool(call, allowedForRun, untrustedContext)
-                    workingMessages += ConversationMessage(
-                        role = MessageRole.TOOL,
-                        content = ToolResultBudget.apply(result, runtime.model.contextWindowTokens),
-                        toolCallId = call.id,
-                    )
-                    // Once outside content is in the conversation it stays in it, so this only ever
-                    // goes one way within a run. A failed or denied call brought nothing back.
-                    if (bringsUntrustedContent(call, result)) untrustedContext = true
-                    emit(AgentEvent.ToolFinished(call, result))
+
+                toolTurns += 1
+                if (turn >= request.maxToolTurns) {
+                    emit(AgentEvent.Failed("Agent reached the configured tool-turn limit", recoverable = true))
+                    upsertJournal(RunStatus.FAILED, "Tool-turn limit reached")
+                    return@flow
+                }
+
+                workingMessages += assistantMessage
+                val parallelBatch = toolCalls.size > 1 &&
+                    toolCalls.all { toolRegistry.find(it.name)?.definition?.readOnly == true }
+                if (parallelBatch) {
+                    // Read-only calls cannot interfere with each other, so a reply that asks for
+                    // several runs them together. Approvals still resolve first, in reply order: the
+                    // cards are a sequence for the user, not for the tools.
+                    val prepared = toolCalls.map { call ->
+                        emit(AgentEvent.ToolStarted(call))
+                        prepareTool(call, allowedForRun, untrustedContext)
+                    }
+                    val results = coroutineScope {
+                        prepared.map { preparedCall ->
+                            async { preparedCall.call to runTool(preparedCall, toolExecutions) }
+                        }.awaitAll()
+                    }
+                    for ((call, result) in results) {
+                        workingMessages += ConversationMessage(
+                            role = MessageRole.TOOL,
+                            content = ToolResultBudget.apply(result, runtime.model.contextWindowTokens),
+                            toolCallId = call.id,
+                        )
+                        // Once outside content is in the conversation it stays in it, so this only ever
+                        // goes one way within a run. A failed or denied call brought nothing back.
+                        if (bringsUntrustedContent(call, result)) untrustedContext = true
+                        emit(AgentEvent.ToolFinished(call, result))
+                    }
+                } else {
+                    for (call in toolCalls) {
+                        emit(AgentEvent.ToolStarted(call))
+                        val result = executeTool(call, allowedForRun, untrustedContext, toolExecutions)
+                        workingMessages += ConversationMessage(
+                            role = MessageRole.TOOL,
+                            content = ToolResultBudget.apply(result, runtime.model.contextWindowTokens),
+                            toolCallId = call.id,
+                        )
+                        // Once outside content is in the conversation it stays in it, so this only ever
+                        // goes one way within a run. A failed or denied call brought nothing back.
+                        if (bringsUntrustedContent(call, result)) untrustedContext = true
+                        emit(AgentEvent.ToolFinished(call, result))
+                    }
                 }
             }
+            emit(AgentEvent.Failed("Agent stopped without a reply", recoverable = true))
+            upsertJournal(RunStatus.FAILED, "Stopped without a reply")
+        } catch (cancelled: CancellationException) {
+            // A stopped run is still a run: record it before the cancellation propagates.
+            withContext(NonCancellable) { upsertJournal(RunStatus.CANCELLED) }
+            throw cancelled
         }
-        emit(AgentEvent.Failed("Agent stopped without a reply", recoverable = true))
-        upsertJournal(RunStatus.FAILED, "Stopped without a reply")
     }
 
     /**
@@ -484,9 +506,11 @@ class DefaultAgentOrchestrator(
     }
 
     /** Runs a prepared call under the tool's own deadline, answering an already-decided call as-is. */
-    private suspend fun runTool(prepared: PreparedCall): String {
+    private suspend fun runTool(prepared: PreparedCall, executions: AtomicInteger): String {
         prepared.answered?.let { return it }
         val handler = prepared.handler ?: return errorJson("tool_error", "No handler")
+        // Counted here, past the refusal and validation answers above: this call really runs.
+        executions.incrementAndGet()
         val timeoutMillis = handler.definition.timeoutMillis
         // A handler that outlives its deadline must not hold the turn: the model gets told the
         // call was abandoned and can continue, which is strictly better than a run that never
@@ -527,7 +551,8 @@ class DefaultAgentOrchestrator(
         call: ToolCall,
         allowedForRun: MutableSet<String>,
         untrustedContext: Boolean,
-    ): String = runTool(prepareTool(call, allowedForRun, untrustedContext))
+        executions: AtomicInteger,
+    ): String = runTool(prepareTool(call, allowedForRun, untrustedContext), executions)
 
     private data class PreparedCall(
         val call: ToolCall,

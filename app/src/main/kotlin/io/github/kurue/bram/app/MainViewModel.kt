@@ -32,6 +32,7 @@ import io.github.kurue.bram.core.domain.ModelAdvisor
 import io.github.kurue.bram.core.domain.ImportFit
 import io.github.kurue.bram.core.domain.MeasurementFingerprint
 import io.github.kurue.bram.core.domain.MessageRole
+import io.github.kurue.bram.core.domain.RunOrigin
 import io.github.kurue.bram.core.domain.MemoryKind
 import io.github.kurue.bram.core.domain.MemoryPrompt
 import io.github.kurue.bram.core.domain.MemoryRecord
@@ -932,6 +933,8 @@ class MainViewModel(
         var failure: String? = null
         var reply: String? = null
         var activity = emptyList<String>()
+        // Every fallback attempt of this task run shares one root, so the journal counts it once.
+        val taskRootId = UUID.randomUUID().toString()
         for (selection in plan) {
             val attemptActivity = mutableListOf<String>()
             var attemptReply: String? = null
@@ -943,6 +946,8 @@ class MainViewModel(
                 maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
                 sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
                 profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
+                rootRunId = taskRootId,
+                origin = RunOrigin.TASK,
             )
             try {
                 container.agent().run(request, selection.runtime).collect { event ->
@@ -4758,10 +4763,17 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Shared by every attempt and continuation of the chat turn in progress, so the journal counts
+     * a turn that failed over to another runtime once. Turns run one at a time under the turn lock.
+     */
+    private var activeTurnRootId: String? = null
+
     private suspend fun runTurnInProgress(
         requestMessages: List<ConversationMessage>,
         snapshot: AppUiState,
     ) {
+        activeTurnRootId = UUID.randomUUID().toString()
         val conversationCharacters = requestMessages.sumOf { it.content.length }
         val latestRequest = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
         val workload = RoutingWorkloadClassifier.classify(latestRequest, conversationCharacters)
@@ -4909,6 +4921,8 @@ class MainViewModel(
                                     maxOutputTokens = minOf(1_024, selection.runtime.model.contextWindowTokens / 8),
                                     sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
                                     profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
+                                    rootRunId = activeTurnRootId,
+                                    origin = RunOrigin.CHAT,
                                 ),
                                 runtime = selection.runtime,
                             ).collect { event ->

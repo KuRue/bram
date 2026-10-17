@@ -87,7 +87,11 @@ enum class RunStatus {
     RUNNING,
     SUCCEEDED,
     FAILED,
+    CANCELLED,
 }
+
+/** What started a run, so activity can be told apart: a chat turn, a queued task, and so on. */
+enum class RunOrigin { CHAT, TASK, AUTOMATION, AGENT, UNKNOWN }
 
 /**
  * One entry of the run journal: a turn (or a task run) from start to finish, with what it did and
@@ -104,6 +108,22 @@ data class RunJournalEntry(
     val inputTokens: Int? = null,
     val outputTokens: Int? = null,
     val error: String? = null,
+    /**
+     * Shared by every attempt of one turn or task (a retry, or a fallback to another runtime), so a
+     * turn that failed over and then answered counts as one completed run. Null on older rows.
+     */
+    val rootRunId: String? = null,
+    val origin: RunOrigin = RunOrigin.UNKNOWN,
+    /** The model's display name and whether it ran on a server. Null on older rows. */
+    val modelName: String? = null,
+    val remote: Boolean? = null,
+    /** Tool executions that actually ran. Null on rows recorded before this was counted. */
+    val toolCalls: Int? = null,
+    /**
+     * Whether the runtime reported token usage. When false the token fields are unknown, not
+     * zero; a measured zero is a real zero.
+     */
+    val usageMeasured: Boolean = inputTokens != null || outputTokens != null,
 )
 
 interface RunJournal {
@@ -218,6 +238,9 @@ data class AgentRunRequest(
     val profileInstructions: String = "",
     val maxToolTurns: Int = 6,
     val memoryQuery: String = messages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty(),
+    /** Shared by every attempt of one turn; see [RunJournalEntry.rootRunId]. */
+    val rootRunId: String? = null,
+    val origin: RunOrigin = RunOrigin.CHAT,
 )
 
 sealed interface AgentEvent {
