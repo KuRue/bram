@@ -492,6 +492,7 @@ fun BramApp(viewModel: MainViewModel) {
                     cooldownOverride = state.cooldownOverride,
                     onContinueAnyway = viewModel::overrideCooldown,
                     onDismiss = viewModel::dismissAutoConfigure,
+                    onCancel = viewModel::cancelAutoConfigure,
                 )
             }
 
@@ -2747,11 +2748,12 @@ private fun ProfileCeilingPill(
  * reads as a ledger of numbers rather than sentences or charts.
  */
 @Composable
-private fun AutoConfigureOverlay(
+internal fun AutoConfigureOverlay(
     progress: AutoConfigureProgress,
     cooldownOverride: Boolean,
     onContinueAnyway: () -> Unit,
     onDismiss: () -> Unit,
+    onCancel: () -> Unit,
 ) {
     Dialog(
         onDismissRequest = { if (progress.finished) onDismiss() },
@@ -2779,7 +2781,7 @@ private fun AutoConfigureOverlay(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    if (progress.finished) "Configured" else "Auto-configure",
+                    if (progress.finished) "Configuration results" else "Auto-configure",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -2788,6 +2790,10 @@ private fun AutoConfigureOverlay(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                progress.exclusions.forEach { reason ->
+                    Text(reason, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 HorizontalDivider()
 
                 // The winner is the fastest agreeing run, CPU reference included — the CPU is a
@@ -2906,7 +2912,14 @@ private fun AutoConfigureOverlay(
                             )
                         }
                     }
+                    TextButton(
+                        onClick = onCancel,
+                        enabled = !progress.stopping,
+                        modifier = Modifier.align(Alignment.End).testTag("cancel-auto-configure"),
+                    ) { Text(if (progress.stopping) "Cancelling…" else "Cancel") }
                 } else {
+                    Text(progress.current, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Button(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
                         Text("Done")
                     }
