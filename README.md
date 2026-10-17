@@ -70,4 +70,8 @@ results come from one Snapdragon 8 Elite phone.
 Full status: [project overview](docs/PROJECT_OVERVIEW.md). What's next: [roadmap](ROADMAP.md).
 How it works: [architecture](ARCHITECTURE.md). Everything else: [docs index](docs/README.md).
 
-No open-source license has been selected yet.
+## License
+
+Bram is released under the [Apache License 2.0](LICENSE). Vendored and linked third-party
+components remain under their own licenses, listed in
+[third-party notices](THIRD_PARTY_NOTICES.md).

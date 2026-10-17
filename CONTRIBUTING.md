@@ -3,6 +3,9 @@
 Bram is alpha software. Changes should strengthen one complete boundary or vertical slice instead
 of creating UI for behavior that does not exist.
 
+By contributing, you agree that your contributions are licensed under the project's
+[Apache License 2.0](LICENSE).
+
 ## Ground rules
 
 - Keep agent orchestration independent of llama.cpp, LiteRT-LM, and remote-provider wire formats.
