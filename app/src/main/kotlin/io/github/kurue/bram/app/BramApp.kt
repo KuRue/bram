@@ -205,6 +205,8 @@ fun BramApp(viewModel: MainViewModel) {
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
     var panel by rememberSaveable { mutableStateOf<AppPanel?>(null) }
     var panelExpansionRequested by remember(panel) { mutableStateOf(false) }
+    // The guide's "Connect a server" opens Models straight on the server form.
+    var openServerForm by rememberSaveable { mutableStateOf(false) }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         viewModel.importModels(uris)
     }
@@ -240,6 +242,10 @@ fun BramApp(viewModel: MainViewModel) {
             runtimePermission.launch(permission)
             viewModel.consumedRuntimePermissionRequest()
         }
+    }
+    // The server-form request is for the Models panel the guide just opened, not for the next one.
+    LaunchedEffect(panel) {
+        if (panel != AppPanel.MODELS) openServerForm = false
     }
     BackHandler(enabled = panel != null || drawerOpen) {
         when {
@@ -386,6 +392,7 @@ fun BramApp(viewModel: MainViewModel) {
                                 onConvertQuant = viewModel::convertQuant,
                                 sheetReadyToScroll = panelReadyToScroll,
                                 onExpandSheet = { panelExpansionRequested = true },
+                                startAddingServer = openServerForm,
                             )
                             AppPanel.ROUTING -> RoutingSummaryScreen(
                                 state = state,
@@ -399,6 +406,10 @@ fun BramApp(viewModel: MainViewModel) {
                                 state = state,
                                 onOpenPanel = { panel = it },
                                 onSetCompletionAlerts = viewModel::setCompletionAlerts,
+                                onOpenSetupGuide = {
+                                    viewModel.reopenOnboarding()
+                                    panel = null
+                                },
                             )
                             AppPanel.CAPABILITIES -> CapabilitiesScreen(
                                 state = state,
@@ -481,6 +492,21 @@ fun BramApp(viewModel: MainViewModel) {
                     cooldownOverride = state.cooldownOverride,
                     onContinueAnyway = viewModel::overrideCooldown,
                     onDismiss = viewModel::dismissAutoConfigure,
+                )
+            }
+
+            // Over everything but an open panel: the guide's buttons open the import picker and
+            // the server form, and coming back from either should land on the guide again.
+            if (state.showOnboarding && panel == null && state.autoConfigure == null) {
+                OnboardingOverlay(
+                    state = state,
+                    onScan = viewModel::scanHardware,
+                    onAddModelFile = { modelPicker.launch(arrayOf("*/*")) },
+                    onConnectServer = {
+                        openServerForm = true
+                        panel = AppPanel.MODELS
+                    },
+                    onSkip = viewModel::completeOnboarding,
                 )
             }
         }
@@ -1215,9 +1241,12 @@ private fun ModelsScreen(
     onConvertQuant: (String, String) -> Unit,
     sheetReadyToScroll: Boolean,
     onExpandSheet: () -> Unit,
+    /** Opens directly on the add-a-server form, as the first-run guide asks. */
+    startAddingServer: Boolean = false,
 ) {
     var expandedProfileId by rememberSaveable { mutableStateOf<String?>(null) }
-    var addingProfile by rememberSaveable { mutableStateOf(false) }
+    var addingProfile by rememberSaveable { mutableStateOf(startAddingServer) }
+    var addingServerFirst by rememberSaveable { mutableStateOf(startAddingServer) }
     var editingEndpointId by rememberSaveable { mutableStateOf<String?>(null) }
     var profileCountAtOpen by rememberSaveable { mutableStateOf(0) }
     var showAdvancedTools by rememberSaveable { mutableStateOf(false) }
@@ -1234,6 +1263,7 @@ private fun ModelsScreen(
             onSaveEndpoint = onSaveEndpoint,
             onDiscoverRemoteModels = onDiscoverRemoteModels,
             initialEndpoint = state.endpoints.firstOrNull { it.id == editingEndpointId },
+            startWithServer = addingServerFirst,
         )
         return
     }
@@ -1260,6 +1290,7 @@ private fun ModelsScreen(
                 IconButton(
                     onClick = {
                         editingEndpointId = null
+                        addingServerFirst = false
                         profileCountAtOpen = state.profiles.size + state.endpoints.size
                         addingProfile = true
                     },
@@ -1274,7 +1305,8 @@ private fun ModelsScreen(
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("No profiles yet", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Tap + to add a GGUF from this phone or connect an OpenAI-compatible server.",
+                            "Tap + to add a GGUF or LiteRT-LM model from this phone, or connect an " +
+                                "OpenAI-compatible server. Settings › Setup guide suggests what this phone can run.",
                         )
                     }
                 }
@@ -1415,8 +1447,9 @@ private fun AddProfileScreen(
     onSaveEndpoint: (EndpointDraft) -> Unit,
     onDiscoverRemoteModels: (EndpointDraft) -> Unit,
     initialEndpoint: RemoteEndpoint? = null,
+    startWithServer: Boolean = false,
 ) {
-    var addingServer by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint != null) }
+    var addingServer by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint != null || startWithServer) }
     var name by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.displayName.orEmpty()) }
     var baseUrl by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.baseUrl ?: "http://127.0.0.1:11434/v1") }
     var modelName by rememberSaveable(initialEndpoint?.id) { mutableStateOf(initialEndpoint?.modelName.orEmpty()) }
@@ -1448,14 +1481,14 @@ private fun AddProfileScreen(
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text("Model on this phone", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Choose a GGUF file. For a split model, select every part " +
-                            "(name-00001-of-00005.gguf …) in one go. Bram will inspect it, test this " +
-                            "device, and create a ready-to-use profile.",
+                        "Choose a GGUF (.gguf) or a LiteRT-LM package (.litertlm). For a split GGUF, " +
+                            "select every part (name-00001-of-00005.gguf …) in one go. Bram will inspect " +
+                            "it, test this device, and create a ready-to-use profile.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        if (state.isImporting) "Importing…" else "Choose GGUF  ›",
+                        if (state.isImporting) "Importing…" else "Choose a model file  ›",
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -3354,6 +3387,7 @@ private fun SettingsScreen(
     state: AppUiState,
     onOpenPanel: (AppPanel) -> Unit,
     onSetCompletionAlerts: (Boolean) -> Unit,
+    onOpenSetupGuide: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
@@ -3395,7 +3429,8 @@ private fun SettingsScreen(
         }
         SectionHeader("Destinations")
         DestinationCard("Routing and privacy", "Profile roles and defaults", onClick = { onOpenPanel(AppPanel.ROUTING) })
-        DestinationCard("Profiles and models", "Local GGUF and server profiles", onClick = { onOpenPanel(AppPanel.MODELS) })
+        DestinationCard("Profiles and models", "GGUF, LiteRT-LM, and server profiles", onClick = { onOpenPanel(AppPanel.MODELS) })
+        DestinationCard("Setup guide", "What this phone can run, and how to add a model", onClick = onOpenSetupGuide)
         DestinationCard("Capabilities", "Providers, tools, skills, automations, and memories", onClick = { onOpenPanel(AppPanel.CAPABILITIES) })
         DestinationCard("System", "Device diagnostics and recent runs", onClick = { onOpenPanel(AppPanel.SYSTEM) })
         state.error?.let { ErrorCard(it) }
