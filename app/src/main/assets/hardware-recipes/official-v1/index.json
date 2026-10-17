@@ -1,0 +1,19 @@
+{
+  "schema": "bram.hardware-recipes.index",
+  "schemaVersion": 1,
+  "source": {
+    "id": "bram.official",
+    "name": "Bram official recipes",
+    "kind": "official"
+  },
+  "revision": "2026-10-17.1",
+  "generatedAt": "2026-10-17",
+  "recipes": [
+    {
+      "id": "samsung-sm-s938-sm8750-lfm2.5-2.6b-q4_0-cpu",
+      "version": 1,
+      "file": "samsung-sm-s938-sm8750-lfm2.5-2.6b-q4_0-cpu.json",
+      "sha256": "a63805d6f017fc0ec4a6d453455fd271597069ff91db7554eed79fd6800737dd"
+    }
+  ]
+}

@@ -16,6 +16,7 @@
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Ground rules and the verification gates (unit, device, hardware) |
 | [Building Bram](BUILDING.md) | Toolchain, optional backends, emulators, the mock server, instrumentation |
+| [Hardware recipes](HARDWARE_RECIPES.md) | The recipe format, the bundled S25 Ultra snapshot, and how a phone is matched to one |
 | [APK releases](RELEASING.md) | Signing keys, version tags, and the release workflow |
 | [Third-party notices](../THIRD_PARTY_NOTICES.md) | Bundled components and their licenses |
 

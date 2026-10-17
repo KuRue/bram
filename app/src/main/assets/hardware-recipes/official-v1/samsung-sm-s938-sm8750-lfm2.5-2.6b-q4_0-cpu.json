@@ -1,0 +1,55 @@
+{
+  "schema": "bram.hardware-recipe",
+  "schemaVersion": 1,
+  "id": "samsung-sm-s938-sm8750-lfm2.5-2.6b-q4_0-cpu",
+  "version": 1,
+  "maintainer": "Bram",
+  "evidenceDate": "2026-10-17",
+  "match": {
+    "manufacturers": ["samsung"],
+    "models": ["sm-s938u1"],
+    "socs": ["sm8750", "snapdragon 8 elite"],
+    "requireCpuFeatures": ["fp16", "dotprod", "i8mm"],
+    "minAndroidApi": 35
+  },
+  "runtime": {
+    "engineCommits": ["a94d563ed801d1da1b8c2432946de07d0231bb3d"],
+    "settingsSchemaVersion": 1,
+    "availableBackends": ["cpu"]
+  },
+  "model": {
+    "architectures": ["lfm2"],
+    "quantizations": ["q4_0"],
+    "sha256": "e1a61bf937bc60726e18626e97f7ee9bfd2574d95744c2ed909de98b78006fbe",
+    "sizeBytes": 1593894912,
+    "minContextTokens": 4096
+  },
+  "workload": {
+    "promptTokens": 512,
+    "decodeTokens": 128,
+    "contextDepth": 4096,
+    "preference": "chat"
+  },
+  "proposal": {
+    "backend": "cpu",
+    "contextTokens": 8192,
+    "threads": 4,
+    "batchTokens": 512
+  },
+  "evidence": {
+    "method": "Bram benchmark on the device, three repetitions per test, 180 s cooldown before the 4K test; a CPU reference run, so the accelerator agreement gate does not apply",
+    "promptTokPerSec": 100.8,
+    "promptSpread": 27.6,
+    "decodeTokPerSec": 27.9,
+    "decodeSpread": 3.9,
+    "depthDecodeTokPerSec": 20.9,
+    "depthDecodeSpread": 1.8,
+    "batteryCelsiusStart": 30.7,
+    "batteryCelsiusEnd": 32.0
+  },
+  "limits": {
+    "expiresAfterDays": 180,
+    "revalidateOn": ["engine_commit", "model_hash", "settings_schema"],
+    "incompatible": ["Vulkan offload fails Bram's agreement gate on this device (75% agreement, one offloaded layer)"]
+  }
+}
