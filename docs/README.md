@@ -19,6 +19,12 @@
 | [APK releases](RELEASING.md) | Signing keys, version tags, and the release workflow |
 | [Third-party notices](../THIRD_PARTY_NOTICES.md) | Bundled components and their licenses |
 
+## Proposed work
+
+| Document | For |
+| --- | --- |
+| [Product and execution plan](PRODUCT_PLAN.md) | Navigation and UI, adaptive configuration, Home activity, automations, child agents, hardware recipes, and Hexagon release packaging |
+
 ## Records
 
 Design plans and research, kept as written with a status line at the top of each. They explain
