@@ -66,7 +66,7 @@ agent harness against a scripted mock server.
 |---|---|
 | llama.cpp CPU (ARMv8.2 fp16 + dotprod required on arm64) | Validated on device. KleidiAI kernels took the LFM2.5-2.6B Q4_0 prompt speed from about 16 to about 86 tok/s. |
 | Hexagon NPU | Validated at 95.8% agreement with CPU. It was 1.5–1.9x the old CPU path; against the KleidiAI CPU it is slower on that model, and auto-configure picks the CPU. Needs Qualcomm's Hexagon SDK at build time, so release builds do not include it. |
-| OpenCL (Adreno) | Validated at 96% agreement (Qwen3.5 Q4_0, Milestone 8c), when it was 1.11x the CPU of the time. Re-measured 2026-10-17 against the KleidiAI CPU on LFM2.5-2.6B Q4_0 it loses on every axis: 32.6 vs 121.4 prompt, 19.1 vs 20.3 decode, 13.3 vs 17.2 decode-at-4K tok/s. Opt-in at build time; needs a vendor library pulled from a device, so CI cannot build it. |
+| OpenCL (Adreno) | Validated at 96% agreement (Qwen3.5 Q4_0, Milestone 8c), when it was 1.11x the CPU of the time. Re-measured 2026-10-17 against the KleidiAI CPU on LFM2.5-2.6B Q4_0, both from one build with the backend the only difference, it loses on every axis: 32.6 vs 100.8 prompt, 19.1 vs 27.9 decode, 13.3 vs 20.9 decode-at-4K tok/s. Opt-in at build time; needs a vendor library pulled from a device, so CI cannot build it. |
 | Vulkan (Adreno 830) | Builds and runs, but fails validation: 75% agreement with one offloaded layer, all-zero logits past about seven, with no error reported. Not used by default. |
 
 ### The agent
