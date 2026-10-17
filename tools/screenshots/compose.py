@@ -31,16 +31,16 @@ RADIUS = 46
 
 # name, raw file, crop box (x0, y0, x1, y1) in device pixels, overline, headline lines
 SHOTS = [
-    ("01-chat", "p07-reply-top.png", (0, 98, 1080, 2010), "ON YOUR PHONE",
-     ["A private assistant", "that runs on-device"]),
+    ("01-chat", "p07-reply-top.png", (0, 98, 1080, 2010), "CHAT",
+     ["Local model", "conversation"]),
     ("02-setup", "p02-scan.png", (46, 150, 1034, 2246), "FIRST RUN",
-     ["Knows what your", "phone can run"]),
+     ["Device scan and", "model recommendation"]),
     ("03-tuning", "p04-top.png", (56, 114, 1024, 2226), "AUTO-CONFIGURE",
-     ["Tuned on your device,", "checked against the CPU"]),
+     ["Configuration", "measurements"]),
     ("04-approval", "p06-approval.png", (0, 98, 1080, 1430), "PERMISSIONS",
-     ["You decide what", "it is allowed to do"]),
+     ["Tool approval", "request"]),
     ("05-benchmark", "p09-bench.png", (0, 98, 1080, 1610), "BENCHMARKS",
-     ["Real numbers from", "real hardware"]),
+     ["Prompt and decode", "throughput"]),
 ]
 
 

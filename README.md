@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/bram-banner.svg" />
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/bram-banner-light.svg" />
-    <img src="docs/assets/bram-banner.svg" alt="Bram — Local intelligence. Lasting conversations. The app’s copper dot-lattice mark." width="100%" />
+    <img src="docs/assets/bram-banner.svg" alt="Bram — Android AI models, conversations, and tools." width="100%" />
   </picture>
 </p>
 
@@ -22,11 +22,11 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-## Your phone. Your models. Your assistant.
+## Bram for Android
 
-Bram runs AI models on your Android phone, privately, with durable conversations, tools, memory,
-and scheduled work. Add a GGUF or LiteRT-LM model, or connect an OpenAI-compatible server. Bram
-measures your hardware and checks every accelerator against the CPU before trusting it.
+Bram runs GGUF and LiteRT-LM models on Android and connects to OpenAI-compatible servers.
+It includes conversations, tools, memory, and scheduled tasks. Local execution and remote
+routing are controlled by the conversation’s privacy settings.
 
 <p align="center">
   <img src="docs/assets/screenshots/01-chat.png" width="19%" alt="A chat with a local model, showing a collapsed thinking row and a formatted reply" />
@@ -37,7 +37,7 @@ measures your hardware and checks every accelerator against the CPU before trust
 </p>
 <p align="center"><sub>Real captures from a Galaxy S25 Ultra running LFM2.5-2.6B on the CPU.</sub></p>
 
-| Chat that lasts | Tools that do work | Hardware you can trust |
+| Conversations | Tools and tasks | Hardware configuration |
 | :--- | :--- | :--- |
 | Persistent threads, Markdown, streaming, and background runs. | Permission-gated tools, remote MCP, versioned skills, and scheduled automations. | Device profiling, memory-aware plans, accelerator validation, and fallback. |
 

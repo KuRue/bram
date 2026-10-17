@@ -31,6 +31,13 @@ feature status is in the [project overview](docs/PROJECT_OVERVIEW.md).
 | Harness overhaul M0–M6 | Mock-server test bed, persisted tool history, result budgets, gate polish, tools v2, skills v2, streaming endpoints ([plan and results](docs/HARNESS_OVERHAUL.md)) |
 | First-run guide | Phone compatibility scan and a model recommendation for a fresh install (#58) |
 
+## Planned product work
+
+The owner’s requested navigation, profile/import UI, adaptive configuration, Home activity,
+automations, child agents, hardware recipes, and mandatory Hexagon release packaging are
+planned in [Product and execution plan](docs/PRODUCT_PLAN.md). This is a proposal with delivery
+slices and acceptance gates; the application changes have not shipped.
+
 ## Now — finish device adaptation (Milestone 19)
 
 Design: [DEVICE_ADAPTATION.md](docs/DEVICE_ADAPTATION.md).
@@ -53,9 +60,9 @@ Design: [DEVICE_ADAPTATION.md](docs/DEVICE_ADAPTATION.md).
   with 1,024 tokens against the 30-second limit meant for an unpadded one, and slow references are
   retried without a cap. On the emulator it parked 10 times in 28 minutes; a slow phone would too.
   Scale the limit to the prompt and cap the retries.
-- **Auto-configure skipped Vulkan on the S25 Ultra** (2026-10-17): the scan enumerated it, but the
-  sweep's Backends section came back empty. Find out why before trusting the "Vulkan fails" line on
-  newer builds.
+- **Explain excluded backends in auto-configure.** The S25 Ultra scan enumerates Vulkan, but
+  `autoConfigure()` explicitly excludes it because of validation reliability. Show that policy
+  exclusion instead of an empty Backends section; it is not a fresh validation failure.
 - **First-run guide follow-ups.** Keep the example model families in `ModelAdvisor.tiers` current;
   lead with "Connect a server" when no local model can run. (The arm64 recommendation was confirmed
   on the S25 Ultra on 2026-10-17: 12 GB → about 4B comfortable, 8B at a push; ARMv8.6 with i8mm.)
@@ -70,12 +77,16 @@ Design: [DEVICE_ADAPTATION.md](docs/DEVICE_ADAPTATION.md).
 - **Smaller UI files.** `MainViewModel.kt` and `BramApp.kt` are about 5,000 lines each. Split them
   by screen as features touch them, not in one pass.
 
+## Release build requirement
+
+- **Include Hexagon in normal ARM64 phone releases.** Requested by the owner on 2026-10-17.
+  Verify the pinned Snapdragon toolchain/SDK route, enforce `bram.requireHexagon=true`, check
+  packaged host/DSP artifacts and notices, and validate the actual APK on the S25 Ultra.
+  Current releases still omit it; see the [build plan](docs/PRODUCT_PLAN.md#7-hexagon-included-in-release-apks).
+
 ## Needs a decision from the owner
 
 - **A license.** None has been chosen, which blocks outside contributions.
-- **The NPU in release builds.** Release APKs are built without Qualcomm's Hexagon SDK, which CI
-  cannot download, so release users never get the NPU backend. Shipping it needs a release build
-  machine that has the SDK.
 - **In-app model downloads.** The first-run guide says what to look for, but the user still fetches
   the file in a browser.
 

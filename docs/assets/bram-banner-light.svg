@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="title desc">
-  <title id="title">Bram — local intelligence, lasting conversations.</title>
+  <title id="title">Bram — Android AI runtime.</title>
   <desc id="desc">Bram's light theme: a staggered dot field, copper accents, and the app's dotted lowercase b launcher mark.</desc>
   <!-- Palette: Theme.kt. Field: Background.kt. Mark coordinates: tools/icon.py. -->
   <defs>
@@ -12,8 +12,8 @@
   <rect width="1280" height="400" rx="24" fill="url(#lattice)" mask="url(#texture)"/>
   <text x="72" y="79" fill="#8A5A3B" font-family="sans-serif" font-size="15" font-weight="500" letter-spacing="2.5">LOCAL AI · ANDROID</text>
   <text x="68" y="185" fill="#1C1B19" font-family="sans-serif" font-size="100" font-weight="600" letter-spacing="-4">Bram</text>
-  <text x="72" y="247" fill="#1C1B19" font-family="sans-serif" font-size="29">Local intelligence. Lasting conversations.</text>
-  <text x="72" y="300" fill="#5A554E" font-family="sans-serif" font-size="18">Your models, tools, and memory — at home on your phone.</text>
+  <text x="72" y="247" fill="#1C1B19" font-family="sans-serif" font-size="29">Android AI runtime</text>
+  <text x="72" y="300" fill="#5A554E" font-family="sans-serif" font-size="18">Local models · Conversations · Tools · Scheduled tasks</text>
   <rect x="72" y="329" width="44" height="3" rx="1.5" fill="#8A5A3B"/>
   <rect x="842" y="62" width="288" height="276" rx="32" fill="#FFFFFF" fill-opacity=".72" stroke="#BCB5AC" stroke-opacity=".45"/>
   <g transform="translate(662 -124) scale(6)">

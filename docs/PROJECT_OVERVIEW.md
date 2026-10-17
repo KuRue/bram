@@ -1,8 +1,8 @@
 # Project overview
 
-Bram is an Android-first local AI runtime and agent harness. Its goal is to make local models
-"just work" by profiling the phone, choosing an execution plan it has measured to be correct, and
-falling back safely across CPU, GPU, NPU, and remote endpoints.
+Bram is an Android-first local AI runtime and agent harness. It profiles the phone, measures
+execution plans, and supports CPU, GPU, NPU, and remote endpoints. Runtime availability and
+validation results determine which execution plans can be selected.
 
 The model is only one component. Bram is built around tool use, durable conversations, context
 management, hardware-aware inference, versioned skills, scheduled work, and optional
@@ -12,20 +12,21 @@ This page is the detailed status reference. [ARCHITECTURE.md](../ARCHITECTURE.md
 is built, [ROADMAP.md](../ROADMAP.md) what is next, and the
 [milestone history](history/MILESTONES.md) how each piece got here.
 
-## What makes Bram different
+## Runtime behavior
 
-- **Accelerators are validated, not assumed.** A backend must reproduce the CPU reference before
-  Bram uses it. This is how a GPU backend that reported success while returning garbage was caught.
+- **Accelerator validation.** A backend must reproduce the CPU reference before
+  Bram uses it. This detected a GPU backend that initialized successfully but returned incorrect
+  output.
 - **Hardware-aware planning.** Candidate plans account for model weights, KV cache, compute
   buffers, backend repacking, current memory pressure, and a safety reserve.
-- **Stable fallback.** Native inference lives in a separate Android process, so a driver or backend
+- **Process isolation.** Native inference lives in a separate Android process, so a driver or backend
   crash does not have to kill the conversation.
 - **Runtime-neutral agent.** The same tool loop runs on llama.cpp, LiteRT-LM, or an
   OpenAI-compatible endpoint.
 - **Context as a budget.** The transcript stays canonical; summaries, retrieved memories, and KV
   caches are replaceable projections of it.
-- **Private by policy.** Remote routing must pass an explicit privacy gate; it is never an
-  accidental fallback.
+- **Remote routing.** Conversation privacy settings determine whether remote execution and
+  fallback are allowed.
 
 ## Status
 
@@ -51,7 +52,7 @@ agent harness against a scripted mock server.
 |---|---|
 | GGUF import, including split models, with metadata validation and SHA-256 | Working |
 | Profiles: per-model backend, context, sampler, reasoning, KV and attention settings | Working |
-| Auto-configure: every backend measured against CPU, fastest agreeing one chosen | Working |
+| Auto-configure: eligible backends measured against CPU, fastest agreeing one chosen | Working; Vulkan is currently excluded by policy |
 | Tuning sweeps (threads, CPU mask, poll, load mode, batch), each correctness-gated | Working |
 | Benchmarks: prompt, decode, decode at depth, energy, sustained thermal curve, memory-bandwidth ceiling | Working |
 | Import compatibility report (CPU/GPU/NPU offload share per file) | Working |

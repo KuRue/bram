@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bram proposed layouts</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;color:var(--foreground,#edeae5)}
+.note{font-size:13px;color:var(--muted-foreground,#777);margin:0 0 14px;line-height:1.6}
+.stage{--bg:#0e0e11;--surface:#1a1a1f;--ink:#edeae5;--muted:#b5afa7;--copper:#d9a47c;--line:#4a4a52;background:linear-gradient(#07070a,#141419,#1e1e25);color:var(--ink);border-radius:24px;max-width:740px;margin:auto;overflow:hidden;box-shadow:0 10px 40px #0002}
+.stage.light{--bg:#f7f5f2;--surface:#f2efea;--ink:#1c1b19;--muted:#5a554e;--copper:#8a5a3b;--line:#bcb5ac;background:linear-gradient(#fff,#f4f1ec,#e8e3da)}
+header{display:flex;align-items:center;justify-content:space-between;padding:20px 22px;border-bottom:1px solid color-mix(in srgb,var(--line) 45%,transparent)}
+button{font:inherit;cursor:pointer;color:inherit}header strong{font-weight:600;font-size:22px}header button{border:0;border-radius:50%;background:var(--surface);width:48px;height:48px;font-size:21px}
+main{padding:24px;min-height:454px;background-image:radial-gradient(circle,#b5afa712 1px,transparent 1.2px);background-size:22px 22px}
+h1{font-size:23px;font-weight:600;letter-spacing:-.5px;margin:0 0 5px}h2{font-size:14px;margin:24px 0 6px;font-weight:600}p{line-height:1.6;margin:8px 0}.sub{font-size:12px;color:var(--muted)}
+.panel{background:var(--surface);padding:18px;border:1px solid color-mix(in srgb,var(--line) 50%,transparent);border-radius:18px;margin-top:18px}
+.month{display:flex;align-items:center;justify-content:space-between;font-size:14px;color:var(--muted)}.month span:last-child{letter-spacing:8px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px}.stats strong{display:block;font-size:22px;font-weight:500}.stats small{font-size:10px;color:var(--muted)}
+.bars{display:flex;gap:6px;align-items:end;height:42px;margin-top:20px}.bars i{flex:1;background:var(--copper);border-radius:3px;opacity:.7}
+.row{display:flex;align-items:center;gap:12px;padding:15px 0;border-bottom:1px solid color-mix(in srgb,var(--line) 35%,transparent)}.row:last-child{border-bottom:0}.row .glyph{color:var(--copper);font-size:20px;width:23px}.row .body{flex:1;min-width:0}.row strong{display:block;font-size:14px;font-weight:500}.row p{font-size:12px;color:var(--muted);margin:5px 0 0}.row time{font-size:11px;color:var(--muted)}
+.small-action{background:transparent;border:0;min-height:48px;min-width:48px;font-size:20px;color:var(--copper)}.action{background:var(--copper);border:0;border-radius:12px;color:var(--bg);padding:12px 18px;min-height:48px;font-size:14px;font-weight:600}.ghost{background:none;border:1px solid var(--line);color:var(--ink)}
+/* A fixed sidebar on wider layouts; a dismissible drawer on phones. */
+.stage{position:relative;isolation:isolate}.shell{min-height:760px}.workspace{min-width:0}.sidebar{background:var(--bg);width:250px;padding:16px 12px;display:flex;flex-direction:column;gap:8px;border-right:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:0;background:none;border:0;text-align:left;min-height:56px;padding:4px 8px;color:var(--ink)}.brand svg{width:36px;height:44px;color:var(--copper)}.brand span{font-size:30px;font-weight:600;letter-spacing:-1px}.brand[aria-current=page]{color:var(--ink)}
+.sidehead{display:flex;justify-content:space-between;align-items:center}.sidehead .small-action{font-size:22px}.side-action,.nav-item,summary{display:flex;align-items:center;gap:12px;width:100%;min-height:48px;padding:10px 12px;border:0;border-radius:10px;background:none;color:var(--muted);font-size:14px;text-align:left;text-decoration:none}.side-action{color:var(--ink);background:var(--surface)}.nav-item[aria-current=page]{background:var(--surface);color:var(--copper)}.nav-item:hover,summary:hover{background:var(--surface)}.nav-item b,.side-action b,summary b{font-weight:400;font-size:18px;width:20px;text-align:center}.nav-label{padding:14px 12px 4px;color:var(--muted);font-size:11px;letter-spacing:.7px}.chatlist{margin-bottom:12px}.chatlist .nav-item{font-size:13px}.sidebar nav{margin-top:auto;border-top:1px solid var(--line);padding-top:10px}.sidebar details .nav-item{padding-left:44px;font-size:13px}summary{cursor:pointer;list-style:none}summary::-webkit-details-marker{display:none}summary:after{content:'›';margin-left:auto}details[open]>summary:after{content:'⌄'}.sidebar .search{width:100%;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);padding:12px;font:inherit;font-size:13px;min-height:48px}.empty-search{color:var(--muted);font-size:12px;padding:12px}
+.backdrop{display:none;position:absolute;inset:0;border:0;background:#0008;z-index:3;border-radius:24px}.sidebar{position:absolute;inset:0 auto 0 0;z-index:4;overflow:auto;transform:translateX(-105%);visibility:hidden}.drawer-open .sidebar{transform:none;visibility:visible}.drawer-open .backdrop{display:block}.titlebar{display:flex;align-items:center;gap:6px}.titlebar strong{font-size:16px}.sidebar footer{font-size:11px;color:var(--muted);padding:8px 12px}
+@media(min-width:600px){.drawer-open .shell{display:grid;grid-template-columns:250px minmax(0,1fr)}.drawer-open .sidebar{position:relative;inset:auto;transform:none;visibility:visible}.drawer-open .backdrop{display:none}.sidebar{min-height:760px}main{padding:22px 18px}.row{gap:8px}.stats{gap:6px}.stats strong{font-size:21px}.stats small{font-size:9px}.row time{font-size:10px}.row .glyph{width:18px}header{padding:16px 14px}}
+.tools{display:flex;align-items:center;justify-content:space-between}.chip{border:1px solid var(--line);border-radius:20px;font-size:11px;padding:4px 8px;color:var(--muted)}progress{width:100%;accent-color:var(--copper);margin:18px 0 8px}footer{max-width:740px;margin:12px auto 0;font-size:12px;color:var(--muted-foreground,#777);line-height:1.6}button:focus-visible{outline:2px solid var(--copper);outline-offset:2px}
+</style>
+</head>
+<body>
+<p class="note">Layout proposal · example activity data. Use the menu to explore chats, Profiles, Settings, and Tools. The dotted Bram mark returns Home.</p>
+<section class="stage drawer-open" aria-label="Proposed Bram interface">
+<div class="shell">
+<button class="backdrop" data-drawer="close" aria-label="Dismiss navigation"></button>
+<aside class="sidebar" id="sidebar" aria-label="Bram navigation">
+<div class="sidehead"><button class="brand" data-page="home" aria-label="Bram — Home"><svg viewBox="28 24 50 60" aria-hidden="true"><circle cx="41.0" cy="31.0" r="3.4" fill="currentColor"/><circle cx="45.25" cy="38.5" r="3.4" fill="currentColor"/><circle cx="41.0" cy="46.0" r="3.4" fill="currentColor"/><circle cx="45.25" cy="53.5" r="3.4" fill="currentColor"/><circle cx="53.75" cy="53.5" r="3.4" fill="currentColor"/><circle cx="62.25" cy="53.5" r="3.4" fill="currentColor"/><circle cx="41.0" cy="61.0" r="3.4" fill="currentColor"/><circle cx="66.5" cy="61.0" r="3.4" fill="currentColor"/><circle cx="45.25" cy="68.5" r="3.4" fill="currentColor"/><circle cx="62.25" cy="68.5" r="3.4" fill="currentColor"/><circle cx="41.0" cy="76.0" r="3.4" fill="currentColor"/><circle cx="49.5" cy="76.0" r="3.4" fill="currentColor"/><circle cx="58.0" cy="76.0" r="3.4" fill="currentColor"/></svg><span>ram</span></button><button class="small-action" data-drawer="close" aria-label="Close sidebar">‹</button></div>
+<button class="side-action" data-page="chats"><b aria-hidden="true">＋</b>New chat</button>
+<label><span class="nav-label">Search chats</span><input class="search" id="chat-search" placeholder="Search chats" type="search" /></label>
+<div class="chatlist"><div class="nav-label">CHATS</div>
+<button class="nav-item chat-item" data-page="conversation"><b aria-hidden="true">▤</b>Kotlin examples</button>
+<button class="nav-item chat-item" data-page="agent"><b aria-hidden="true">◇</b>Read saved articles</button>
+<button class="nav-item" data-page="chats">All chats</button><p class="empty-search" hidden>No matching chats</p>
+</div>
+<nav aria-label="Main navigation">
+<button class="nav-item" data-page="models"><b aria-hidden="true">▣</b>Profiles</button>
+<details id="settings-group"><summary><b aria-hidden="true">⚙</b>Settings</summary>
+<button class="nav-item" data-page="settings">General</button>
+<button class="nav-item" data-page="system">System</button>
+<button class="nav-item" data-page="recipes">Hardware recipes</button>
+<button class="nav-item" id="appearance">Switch appearance</button>
+</details>
+<details id="tools-group" open><summary><b aria-hidden="true">⌘</b>Tools</summary>
+<button class="nav-item" data-page="tool-settings">Permissions and tools</button>
+<button class="nav-item" data-page="agents">Agents</button>
+<button class="nav-item" data-page="automations">Automations</button>
+<button class="nav-item" data-page="skills">Skills</button>
+<button class="nav-item" data-page="mcp">MCP servers</button>
+</details>
+</nav>
+<footer>Local model · Ready</footer>
+</aside>
+<div class="workspace">
+<header><div class="titlebar"><button id="menu" aria-label="Open sidebar" aria-controls="sidebar" aria-expanded="true" data-drawer="toggle">☰</button><strong id="page-title">Home</strong></div><button id="header-new" data-page="chats" aria-label="New chat">＋</button></header>
+<main id="content"></main>
+</div>
+</div>
+</section>
+<footer id="rationale">Home opens without loading a model. Recent activity links to existing conversations and runs.</footer>
+<script>
+const row=(glyph,title,detail,end='')=>`<div class="row"><span class="glyph" aria-hidden="true">${glyph}</span><div class="body"><strong>${title}</strong><p>${detail}</p></div>${end}</div>`;
+const screens={
+home:`<h1>Home</h1><div class="panel"><div class="month"><span>October 2026</span><span aria-hidden="true">‹ ›</span></div><div class="stats"><div><strong>24.8k</strong><small>Generated tokens</small></div><div><strong>36</strong><small>Completed runs</small></div><div><strong>82</strong><small>Tool calls</small></div></div><div class="bars" aria-label="Example daily activity">${[15,30,10,35,23,40,19,28,12,33,25,18,38,29].map(v=>`<i style="height:${v}px"></i>`).join('')}</div></div><h2>Recent</h2>${row('▤','Kotlin examples','Chat · Local model','<time>12 min ago</time>')}${row('◇','Read saved articles','Agent · Completed','<time>1 hour ago</time>')}${row('◷','Morning summary','Automation · Waiting for a model','<time>Today</time>')}<p><button class="action" data-page="chats">New chat</button></p>`,
+chats:`<div class="tools"><h1>Chats</h1><button class="small-action" aria-label="New chat">＋</button></div><p class="sub">All chats · Agents</p>${row('▤','Kotlin examples','LFM2.5-2.6B · Local','<time>12 min ago</time>')}${row('◇','Read saved articles','Agent · Last run completed','<time>1 hour ago</time>')}<div class="panel"><strong>Agent runs</strong><p class="sub">Child work appears under its parent conversation. Open a run to inspect its tools, usage, and result.</p></div>`,
+models:`<div class="tools"><h1>Profiles</h1><button class="small-action" aria-label="Add model" data-page="add">＋</button></div><p class="sub">Profiles · Files · Servers</p>${row('▣','LFM2.5-2.6B','CPU · 4K context · Loaded','<button class="small-action" aria-label="Open LFM profile details" data-page="profile">›</button>')}${row('▣','LFM2.5-2.6B · NPU','Hexagon · Needs validation','<button class="small-action" aria-label="Open NPU profile details" data-page="profile">›</button>')}<div class="panel"><strong>Configuration</strong><p class="sub">Measurements and advanced settings live in each profile’s detail view.</p><button class="action ghost" data-page="configure">View configuration layout</button></div>`,
+profile:`<button class="small-action" aria-label="Back to profiles" data-page="models">‹</button><h1>LFM2.5-2.6B</h1><p class="sub">CPU · 4K context · Loaded</p><p class="sub">Overview · Performance · Settings</p><div class="panel"><div class="tools"><strong>Measured performance</strong><span class="chip">CPU</span></div>${row('↥','121 tok/s','Prompt processing')}${row('↦','20 tok/s','Generation · 17 tok/s at 4K depth')}<p class="sub">Illustrative layout using the captured benchmark’s values. Configuration and workload remain inspectable.</p></div><p><button class="action" data-page="configure">Configure</button> <button class="action ghost" data-page="models">Back</button></p>`,
+configure:`<h1>Configure profile</h1><p class="sub">Chat · Balanced · Quick budget</p><div class="panel"><div class="tools"><strong>Comparing finalists</strong><span class="chip">Example state</span></div><progress value="72" max="100" aria-label="Example budget elapsed"></progress><div class="month"><span>Elapsed 1:26</span><span>Budget 2:00</span></div><p class="sub">Testing decode at 4K context. Two candidates remain after short probes.</p><button class="action ghost" data-page="profile">Cancel and keep current profile</button></div><h2>Backend status</h2>${row('▣','CPU','Incumbent · Validated')}${row('▣','Hexagon','Available · Candidate tested')}${row('▣','Vulkan','Excluded by current validation policy')}<p class="sub">Budget elapsed is not a claim that a fixed percentage of trials is complete.</p>`,
+automations:`<div class="tools"><h1>Automations</h1><button class="small-action" aria-label="New automation">＋</button></div><p class="sub">Active · Paused · History</p>${row('◷','Morning summary','Weekdays · Around 09:00','<span class="chip">Active</span>')}${row('◷','Review saved notes','Sundays · Around 18:00','<span class="chip">Paused</span>')}<div class="panel"><strong>Morning summary</strong><p class="sub">Last run: waiting for a model<br>Next requested: Monday 09:00<br>Android may delay scheduled work.</p><button class="action ghost" data-page="chats">View run history</button></div>`,
+add:`<button class="small-action" aria-label="Back to profiles" data-page="models">‹</button><h1>Add model</h1><p class="sub">Import a local file or connect a server.</p><div class="panel">${row('▣','Local model file','GGUF or LiteRT-LM','<span aria-hidden="true">›</span>')}${row('↗','Connect server','OpenAI-compatible endpoint','<span aria-hidden="true">›</span>')}</div><h2>Device recommendation</h2><p class="sub">A short size/format recommendation appears here after scanning. CPU, memory, and backend details expand on request.</p>`
+};
+const notes={home:'Home opens without loading a model. Recent activity links to existing conversations and runs.',models:'Compact rows expose state and one detail action. Rename, duplicate, export, and diagnostics move into the detail or overflow menu.',configure:'The planner changes the trial list as it learns. This progress bar represents the time budget, not a fixed number of candidates.',automations:'Schedules have their own destination. Each definition has model/agent settings, conditions, permissions, and linked run history.'};
+
+screens.conversation=`<h1>Kotlin examples</h1><p class="sub">LFM2.5-2.6B · CPU · Last active 12 min ago</p><div class="panel"><p>Give me a 3-step plan to learn Kotlin.</p></div><p>Conversation content appears here. This is a navigation sketch, not a new model response.</p>`;
+screens.agent=`<h1>Read saved articles</h1><p class="sub">Agent run · Completed 1 hour ago</p><div class="panel"><strong>Run details</strong><p class="sub">Result, child tasks, tool activity, and usage remain accessible from this run.</p></div>`;
+screens.settings=`<h1>Settings</h1>${row('◐','Appearance','System, light, or dark')}${row('♧','Privacy','Routing and stored activity')}${row('◷','Notifications','Running work and completion alerts')}`;
+screens.system=`<h1>System</h1><p class="sub">Device and runtime diagnostics</p>${row('▣','Device','CPU, memory, storage, and thermals')}${row('▣','Backends','Availability and validation evidence')}${row('▤','Diagnostics','Build, engine, and recent failures')}`;
+screens.recipes=`<h1>Hardware recipes</h1><p class="sub">Sources and compatible configurations</p>${row('▣','Official recipes','Bundled snapshot · Galaxy S25 Ultra seed')}${row('＋','Additional sources','Add a repository or HTTPS index')}<div class="panel"><p class="sub">Downloaded settings require compatibility checks and local validation before use.</p></div>`;
+screens.agents=`<h1>Agents</h1>${row('◇','Bram','Default instructions and tools')}${row('◇','Read saved articles','Read-only agent · Last active 1 hour ago')}`;
+screens['tool-settings']=`<h1>Tools and permissions</h1>${row('▤','Files','Selected folders only')}${row('↗','Web','Network access and policy')}${row('◷','Reminders','Approval required')}`;
+screens.skills=`<h1>Skills</h1><p class="sub">Active skills, drafts, and version history.</p><div class="panel">Skills remain separate from hardware recipes and agent definitions.</div>`;
+screens.mcp=`<h1>MCP servers</h1><p class="sub">Connected tool servers and their permissions.</p><div class="panel">Server identity and tool access are reviewed before activation.</div>`;
+const stage=document.querySelector('.stage');
+const mobile=()=>matchMedia('(max-width:599px)').matches;
+let currentPage='home';
+function drawer(open){stage.classList.toggle('drawer-open',open);document.querySelector('#menu').setAttribute('aria-expanded',String(open));document.querySelector('.workspace').inert=open&&mobile();if(open&&mobile())document.querySelector('.brand').focus();else if(!open)document.querySelector('#menu').focus()}
+function show(page){currentPage=screens[page]?page:'home';document.querySelector('#content').innerHTML=screens[currentPage];document.querySelectorAll('.sidebar [data-page]').forEach(b=>{const active=b.dataset.page===currentPage||(['profile','configure','add'].includes(currentPage)&&b.dataset.page==='models');if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});const group=document.querySelector(`[data-page="${currentPage}"]`)?.closest('details');if(group)group.open=true;document.querySelector('#page-title').textContent=({models:'Profiles',conversation:'Chat',agent:'Agent run','tool-settings':'Tools',mcp:'MCP servers'})[currentPage]||currentPage[0].toUpperCase()+currentPage.slice(1);document.querySelector('#rationale').textContent=notes[currentPage]||'Sidebar groups keep secondary destinations accessible without filling the main screen.';if(mobile())drawer(false)}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-page]');if(b)show(b.dataset.page);const d=e.target.closest('[data-drawer]');if(d)drawer(d.dataset.drawer==='toggle'?!stage.classList.contains('drawer-open'):d.dataset.drawer!=='close')});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&stage.classList.contains('drawer-open')){drawer(false);return}if(e.key==='Tab'&&mobile()&&stage.classList.contains('drawer-open')){const nodes=[...document.querySelector('.sidebar').querySelectorAll('button,input,summary')].filter(n=>n.offsetParent!==null);const first=nodes[0],last=nodes.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}}});
+document.querySelector('#chat-search').addEventListener('input',e=>{const q=e.target.value.trim().toLowerCase();let found=0;document.querySelectorAll('.chat-item').forEach(b=>{b.hidden=!b.textContent.toLowerCase().includes(q);b.style.display=b.hidden?'none':'';if(!b.hidden)found++});document.querySelector('.empty-search').hidden=found>0});
+document.querySelector('#appearance').onclick=()=>stage.classList.toggle('light');
+matchMedia('(max-width:599px)').addEventListener('change',()=>drawer(stage.classList.contains('drawer-open')));
+show('home');drawer(true);
+</script>
+</body>
+</html>
