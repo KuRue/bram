@@ -2353,6 +2353,7 @@ class MainViewModel(
             return null
         }
         val result = refRef.get() ?: return null
+        if ((result.optJSONArray("tokens")?.length() ?: 0) == 0) return null
         val millis = result.optLong("promptMillis", 0L) + result.optLong("decodeMillis", 0L)
         if (millis > TuningLimits.slowReferenceMillis(padTokens) && !mutableState.value.cooldownOverride) {
             onSlow(millis)

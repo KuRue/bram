@@ -22,4 +22,6 @@ interface IInferenceService {
     String quantize(String requestJson);
     String memoryBandwidth(String requestJson);
     String benchmark(String requestJson);
+    // Bypasses the native executor so a wedged load/decode cannot block shutdown.
+    oneway void shutdown();
 }
