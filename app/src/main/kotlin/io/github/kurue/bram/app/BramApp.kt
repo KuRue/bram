@@ -189,6 +189,7 @@ private enum class AppPanel {
     MODELS,
     ROUTING,
     SETTINGS,
+    RECIPE_SOURCES,
     CAPABILITIES,
     PROVIDERS,
     TOOLS,
@@ -435,6 +436,15 @@ fun BramApp(viewModel: MainViewModel) {
                                     viewModel.reopenOnboarding()
                                     panel = null
                                 },
+                            )
+                            AppPanel.RECIPE_SOURCES -> RecipeSourcesScreen(
+                                state = state.recipeSources,
+                                onBack = { panel = AppPanel.SETTINGS },
+                                onReview = viewModel::reviewRecipeSource,
+                                onAccept = viewModel::acceptRecipeSource,
+                                onDismissReview = viewModel::dismissRecipeSourceReview,
+                                onRollback = viewModel::rollbackRecipeSource,
+                                onRemove = viewModel::removeRecipeSource,
                             )
                             AppPanel.CAPABILITIES -> CapabilitiesScreen(
                                 state = state,
@@ -2900,6 +2910,8 @@ private fun SettingsScreen(
                 }
             }
         }
+        SectionHeader("Hardware")
+        DestinationCard("Recipe sources", "Reviewed configuration snapshots, offline cache, and rollback", onClick = { onOpenPanel(AppPanel.RECIPE_SOURCES) })
         SectionHeader("Destinations")
         DestinationCard("Routing and privacy", "Profile roles and defaults", onClick = { onOpenPanel(AppPanel.ROUTING) })
         DestinationCard("Profiles and models", "GGUF, LiteRT-LM, and server profiles", onClick = { onOpenPanel(AppPanel.MODELS) })

@@ -610,6 +610,7 @@ data class AppUiState(
     val automations: List<Automation> = emptyList(),
     /** The last automation action's result, shown under the automations section. */
     val automationStatus: String? = null,
+    val recipeSources: RecipeSourcesUi = RecipeSourcesUi(),
     /** Newest-first remembered facts and instructions, for the memory browser. */
     val memories: List<MemoryRecord> = emptyList(),
     /** Display name of the resident embedding model, or null when recall is keyword-only. */
@@ -825,6 +826,7 @@ class MainViewModel(
     private var routingPoolRestored = false
 
     init {
+        refreshRecipeSources()
         restoreRoutingSettings()
         mutableState.update { it.copy(onboardingCompleted = container.onboardingStore.completed()) }
         // Adding the first model or server finishes the guide for good, however it was added.
@@ -4653,6 +4655,58 @@ class MainViewModel(
         val memories = runCatching { container.memoryStore.mostImportant(MEMORY_INJECTION_LIMIT) }
             .getOrDefault(emptyList())
         return MemoryPrompt.append(prompt, memories)
+    }
+
+    fun refreshRecipeSources() = recipeSourceAction {
+        container.recipeSources.load()
+    }
+
+    fun reviewRecipeSource(url: String) = recipeSourceAction {
+        val review = container.recipeSources.review(url)
+        container.recipeSources.load().copy(review = review)
+    }
+
+    fun dismissRecipeSourceReview() {
+        if (!mutableState.value.recipeSources.busy) {
+            mutableState.update { it.copy(recipeSources = it.recipeSources.copy(review = null)) }
+        }
+    }
+
+    fun acceptRecipeSource() {
+        val review = mutableState.value.recipeSources.review ?: return
+        recipeSourceAction {
+            container.recipeSources.accept(review)
+            container.recipeSources.load().copy(message = "Snapshot pinned and available offline")
+        }
+    }
+
+    fun rollbackRecipeSource(url: String) = recipeSourceAction {
+        container.recipeSources.rollback(url)
+        container.recipeSources.load().copy(message = "Previous snapshot restored")
+    }
+
+    fun removeRecipeSource(url: String) = recipeSourceAction {
+        container.recipeSources.remove(url)
+        container.recipeSources.load().copy(message = "Source removed; profile settings are unchanged")
+    }
+
+    private fun recipeSourceAction(action: () -> RecipeSourcesUi) {
+        if (mutableState.value.recipeSources.busy) return
+        mutableState.update { it.copy(recipeSources = it.recipeSources.copy(busy = true, error = null, message = null)) }
+        viewModelScope.launch {
+            try {
+                val sources = withContext(Dispatchers.IO) { action() }
+                mutableState.update { it.copy(recipeSources = sources) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                mutableState.update {
+                    it.copy(recipeSources = it.recipeSources.copy(error = failure.message?.take(1500) ?: "Recipe source could not be read"))
+                }
+            } finally {
+                mutableState.update { it.copy(recipeSources = it.recipeSources.copy(busy = false)) }
+            }
+        }
     }
 
     fun refreshAutomations() {
