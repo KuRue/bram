@@ -81,7 +81,7 @@ agent harness against a scripted mock server.
 | Context compaction, SQLite/FTS memory, optional embedding recall | Working |
 | Versioned skills with drafts, review diff, activation, rollback, disable | Working |
 | Task queue and cron automations | Working |
-| Per-turn routing with Primary/Power roles, privacy classes, fallback | Working |
+| Per-chat profile choice with thinking and tool-approval overrides; privacy classes, fallback | Working |
 | Endpoint API keys and custom headers encrypted with Android Keystore | Working |
 
 ## Bram's default identity

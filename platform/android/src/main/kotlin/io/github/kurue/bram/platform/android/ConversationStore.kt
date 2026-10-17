@@ -69,6 +69,7 @@ class ConversationStore(context: Context) {
         // reset to AUTO (and a privacy class to STANDARD) the next time one arrived.
         carryForward(root, conversationFile(id), "permissionMode")
         carryForward(root, conversationFile(id), "privacyClass")
+        carryForward(root, conversationFile(id), "thinkingEnabled")
         writeAtomically(conversationFile(id), root.toString())
 
         val summary = ConversationSummary(id, resolvedTitle, updatedAt, messages.count { it.role != MessageRole.TOOL })
@@ -98,6 +99,36 @@ class ConversationStore(context: Context) {
             runCatching {
                 val root = JSONObject(file.readText())
                 root.put("permissionMode", mode.wire)
+                writeAtomically(file, root.toString())
+            }
+        }
+    }
+
+    /**
+     * The conversation's reasoning override: true/false pins it, null follows the profile. A
+     * missing key (every pre-existing conversation) reads as null.
+     */
+    suspend fun thinkingEnabled(id: ConversationId): Boolean? = withContext(Dispatchers.IO) {
+        val file = conversationFile(id)
+        if (!file.isFile) return@withContext null
+        runCatching {
+            val root = JSONObject(file.readText())
+            if (root.has("thinkingEnabled") && !root.isNull("thinkingEnabled")) {
+                root.getBoolean("thinkingEnabled")
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    /** Rewrites only the override; null removes it so the conversation follows its profile again. */
+    suspend fun setThinkingEnabled(id: ConversationId, enabled: Boolean?) {
+        withContext(Dispatchers.IO) {
+            val file = conversationFile(id)
+            if (!file.isFile) return@withContext
+            runCatching {
+                val root = JSONObject(file.readText())
+                if (enabled == null) root.remove("thinkingEnabled") else root.put("thinkingEnabled", enabled)
                 writeAtomically(file, root.toString())
             }
         }

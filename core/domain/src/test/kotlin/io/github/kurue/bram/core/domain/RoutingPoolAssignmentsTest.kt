@@ -9,10 +9,10 @@ class RoutingPoolAssignmentsTest {
     fun `assigning a target moves it between roles`() {
         val original = RoutingPoolAssignments(primaryTargetId = "local:small")
 
-        val moved = original.assign(RoutingPoolSlot.POWER, "local:small")
+        val moved = original.assign(RoutingPoolSlot.REMOTE_OFFLOAD, "local:small")
 
         assertNull(moved.primaryTargetId)
-        assertEquals("local:small", moved.powerTargetId)
+        assertEquals("local:small", moved.remoteOffloadTargetId)
     }
 
     @Test
@@ -28,14 +28,12 @@ class RoutingPoolAssignmentsTest {
     fun `retain available removes deleted targets`() {
         val original = RoutingPoolAssignments(
             primaryTargetId = "local:small",
-            powerTargetId = "local:large",
             remoteOffloadTargetId = "remote:cloud",
         )
 
-        val retained = original.retainAvailable(setOf("local:small", "remote:cloud"))
+        val retained = original.retainAvailable(setOf("local:small"))
 
         assertEquals("local:small", retained.primaryTargetId)
-        assertNull(retained.powerTargetId)
-        assertEquals("remote:cloud", retained.remoteOffloadTargetId)
+        assertNull(retained.remoteOffloadTargetId)
     }
 }

@@ -254,9 +254,11 @@ Errors are classified: 408, 429, 5xx, and connection failures are retried with b
 token arrives; other 4xx responses are configuration errors, not retried. `EndpointHealth` marks a
 failing endpoint down for 60 seconds so routing skips it.
 
-Every turn is routed. The **routing pool** assigns profiles to roles — Primary, Power, and a server
-profile — and `RoutingWorkloadClassifier` sends a demanding request (substantial code, a long
-request, several weak signals together) to Power and everything else to Primary.
+Every turn is routed. Each chat runs on the profile chosen in its model sheet (the routing pool's
+Primary target, with an optional server profile beside it); the sheet also sets, per chat, whether
+the model reasons first and how tool calls are approved. `RoutingWorkloadClassifier` marks a
+demanding request (substantial code, a long request, several weak signals together) so the router
+weights quality more heavily, but it never swaps the chosen model for another.
 `RuleBasedModelRouter` then scores only candidates that pass hard gates:
 
 - the conversation's privacy class (Local only rejects every remote candidate) and the routing mode
