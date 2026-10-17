@@ -78,6 +78,9 @@ import kotlin.concurrent.thread
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -145,6 +148,8 @@ data class AutoConfigureProgress(
     val dimensions: List<DimensionTuneNote> = emptyList(),
     val phase: AutoConfigurePhase = AutoConfigurePhase.MEASURING,
     val finished: Boolean = false,
+    val stopping: Boolean = false,
+    val exclusions: List<String> = emptyList(),
     /**
      * The device's live thermal status ("none" … "critical") refreshed while the run is in
      * flight, and whether the run is parked waiting for it to return to a measurable range.
@@ -687,6 +692,70 @@ class MainViewModel(
      */
     @Volatile
     private var conversationChosen = false
+    private val tuningThreads = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
+    private val tuningRuns by lazy {
+        TuningRunControl(viewModelScope, onStopped = ::settleStoppedTuning)
+    }
+
+    private fun launchTuning(block: suspend CoroutineScope.() -> Unit) {
+        if (benchmarkRuns.inFlight() || container.taskRunner.tasks.value.any { it.state == TaskState.RUNNING }) return
+        val restoreLoaded = mutableState.value.loadedModelId
+        tuningRuns.start(onCompleted = { restoreLoaded?.let { loadModel(it) } }) {
+            block()
+            mutableState.update {
+                it.copy(
+                    isValidatingAccelerator = false, batchTuneProfileId = null,
+                    tuningProfileId = null, tuningDimension = null,
+                    autoConfigure = it.autoConfigure?.let { progress ->
+                        if (progress.finished) progress else progress.copy(
+                            finished = true, phase = AutoConfigurePhase.DONE,
+                            waitingForCooldown = false,
+                            current = it.error ?: "Configuration finished; previous settings kept.",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    private suspend fun settleStoppedTuning(message: String) {
+        // Retain the run until the service is stopped and its watched calls have unwound.
+        val workers = tuningThreads.toList()
+        workers.forEach { it.interrupt() }
+        runCatching { container.llamaCppClient.restartInferenceProcess() }
+        withContext(Dispatchers.IO) { workers.forEach { it.join(250L) } }
+        tuningThreads.removeAll(workers.toSet())
+        mutableState.update {
+            it.copy(
+                isValidatingAccelerator = false,
+                batchTuneProfileId = null,
+                tuningProfileId = null,
+                tuningDimension = null,
+                loadedModelId = null,
+                loadedBackend = null,
+                cpuValidated = false,
+                modelLoadDetail = null,
+                cooldownOverride = false,
+                status = null,
+                error = message,
+                autoConfigure = it.autoConfigure?.copy(
+                    finished = true, stopping = false, phase = AutoConfigurePhase.DONE,
+                    waitingForCooldown = false, measuringIndex = null,
+                    measuringPlanPhase = null, measuringPlanCandidate = null, current = message,
+                ),
+            )
+        }
+        stopStatusService()
+    }
+
+    fun cancelAutoConfigure() {
+        if (!tuningRuns.inFlight()) return
+        mutableState.update {
+            it.copy(autoConfigure = it.autoConfigure?.copy(stopping = true, current = "Cancelling configuration…"))
+        }
+        tuningRuns.cancel()
+    }
+
     private var generationJob: Job? = null
     private val statusPushes = StatusPushLedger()
     private val benchmarkRuns = BenchmarkRunControl()
@@ -792,7 +861,7 @@ class MainViewModel(
         runner.executor = { task -> runTask(task) }
         runner.canRun = {
             val snapshot = mutableState.value
-            hasConfiguredRoute(snapshot, snapshot.defaultPrivacyClass)
+            !tuningRuns.inFlight() && hasConfiguredRoute(snapshot, snapshot.defaultPrivacyClass)
         }
         runner.notifier = { task ->
             val backgrounded = !appForeground
@@ -1101,7 +1170,9 @@ class MainViewModel(
         // The CPU is always there, so a runtime that cannot be asked still yields a usable answer
         // rather than an empty list that would make every profile look unloadable.
         return runCatching {
-            val devices = container.llamaCppClient.devices()
+            val devices = if (tuningRuns.inFlight()) {
+                tuningNativeCall("devices") { container.llamaCppClient.devices() }
+            } else container.llamaCppClient.devices()
             val names = (0 until devices.optJSONArray("devices")?.length().orZero())
                 .map { index -> devices.getJSONArray("devices").getJSONObject(index).optString("name") }
             listOf(RuntimeBackend.CPU) + RuntimeBackend.entries.filter { backend ->
@@ -1230,6 +1301,7 @@ class MainViewModel(
      * anything else is measuring, loading, or generating, and under memory pressure.
      */
     fun runBenchmark(profileId: String, sustainedMinutes: Int = 0) {
+        if (tuningRuns.inFlight()) return
         val snapshot = mutableState.value
         val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
         if (snapshot.isGenerating || snapshot.isLoadingModel || snapshot.isValidatingAccelerator ||
@@ -1496,7 +1568,10 @@ class MainViewModel(
             )
             "${info.versionName.orEmpty()}/${info.longVersionCode}"
         }.getOrDefault("")
-        val probe = runCatching { container.llamaCppClient.probe() }.getOrNull()
+        val probe = runCatching {
+            if (tuningRuns.inFlight()) tuningNativeCall("probe") { container.llamaCppClient.probe() }
+            else container.llamaCppClient.probe()
+        }.onFailure { if (it is CancellationException) throw it }.getOrNull()
         val engine = probe?.optString("llamaCppCommit").orEmpty()
         val systemInfo = probe?.optString("systemInfo").orEmpty()
         val key = MeasurementFingerprint(
@@ -1535,7 +1610,9 @@ class MainViewModel(
      */
     private suspend fun waitForCooldown(): Boolean {
         var waiting = false
+        val deadline = TuningLimits.nowMillis() + TuningLimits.COOLDOWN_MILLIS
         while (true) {
+            currentCoroutineContext().ensureActive()
             refreshDeviceProfile()
             val status = mutableState.value.deviceProfile?.thermalStatus.orEmpty()
             val blocked = status.isNotEmpty() &&
@@ -1572,7 +1649,10 @@ class MainViewModel(
                 }
                 return true
             }
-            withContext(Dispatchers.Default) { Thread.sleep(15_000L) }
+            check(TuningLimits.nowMillis() < deadline) {
+                "Configuration stopped after waiting three minutes for cooldown; previous settings kept."
+            }
+            delay(1_000L)
         }
     }
 
@@ -1580,13 +1660,30 @@ class MainViewModel(
         mutableState.update { it.copy(cooldownOverride = true) }
     }
 
+    private suspend fun tuningNativeCall(
+        label: String,
+        call: suspend () -> JSONObject,
+    ): JSONObject {
+        currentCoroutineContext().ensureActive()
+        val result = AtomicReference<Result<JSONObject>?>()
+        val worker = thread(name = "bram-tune-$label") {
+            result.set(runCatching { runBlocking { call() } })
+        }
+        watchThread(worker, TuningLimits.nowMillis() + CANDIDATE_TIMEOUT_MILLIS)
+        if (worker.isAlive) {
+            container.llamaCppClient.restartInferenceProcess()
+            error("$label timed out; previous settings kept.")
+        }
+        return checkNotNull(result.get()).getOrThrow()
+    }
+
     /**
-     * Watches a thread against a wall-clock deadline. The whole loop runs inside a single
+     * Watches a thread against a monotonic deadline and observes run cancellation. The whole loop runs inside a single
      * [withContext] on [Dispatchers.Default] and uses [Thread.sleep] rather than per-iteration
      * [delay]: the old pattern (four [withContext] round-trips per second) intermittently lost
      * a resumption under sustained CPU load — exactly when a hanging candidate spins full-tilt
      * for its probe window — and the sweep wedged silently. One round-trip + [Thread.sleep]
-     * cannot be defeated by the coroutine cancellation machinery.
+     * avoids repeated dispatcher round-trips while explicitly observing cancellation.
      */
     private suspend fun watchThread(
         thread: Thread,
@@ -1594,13 +1691,19 @@ class MainViewModel(
         pollMillis: Long = 500L,
         onTick: (() -> Unit)? = null,
     ) {
-        withContext(Dispatchers.Default) {
-            var ticks = 0
-            val ticksPerRefresh = (15_000L / pollMillis).toInt().coerceAtLeast(1)
-            while (thread.isAlive && System.currentTimeMillis() < deadlineMillis) {
-                if (onTick != null && ++ticks % ticksPerRefresh == 0) onTick()
-                Thread.sleep(pollMillis)
+        tuningThreads.add(thread)
+        try {
+            withContext(Dispatchers.Default) {
+                var ticks = 0
+                val ticksPerRefresh = (15_000L / pollMillis).toInt().coerceAtLeast(1)
+                while (thread.isAlive && TuningLimits.nowMillis() < deadlineMillis) {
+                    currentCoroutineContext().ensureActive()
+                    if (onTick != null && ++ticks % ticksPerRefresh == 0) onTick()
+                    Thread.sleep(pollMillis)
+                }
             }
+        } finally {
+            if (!thread.isAlive) tuningThreads.remove(thread)
         }
     }
 
@@ -1876,6 +1979,7 @@ class MainViewModel(
         val snapshot = mutableState.value
         val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
         val model = snapshot.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        if (tuningRuns.inFlight()) return
         if (snapshot.isLoadingModel || snapshot.isGenerating || snapshot.isValidatingAccelerator ||
             snapshot.batchTuneProfileId != null || snapshot.tuningProfileId != null
         ) {
@@ -1887,9 +1991,14 @@ class MainViewModel(
             )
             return
         }
-        val restoreLoaded = snapshot.loadedModelId
 
-        viewModelScope.launch(Dispatchers.Default) {
+        launchTuning {
+            mutableState.update {
+                it.copy(isValidatingAccelerator = true, autoConfigure = AutoConfigureProgress(
+                    profileId = profile.id, modelName = profile.name, step = 0, total = 0,
+                    current = "Checking device…",
+                ))
+            }
             // Ask the runtime what it can see now rather than trusting what was detected at start.
             // The inference process restarts across loads, and a backend that registered late was
             // missing from the list, so a profile configured for it silently loaded on the CPU.
@@ -1897,12 +2006,13 @@ class MainViewModel(
             // restarting. Keep capabilities already detected during this app session and merge in
             // anything the new probe finds; otherwise skipping one freshly reported backend (such
             // as Vulkan) can accidentally collapse the sweep to CPU only.
+            val owner = currentCoroutineContext()[Job]!!
             val backends = (snapshot.availableBackends + detectBackendsNow()).distinct()
             refreshMeasurementFingerprint()
             mutableState.update { it.copy(cooldownOverride = false) }
             sweepGate()?.let { reason ->
                 mutableState.update { it.copy(error = reason) }
-                return@launch
+                return@launchTuning
             }
             waitForCooldown()
 
@@ -1939,6 +2049,8 @@ class MainViewModel(
                         total = candidates.size,
                         current = RuntimeBackend.CPU.label,
                         candidates = candidates.map { it.second.label },
+                        exclusions = backends.filter { it == RuntimeBackend.VULKAN }
+                            .map { "${it.label}: excluded from automatic configuration by the current validation policy." },
                         results = listOf(reference),
                         plan = autoConfigurePlan(profile, backends, candidates),
                     ),
@@ -1973,7 +2085,7 @@ class MainViewModel(
                         runBlocking {
                             reportRef.set(
                                 measureBackend(model, profile, target, threads) { message ->
-                                    mutableState.update {
+                                    if (owner.isActive) mutableState.update {
                                         it.copy(autoConfigure = it.autoConfigure?.copy(current = message))
                                     }
                                 },
@@ -1988,7 +2100,7 @@ class MainViewModel(
                         }
                     }
                 }
-                val backendDeadline = System.currentTimeMillis() + CANDIDATE_TIMEOUT_MILLIS
+                val backendDeadline = TuningLimits.nowMillis() + CANDIDATE_TIMEOUT_MILLIS
                 watchThread(backendThread, backendDeadline, 500L) { refreshThermalIndicator() }
                 val report = if (backendThread.isAlive) {
                     android.util.Log.d("BramTune", "backend ${backend.label} TIMED OUT; restarting the inference process")
@@ -2053,39 +2165,27 @@ class MainViewModel(
             // so the reference decode runs once for its own numbers — the reference bar is part of
             // the comparison either way.
             if (measured.isEmpty()) {
-                val cpuTiming = runCatching {
-                    container.llamaCppClient.load(
-                        model = model.copy(preferredContextTokens = profile.contextTokens),
-                        threads = threads,
-                        gpuLayers = 0,
-                        enableThinking = profile.thinkingEnabled,
-                        flashAttention = profile.flashAttention,
-                        kvCacheType = profile.kvCacheType,
+                val cpuTiming = measureCpuReference(model, profile, threads)
+                mutableState.update {
+                    it.copy(
+                        autoConfigure = it.autoConfigure?.let { progress ->
+                            progress.copy(results = progress.results.map { entry ->
+                                if (entry.isReference) {
+                                    entry.copy(
+                                        promptTokPerSec = if (cpuTiming.optLong("promptMillis", 0L) > 0) {
+                                            val promptTokens = cpuTiming.optInt("promptTokens", 0)
+                                            if (promptTokens > 0) promptTokens * 1000.0 / cpuTiming.optLong("promptMillis") else 0.0
+                                        } else 0.0,
+                                        decodeTokPerSec = if (cpuTiming.optLong("decodeMillis", 0L) > 0) {
+                                            REFERENCE_TOKENS * 1000.0 / cpuTiming.optLong("decodeMillis")
+                                        } else 0.0,
+                                    )
+                                } else {
+                                    entry
+                                }
+                            })
+                        },
                     )
-                    container.llamaCppClient.referenceDecode(REFERENCE_TOKENS)
-                }.getOrNull()
-                if (cpuTiming != null) {
-                    mutableState.update {
-                        it.copy(
-                            autoConfigure = it.autoConfigure?.let { progress ->
-                                progress.copy(results = progress.results.map { entry ->
-                                    if (entry.isReference) {
-                                        entry.copy(
-                                            promptTokPerSec = if (cpuTiming.optLong("promptMillis", 0L) > 0) {
-                                                val promptTokens = cpuTiming.optInt("promptTokens", 0)
-                                                if (promptTokens > 0) promptTokens * 1000.0 / cpuTiming.optLong("promptMillis") else 0.0
-                                            } else 0.0,
-                                            decodeTokPerSec = if (cpuTiming.optLong("decodeMillis", 0L) > 0) {
-                                                REFERENCE_TOKENS * 1000.0 / cpuTiming.optLong("decodeMillis")
-                                            } else 0.0,
-                                        )
-                                    } else {
-                                        entry
-                                    }
-                                })
-                            },
-                        )
-                    }
                 }
             }
 
@@ -2158,7 +2258,7 @@ class MainViewModel(
                     .onFailure { error ->
                         if (error is CancellationException) {
                             android.util.Log.d("BramTune", "auto-configure cancelled; stopping the pass")
-                            return@launch
+                            throw error
                         }
                     }
                 val landed = mutableState.value.profiles.firstOrNull { it.id == profile.id }?.tuning
@@ -2186,7 +2286,7 @@ class MainViewModel(
             runCatching { runBatchTune(profile.id) }.onFailure { error ->
                 if (error is CancellationException) {
                     android.util.Log.d("BramTune", "auto-configure cancelled; stopping the pass")
-                    return@launch
+                    throw error
                 }
             }
             val tuned = mutableState.value.profiles.firstOrNull { it.id == profile.id }
@@ -2202,6 +2302,9 @@ class MainViewModel(
                         measuringPlanCandidate = null,
                         dimensions = tuned?.tuning.orEmpty().sortedByDescending { note -> note.measuredAtEpochMillis },
                         current = buildString {
+                            it.error?.let { reason ->
+                                append("Some configuration steps did not complete: ").append(reason).append("\n\n")
+                            }
                             append(note)
                             tuned?.batchTuneNote?.takeIf(String::isNotBlank)?.let { batch ->
                                 append("\n\n").append(batch)
@@ -2215,7 +2318,6 @@ class MainViewModel(
                     ),
                 )
             }
-            restoreLoaded?.let { loadModel(it) }
         }
     }
 
@@ -2266,7 +2368,7 @@ class MainViewModel(
                 }
             }
         }
-        val deadline = System.currentTimeMillis() + REFERENCE_TIMEOUT_MILLIS
+        val deadline = TuningLimits.nowMillis() + REFERENCE_TIMEOUT_MILLIS
         watchThread(refThread, deadline, 500L)
         if (refThread.isAlive) {
             android.util.Log.d("BramTune", "reference wedged; restarting the inference process")
@@ -2274,13 +2376,37 @@ class MainViewModel(
             return null
         }
         val result = refRef.get() ?: return null
+        if ((result.optJSONArray("tokens")?.length() ?: 0) == 0) return null
         val millis = result.optLong("promptMillis", 0L) + result.optLong("decodeMillis", 0L)
-        if (millis > MAX_REFERENCE_MILLIS && !mutableState.value.cooldownOverride) {
+        if (millis > TuningLimits.slowReferenceMillis(padTokens) && !mutableState.value.cooldownOverride) {
             onSlow(millis)
             return null
         }
         return result
     }
+
+    private suspend fun measureCpuReference(
+        model: LocalModelRecord,
+        profile: ModelProfile,
+        threads: Int,
+        padTokens: Int = 0,
+    ): JSONObject = TuningLimits.reference(
+        attempt = {
+            referenceAttempt(model, profile, threads, padTokens = padTokens, onSlow = { millis ->
+                val message = "CPU reference took ${millis / 1000}s for this workload; retrying within the configuration budget."
+                mutableState.update {
+                    it.copy(status = message, autoConfigure = it.autoConfigure?.copy(current = message))
+                }
+            })
+        },
+        beforeRetry = { next ->
+            val message = "Waiting before CPU reference attempt $next/${TuningLimits.REFERENCE_ATTEMPTS}…"
+            mutableState.update {
+                it.copy(status = message, autoConfigure = it.autoConfigure?.copy(current = message))
+            }
+            delay(60_000L)
+        },
+    )
 
     /** The decode-shaped dimensions auto-configure runs, in dependency order. */
     private fun autoConfigureDimensions(backend: RuntimeBackend): List<TuningDimension> = buildList {
@@ -2459,6 +2585,7 @@ class MainViewModel(
      * what lets one GGUF be run several ways.
      */
     fun loadProfile(profileId: String) {
+        if (tuningRuns.inFlight()) return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating) return
         viewModelScope.launch { prepareLocalProfile(profileId) }
@@ -2672,6 +2799,7 @@ class MainViewModel(
     }
 
     fun validateAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
+        if (tuningRuns.inFlight()) return
         val state = mutableState.value
         val model = state.localModels.firstOrNull { it.id.value == modelId } ?: return
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
@@ -2728,13 +2856,14 @@ class MainViewModel(
      */
     /** Tunes the batch on its own, for someone who wants only that. */
     fun tuneBatch(profileId: String) {
+        if (tuningRuns.inFlight()) return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating ||
             state.isValidatingAccelerator || state.batchTuneProfileId != null ||
             state.tuningProfileId != null
         ) return
         mutableState.update { it.copy(cooldownOverride = false) }
-        viewModelScope.launch(Dispatchers.Default) { runBatchTune(profileId) }
+        launchTuning { runBatchTune(profileId) }
     }
 
     /**
@@ -2748,7 +2877,6 @@ class MainViewModel(
         val state = mutableState.value
         val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
         val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
-        val restoreLoaded = mutableState.value.loadedModelId
         val backend = resolveLoadBackend(profile.backendId)
         refreshMeasurementFingerprint()
         // The override is not reset here: a run inside auto-configure inherits the pass's
@@ -2772,41 +2900,9 @@ class MainViewModel(
             runCatching {
                 // The reference is always recorded on CPU at the default batch, so every candidate
                 // is scored against the same yardstick and "fastest" can never mean "wrong the
-                // same way twice". A reference that takes minutes means the CPU is clock-limited
-                // even when Android's thermal status still reads "none", so a slow one is retried
-                // after a park — numbers taken through it would be lies with timestamps.
-                var cpuReference: JSONObject? = null
-                var referenceWedges = 0
-                while (cpuReference == null) {
-                    var slow = false
-                    val result = referenceAttempt(model, profile, threads, onSlow = { millis ->
-                        slow = true
-                        android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
-                        mutableState.update {
-                            it.copy(
-                                status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
-                                autoConfigure = it.autoConfigure?.copy(
-                                    current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
-                                ),
-                            )
-                        }
-                        withContext(Dispatchers.Default) { Thread.sleep(60_000L) }
-                    })
-                    when {
-                        result != null -> cpuReference = result
-                        slow -> Unit // parked and retried; a slow phone needs time, not a failure count
-                        else -> {
-                            referenceWedges++
-                            if (referenceWedges >= MAX_REFERENCE_ATTEMPTS) {
-                                throw IllegalStateException(
-                                    "The CPU reference could not be measured (it hung repeatedly); " +
-                                        "the batch stays at the device default.",
-                                )
-                            }
-                        }
-                    }
-                }
-                val cpuRef = cpuReference!!
+                // same way twice". Reference acquisition has a finite retry allowance shared by
+                // failures, timeouts, and slow results; cancellation also interrupts the retry wait.
+                val cpuRef = measureCpuReference(model, profile, threads)
                 val reference = cpuRef.optJSONArray("tokens").toIntList()
                 check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
                 val forced = reference.toIntArray()
@@ -2881,7 +2977,7 @@ class MainViewModel(
                             }
                         }
                     }
-                    val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
+                    val probeDeadline = TuningLimits.nowMillis() + probeDeadlineMillis
                     watchThread(probeThread, probeDeadline, 250L) { refreshThermalIndicator() }
                     if (probeThread.isAlive) {
                         android.util.Log.d("BramTune", "batch $batch/$ubatch hung in probe; abandoned")
@@ -2941,7 +3037,7 @@ class MainViewModel(
                             }
                         }
                     }
-                    val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
+                    val measureDeadline = TuningLimits.nowMillis() + candidateDeadlineMillis
                     watchThread(measureThread, measureDeadline, 500L) { refreshThermalIndicator() }
                     if (measureThread.isAlive) {
                         android.util.Log.d("BramTune", "batch $batch/$ubatch TIMED OUT")
@@ -3014,6 +3110,7 @@ class MainViewModel(
                 container.modelProfileStore.save(tuned)
                 syncProfiles(mutableState.value.localModels, profile.id)
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 mutableState.update {
                     it.copy(error = error.message ?: "Could not tune the batch size")
                 }
@@ -3034,17 +3131,17 @@ class MainViewModel(
                 )
             }
             refreshDeviceProfile()
-            restoreLoaded?.let { loadModel(it) }
     }
 
     /** Measures one non-batch dimension, then saves the winner with a note, batch-tuner style. */
     fun tuneDimension(profileId: String, dimension: TuningDimension) {
+        if (tuningRuns.inFlight()) return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator ||
             state.batchTuneProfileId != null || state.tuningProfileId != null
         ) return
         mutableState.update { it.copy(cooldownOverride = false) }
-        viewModelScope.launch(Dispatchers.Default) { runDimensionTune(profileId, dimension, fromAutoConfigure = false) }
+        launchTuning { runDimensionTune(profileId, dimension, fromAutoConfigure = false) }
     }
 
     /** A candidate for one tuning dimension: what to try, in words, and how to apply it. */
@@ -3196,7 +3293,6 @@ class MainViewModel(
         val state = mutableState.value
         val profile = state.profiles.firstOrNull { it.id == profileId } ?: return
         val model = state.localModels.firstOrNull { it.id == profile.modelId } ?: return
-        val restoreLoaded = mutableState.value.loadedModelId
         val backend = resolveLoadBackend(profile.backendId)
         val visibleCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
         refreshMeasurementFingerprint()
@@ -3255,11 +3351,8 @@ class MainViewModel(
             // is part of it: the reference must open the assistant turn the same way the
             // candidates do, or a thinking-enabled profile measures two different prompts and
             // every candidate fails the agreement bar on the first token.
-            // The reference is also the throttle detector: a 24-token reference that takes
-            // minutes says the CPU is clock-limited even when Android's thermal status still
-            // reads "none" (it tracks skin temperature, not CPU banding). A slow reference is
-            // retried after a park instead of being used — numbers taken through it would be
-            // lies with timestamps, and the park lets the phone actually cool down.
+            // Slow references consume the same bounded retry budget as failed ones. A padded
+            // prompt gets a workload-scaled allowance; slowness alone is not proof of throttling.
             // Only the context-sensitive dimensions pay for the padded prompt: KV cache and
             // flash attention matter because the cache holds thousands of tokens, so their
             // effect is invisible at the bare 63-token prompt. Everything else is context
@@ -3271,44 +3364,7 @@ class MainViewModel(
             } else {
                 0
             }
-            var cpuReference: JSONObject? = null
-            var referenceWedges = 0
-            while (cpuReference == null) {
-                var slow = false
-                val result = referenceAttempt(
-                    model,
-                    profile,
-                    referenceThreads,
-                    padTokens = padTokens,
-                    onSlow = { millis ->
-                        slow = true
-                        android.util.Log.d("BramTune", "reference slow (${millis}ms); parking 60s and retrying")
-                        mutableState.update {
-                            it.copy(
-                                status = "The phone is throttling (reference took ${millis / 1000}s); waiting for it to cool…",
-                                autoConfigure = it.autoConfigure?.copy(
-                                    current = "The phone is throttling (reference took ${millis / 1000}s); waiting…",
-                                ),
-                            )
-                        }
-                        withContext(Dispatchers.Default) { Thread.sleep(60_000L) }
-                    },
-                )
-                when {
-                    result != null -> cpuReference = result
-                    slow -> Unit // parked and retried; a slow phone needs time, not a failure count
-                    else -> {
-                        referenceWedges++
-                        if (referenceWedges >= MAX_REFERENCE_ATTEMPTS) {
-                            throw IllegalStateException(
-                                "The CPU reference could not be measured (it hung repeatedly); " +
-                                    "${dimension.label} stays at the device default.",
-                            )
-                        }
-                    }
-                }
-            }
-            val cpuRef = cpuReference!!
+            val cpuRef = measureCpuReference(model, profile, referenceThreads, padTokens)
             val reference = cpuRef.optJSONArray("tokens").toIntList()
             check(reference.isNotEmpty()) { "The CPU reference decode returned no tokens" }
             val forced = reference.toIntArray()
@@ -3396,7 +3452,7 @@ class MainViewModel(
                         }
                     }
                 }
-                val probeDeadline = System.currentTimeMillis() + probeDeadlineMillis
+                val probeDeadline = TuningLimits.nowMillis() + probeDeadlineMillis
                 watchThread(probeThread, probeDeadline, 250L) { refreshThermalIndicator() }
                 if (probeThread.isAlive) {
                     android.util.Log.d("BramTune", "candidate=${candidate.label} hung in probe; abandoned")
@@ -3442,7 +3498,7 @@ class MainViewModel(
                         }
                     }
                 }
-                val measureDeadline = System.currentTimeMillis() + candidateDeadlineMillis
+                val measureDeadline = TuningLimits.nowMillis() + candidateDeadlineMillis
                 watchThread(measureThread, measureDeadline, 500L) { refreshThermalIndicator() }
                 val agreedNow = if (measureThread.isAlive) {
                     android.util.Log.d("BramTune", "candidate=${candidate.label} TIMED OUT")
@@ -3477,7 +3533,7 @@ class MainViewModel(
                 }
                 val failedNote = DimensionTuneNote(
                     dimension = dimension,
-                    chosen = "Default",
+                    chosen = "Unchanged",
                     note = "${dimension.label} tuning failed (None of the ${dimension.label.lowercase()} " +
                         "configurations met the ${(AcceleratorAgreement.USABLE_THRESHOLD * 100).toInt()}% " +
                         "agreement bar against the CPU reference " +
@@ -3558,7 +3614,7 @@ class MainViewModel(
             // was cleared), so nothing was measured and nothing should be recorded.
             if (error is CancellationException) {
                 android.util.Log.d("BramTune", "dim=${dimension.wire} sweep cancelled; nothing recorded")
-                return@onFailure
+                throw error
             }
             android.util.Log.d("BramTune", "dim=${dimension.wire} sweep failed: ${error::class.simpleName}: ${error.message}")
             mutableState.update {
@@ -3567,12 +3623,12 @@ class MainViewModel(
             // A failed sweep is a recorded fact, not a silence: the note says what happened and
             // that the profile stayed on the device default, so the card can explain itself.
             val saved = mutableState.value.profiles.firstOrNull { it.id == profileId }
-            if (saved != null) {
+            if (saved != null && saved.tuning.none { it.dimension == dimension }) {
                 val failedNote = DimensionTuneNote(
                     dimension = dimension,
                     chosen = "Default",
                     note = "${dimension.label} tuning failed (${error.message ?: "unknown error"}); " +
-                        "left at the device default.",
+                        "previous settings kept.",
                     measuredAtEpochMillis = System.currentTimeMillis(),
                 )
                 runCatching {
@@ -3589,7 +3645,6 @@ class MainViewModel(
         runCatching { unloadModelInternal(forget = false) }
         finishDimensionTune()
         refreshDeviceProfile()
-        restoreLoaded?.let { loadModel(it) }
     }
 
     /**
@@ -3619,6 +3674,7 @@ class MainViewModel(
      * import — SHA-256, metadata, a default profile — and measures it.
      */
     fun convertQuant(profileId: String, targetType: String) {
+        if (tuningRuns.inFlight()) return
         val state = mutableState.value
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator ||
             state.batchTuneProfileId != null || state.tuningProfileId != null ||
@@ -3678,6 +3734,7 @@ class MainViewModel(
      * "one layer's operation is broken".
      */
     fun bisectAccelerator(modelId: String, target: AcceleratorTarget = AcceleratorTarget.VULKAN) {
+        if (tuningRuns.inFlight()) return
         val state = mutableState.value
         val model = state.localModels.firstOrNull { it.id.value == modelId } ?: return
         if (state.isLoadingModel || state.isGenerating || state.isValidatingAccelerator) return
@@ -3776,6 +3833,7 @@ class MainViewModel(
     }
 
     fun unloadModel() {
+        if (tuningRuns.inFlight()) return
         if (mutableState.value.isGenerating) return
         viewModelScope.launch { unloadModelInternal() }
     }
@@ -3789,6 +3847,7 @@ class MainViewModel(
      * package can take a while, hence the loading status line.
      */
     fun loadLiteRtModel(modelId: String) {
+        if (tuningRuns.inFlight()) return
         val record = mutableState.value.litertlmModels.firstOrNull { it.id.value == modelId } ?: return
         if (mutableState.value.isLoadingLiteRt || mutableState.value.isGenerating) return
         viewModelScope.launch {
@@ -3843,6 +3902,7 @@ class MainViewModel(
      * rather than failing the run — "GPU does not work here" is a result.
      */
     fun runLiteRtBenchmark(modelId: String) {
+        if (tuningRuns.inFlight()) return
         val snapshot = mutableState.value
         val record = snapshot.litertlmModels.firstOrNull { it.id.value == modelId } ?: return
         if (snapshot.isGenerating || snapshot.isLoadingLiteRt || snapshot.benchmarkingProfileId != null) return
@@ -4550,6 +4610,10 @@ class MainViewModel(
     }
 
     private fun runTurn(requestMessages: List<ConversationMessage>) {
+        if (tuningRuns.inFlight()) {
+            mutableState.update { it.copy(error = "Finish or cancel configuration before starting a chat.") }
+            return
+        }
         val snapshot = mutableState.value
         if (snapshot.isGenerating) return
         // Bind the gate to this conversation's mode for the duration of the run. Runs are serial,
@@ -5157,7 +5221,10 @@ class MainViewModel(
      *   for a moment should.
      */
     private suspend fun unloadModelInternal(forget: Boolean = true) {
-        runCatching { container.llamaCppClient.unload() }
+        runCatching {
+            if (tuningRuns.inFlight()) tuningNativeCall("unload") { container.llamaCppClient.unload() }
+            else container.llamaCppClient.unload()
+        }
         if (forget) runCatching { container.localModelStore.setLastLoadedModelId(null) }
         mutableState.update {
             it.copy(
@@ -5532,17 +5599,10 @@ private const val REFERENCE_TOKENS = 24
 // realism against measurement cost: each padded call has to decode the filler on top of the
 // timing work, and the whole pass multiplies that.
 private const val REFERENCE_PAD_TOKENS = 1024
-// A 24-token reference decode that takes longer than this is a throttled CPU, not a healthy
-// measurement: on a cool phone it takes under a second, and even a warm one stays well under
-// 30s. Sweeps park and retry the reference instead of using a number taken through throttling.
-private const val MAX_REFERENCE_MILLIS = 30_000L
 // How long one reference attempt may wedge before it counts as hung (not slow) and the
 // inference process is restarted. A throttled-but-returning reference on the S25 Ultra took up
 // to 5.3 minutes, so the deadline must clear that; a true hang is caught soon after.
 private const val REFERENCE_TIMEOUT_MILLIS = 7 * 60 * 1_000L
-// Wedged references are retried this many times before the sweep gives up with a note; slow
-// references park and retry until the phone cools (or Continue-anyway is pressed).
-private const val MAX_REFERENCE_ATTEMPTS = 3
 // A broken backend kernel can hang a load or decode without ever reporting an error, so a
 // candidate measurement is bounded: 5 minutes is 30-60x the expected time for a phone-sized
 // model, which turns a hang into a recorded failure instead of a stall.

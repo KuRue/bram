@@ -252,6 +252,7 @@ class LlamaCppServiceClient(context: Context) : Closeable {
      * its binder death (or a short timeout) before letting [requireService] bind again.
      */
     private suspend fun restartService() {
+        val oldService = service
         val oldBinder = serviceBinder
         val oldConnection = connection
         val died = CompletableDeferred<Unit>()
@@ -263,11 +264,18 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         service = null
         serviceBinder = null
         connection = null
+        // stopService/unbind alone do not kill a process held by a stuck native worker (or
+        // another app-owned binding). This one-way method runs on a binder thread, not the
+        // serialized inference executor, and deliberately terminates only :inference.
+        runCatching { oldService?.shutdown() }
         oldConnection?.let { runCatching { appContext.unbindService(it) } }
         runCatching { appContext.stopService(Intent(appContext, InferenceProcessService::class.java)) }
         // The service schedules its own death before returning `restartRequired`, so this wait
         // normally completes in well under a second; 8 seconds covers a slow binder teardown.
-        withTimeoutOrNull(8_000) { died.await() }
+        if (oldBinder != null && oldBinder.isBinderAlive) {
+            val stopped = withTimeoutOrNull(8_000) { died.await(); true } == true
+            check(stopped || !oldBinder.isBinderAlive) { "The inference process did not stop; do not start another measurement." }
+        }
     }
 
     suspend fun countTokens(messages: List<ConversationMessage>): Int = withContext(Dispatchers.IO) {

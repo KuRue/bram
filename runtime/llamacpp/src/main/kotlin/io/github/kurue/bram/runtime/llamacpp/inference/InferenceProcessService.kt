@@ -48,6 +48,12 @@ class InferenceProcessService : Service() {
     private var cpuValidated = false
 
     private val binder = object : IInferenceService.Stub() {
+        override fun shutdown() {
+            // This service is in our dedicated :inference process. Do not queue shutdown behind
+            // a stuck native call, or invoke native cancellation/unload before terminating it.
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+
         override fun probe(): String {
             val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
             return runSerialized {
