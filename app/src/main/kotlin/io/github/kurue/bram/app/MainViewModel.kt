@@ -1568,7 +1568,10 @@ class MainViewModel(
             )
             "${info.versionName.orEmpty()}/${info.longVersionCode}"
         }.getOrDefault("")
-        val probe = runCatching { container.llamaCppClient.probe() }.getOrNull()
+        val probe = runCatching {
+            if (tuningRuns.inFlight()) tuningNativeCall("probe") { container.llamaCppClient.probe() }
+            else container.llamaCppClient.probe()
+        }.onFailure { if (it is CancellationException) throw it }.getOrNull()
         val engine = probe?.optString("llamaCppCommit").orEmpty()
         val systemInfo = probe?.optString("systemInfo").orEmpty()
         val key = MeasurementFingerprint(
@@ -1657,18 +1660,11 @@ class MainViewModel(
         mutableState.update { it.copy(cooldownOverride = true) }
     }
 
-    /**
-     * Watches a thread against a monotonic deadline and observes run cancellation. The whole loop runs inside a single
-     * [withContext] on [Dispatchers.Default] and uses [Thread.sleep] rather than per-iteration
-     * [delay]: the old pattern (four [withContext] round-trips per second) intermittently lost
-     * a resumption under sustained CPU load — exactly when a hanging candidate spins full-tilt
-     * for its probe window — and the sweep wedged silently. One round-trip + [Thread.sleep]
-     * avoids repeated dispatcher round-trips while explicitly observing cancellation.
-     */
     private suspend fun tuningNativeCall(
         label: String,
         call: suspend () -> JSONObject,
     ): JSONObject {
+        currentCoroutineContext().ensureActive()
         val result = AtomicReference<Result<JSONObject>?>()
         val worker = thread(name = "bram-tune-$label") {
             result.set(runCatching { runBlocking { call() } })
@@ -1681,6 +1677,14 @@ class MainViewModel(
         return checkNotNull(result.get()).getOrThrow()
     }
 
+    /**
+     * Watches a thread against a monotonic deadline and observes run cancellation. The whole loop runs inside a single
+     * [withContext] on [Dispatchers.Default] and uses [Thread.sleep] rather than per-iteration
+     * [delay]: the old pattern (four [withContext] round-trips per second) intermittently lost
+     * a resumption under sustained CPU load — exactly when a hanging candidate spins full-tilt
+     * for its probe window — and the sweep wedged silently. One round-trip + [Thread.sleep]
+     * avoids repeated dispatcher round-trips while explicitly observing cancellation.
+     */
     private suspend fun watchThread(
         thread: Thread,
         deadlineMillis: Long,
