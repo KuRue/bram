@@ -698,6 +698,7 @@ class MainViewModel(
     }
 
     private fun launchTuning(block: suspend CoroutineScope.() -> Unit) {
+        if (benchmarkRuns.inFlight() || container.taskRunner.tasks.value.any { it.state == TaskState.RUNNING }) return
         val restoreLoaded = mutableState.value.loadedModelId
         tuningRuns.start(onCompleted = { restoreLoaded?.let { loadModel(it) } }) {
             block()
@@ -860,7 +861,7 @@ class MainViewModel(
         runner.executor = { task -> runTask(task) }
         runner.canRun = {
             val snapshot = mutableState.value
-            hasConfiguredRoute(snapshot, snapshot.defaultPrivacyClass)
+            !tuningRuns.inFlight() && hasConfiguredRoute(snapshot, snapshot.defaultPrivacyClass)
         }
         runner.notifier = { task ->
             val backgrounded = !appForeground
