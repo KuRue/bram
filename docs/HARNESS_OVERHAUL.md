@@ -1,7 +1,12 @@
 # Harness overhaul plan
 
-Status: planned, 2026-09-15. An analysis of the agent harness, tools, skills, remote endpoints, and
-test infrastructure, with a staged overhaul (M0–M6) and the emulator as the test vehicle.
+Status: **complete.** M0–M6 landed between 2026-09-15 and 2026-09-17, each with its result recorded
+under its section below; later follow-ups (reply-lifecycle hardening, the description diet,
+threshold calibration, the agent folder, screen reading and interaction) are noted where they
+belong. This is now a record. Open work is on the [roadmap](../ROADMAP.md).
+
+Originally: an analysis of the agent harness, tools, skills, remote endpoints, and test
+infrastructure, with a staged overhaul (M0–M6) and the emulator as the test vehicle.
 
 Provenance: full read of the working tree on this date — including the uncommitted remote-endpoint
 work (`git status` on `feat/expert-streaming`) — with a verification pass over every headline claim.
@@ -432,7 +437,7 @@ streamed turn with reasoning.
 - **Regression:** `BRAM_EMULATOR_ABI=true` keeps the local runtime in the APK so smoke and
   instrumentation runs keep covering both paths.
 
-## Immediate next steps
+## Immediate next steps (as planned on 2026-09-15; all done)
 
 1. M0 — land the endpoint work and fix the smoke test (this file is part of that change).
 2. M1 — stand up the emulator + mock server and prove the remote tool loop end to end.

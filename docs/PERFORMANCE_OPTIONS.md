@@ -1,8 +1,12 @@
 # Runtime performance options — research notes
 
 Research date: 2026-08-12. Target: S25 Ultra (Snapdragon 8 Elite, Hexagon HTP v79, Adreno 830).
-Bram's llama.cpp pin: `132753bf` (master, 2026-08-12) — picked up for the KleidiAI runtime
-feature detection (#26076).
+Bram's llama.cpp pin at the time: `132753bf` (master, 2026-08-12) — picked up for the KleidiAI
+runtime feature detection (#26076). It has since moved to `a94d563e` (2026-08-13).
+
+Status: research notes, kept as written. What was acted on — KleidiAI, the tuning sweeps, OpenCL —
+is recorded in [DEVICE_ADAPTATION.md](DEVICE_ADAPTATION.md) and the
+[milestone history](history/MILESTONES.md).
 
 Everything below must still pass Bram's own teacher-forced validation before it counts. That is
 not a formality: a kernel or config change can change CPU output slightly, which means every
