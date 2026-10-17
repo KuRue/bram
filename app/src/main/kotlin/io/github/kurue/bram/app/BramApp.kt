@@ -401,6 +401,8 @@ fun BramApp(viewModel: MainViewModel) {
                                 onConversationDetails = { panel = AppPanel.SESSION },
                                 onSetRoutingMode = viewModel::setRoutingMode,
                                 onSetDefaultPrivacyClass = viewModel::setDefaultPrivacyClass,
+                                onSetPermissionMode = viewModel::updatePermissionMode,
+                                onSetThinking = viewModel::updateThinkingEnabled,
                             )
                             AppPanel.SETTINGS -> SettingsScreen(
                                 state = state,
@@ -992,7 +994,7 @@ private fun ChatTranscript(
                         !state.routingPool.isEmpty -> "Ask Bram anything."
                         state.localModels.isEmpty() && state.endpoints.isEmpty() ->
                             "Add a local or remote profile to begin."
-                        else -> "Choose a Primary profile above to begin."
+                        else -> "Choose a profile above to begin."
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(8.dp),
@@ -1324,7 +1326,6 @@ private fun ModelsScreen(
                     expanded = expandedProfileId == profile.id,
                     role = when (profile.id) {
                         state.routingPool.primaryTargetId -> RoutingPoolSlot.PRIMARY
-                        state.routingPool.powerTargetId -> RoutingPoolSlot.POWER
                         else -> null
                     },
                     loaded = state.activeProfileId == profile.id &&
@@ -3027,6 +3028,8 @@ private fun RoutingSummaryScreen(
     onConversationDetails: () -> Unit,
     onSetRoutingMode: (RoutingMode) -> Unit,
     onSetDefaultPrivacyClass: (PrivacyClass) -> Unit,
+    onSetPermissionMode: (PermissionMode) -> Unit,
+    onSetThinking: (Boolean?) -> Unit,
 ) {
     var showPolicy by rememberSaveable { mutableStateOf(false) }
     Column(
@@ -3035,31 +3038,70 @@ private fun RoutingSummaryScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         PanelHandle()
-        SectionHeader("Model selection", "Choose the profiles Bram can use")
+        SectionHeader("Model selection", "Choose what this chat runs on")
 
         RoutingSlotSection(
-            title = RoutingPoolSlot.PRIMARY.label,
-            subtitle = "Preferred for everyday work",
+            title = "Profile",
+            subtitle = "Used for this chat's replies",
             selectedId = state.routingPool.primaryTargetId,
             choices = buildList {
                 addAll(state.profiles.map { it.id to it.name })
                 addAll(state.endpoints.map { remoteRuntimeId(it.id) to it.displayName })
-            }.filter { it.first != state.routingPool.powerTargetId },
+            },
             allowEmpty = false,
             onSelect = { onAssign(RoutingPoolSlot.PRIMARY, it) },
         )
-        RoutingSlotSection(
-            title = RoutingPoolSlot.POWER.label,
-            subtitle = "Optional escalation for demanding work",
-            selectedId = state.routingPool.powerTargetId,
-            choices = buildList {
-                addAll(state.profiles.map { it.id to it.name })
-                addAll(state.endpoints.map { remoteRuntimeId(it.id) to it.displayName })
-            }.filter { it.first != state.routingPool.primaryTargetId },
-            allowEmpty = true,
-            emptyText = "Add another profile to enable escalation",
-            onSelect = { onAssign(RoutingPoolSlot.POWER, it) },
+
+        SectionLabel("Thinking")
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            listOf<Triple<Boolean?, String, String>>(
+                Triple(null, "Profile choice", "use the profile's own reasoning setting"),
+                Triple(true, "On", "reason before answering in this chat"),
+                Triple(false, "Off", "answer directly in this chat"),
+            ).forEach { (value, label, _) ->
+                FilterChip(
+                    selected = state.thinkingOverride == value,
+                    onClick = { onSetThinking(value) },
+                    label = { Text(label) },
+                )
+            }
+        }
+        Text(
+            when (state.thinkingOverride) {
+                null -> "Follows the profile's reasoning setting."
+                true -> "This chat asks the model to reason first."
+                false -> "This chat skips reasoning, whatever the profile says."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        SectionLabel("Tools")
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            PermissionMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = mode == state.permissionMode,
+                    onClick = { onSetPermissionMode(mode) },
+                    label = { Text(permissionModeUiLabel(mode)) },
+                )
+            }
+        }
+        Text(
+            when (state.permissionMode) {
+                PermissionMode.AUTO -> "Ask before tools make changes."
+                PermissionMode.MANUAL -> "Ask before every tool."
+                PermissionMode.BYPASS -> "Never ask, except a call read from text after a web fetch."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
         GlassSurface(
             Modifier.fillMaxWidth().clickable { showPolicy = !showPolicy },
         ) {

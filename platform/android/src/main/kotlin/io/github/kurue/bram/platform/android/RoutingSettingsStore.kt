@@ -36,7 +36,6 @@ class RoutingSettingsStore(
     suspend fun routingPool(): RoutingPoolAssignments = withContext(Dispatchers.IO) {
         RoutingPoolAssignments(
             primaryTargetId = preferences.getString(PRIMARY_TARGET_KEY, null),
-            powerTargetId = preferences.getString(POWER_TARGET_KEY, null),
             remoteOffloadTargetId = preferences.getString(REMOTE_OFFLOAD_TARGET_KEY, null),
         )
     }
@@ -44,7 +43,6 @@ class RoutingSettingsStore(
     suspend fun setRoutingPool(pool: RoutingPoolAssignments) = withContext(Dispatchers.IO) {
         preferences.edit().apply {
             putOrRemove(PRIMARY_TARGET_KEY, pool.primaryTargetId)
-            putOrRemove(POWER_TARGET_KEY, pool.powerTargetId)
             putOrRemove(REMOTE_OFFLOAD_TARGET_KEY, pool.remoteOffloadTargetId)
         }.apply()
     }
@@ -75,7 +73,6 @@ class RoutingSettingsStore(
         const val ROUTING_MODE_KEY = "routingMode"
         const val DEFAULT_PRIVACY_KEY = "defaultPrivacyClass"
         const val PRIMARY_TARGET_KEY = "primaryTargetId"
-        const val POWER_TARGET_KEY = "powerTargetId"
         const val REMOTE_OFFLOAD_TARGET_KEY = "remoteOffloadTargetId"
         const val SELECTED_RUNTIME_KEY = "selectedRuntimeId"
     }

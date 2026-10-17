@@ -470,6 +470,11 @@ data class AppUiState(
     val permissionMode: PermissionMode = PermissionMode.AUTO,
     /** How this conversation's content may be processed. Per conversation; see [PrivacyClass]. */
     val privacyClass: PrivacyClass = PrivacyClass.STANDARD,
+    /**
+     * Whether this conversation asks its model to reason first, overriding the profile's own
+     * setting. Null follows the profile; a value pins it for this chat. Per conversation.
+     */
+    val thinkingOverride: Boolean? = null,
     /** How every turn chooses between local and remote processing. Global. */
     val routingMode: RoutingMode = RoutingMode.AUTO,
     /** The small set of profiles/endpoints automatic routing is allowed to choose between. */
@@ -896,7 +901,7 @@ class MainViewModel(
     private suspend fun runTask(task: AgentTask): TaskOutcome {
         val initial = mutableState.value
         val workload = RoutingWorkloadClassifier.classify(task.prompt)
-        preferredLocalProfile(initial, workload)?.let { prepareLocalProfile(it) }
+        preferredLocalProfile(initial)?.let { prepareLocalProfile(it) }
         val snapshot = mutableState.value
         val plan = routeSelection(
             snapshot,
@@ -1010,6 +1015,8 @@ class MainViewModel(
             val privacy = mostRecent
                 ?.let { runCatching { container.conversationStore.privacyClass(it.id) }.getOrDefault(PrivacyClass.STANDARD) }
                 ?: PrivacyClass.STANDARD
+            val thinking = mostRecent
+                ?.let { runCatching { container.conversationStore.thinkingEnabled(it.id) }.getOrNull() }
             var applied = false
             mutableState.update {
                 // An empty transcript is not proof nobody chose it: tapping New chat right after
@@ -1025,6 +1032,7 @@ class MainViewModel(
                         messages = messages,
                         permissionMode = mode,
                         privacyClass = privacy,
+                        thinkingOverride = thinking,
                         lastContextTokens = null,
                         sessionInputTokens = 0,
                         sessionOutputTokens = 0,
@@ -1060,6 +1068,12 @@ class MainViewModel(
                                 android.util.Log.w("BramPersist", "privacy-class save failed for ${summary.id.value}", error)
                             }
                     }
+                    if (snapshot.thinkingOverride != null) {
+                        runCatching { container.conversationStore.setThinkingEnabled(summary.id, snapshot.thinkingOverride) }
+                            .onFailure { error ->
+                                android.util.Log.w("BramPersist", "thinking-override save failed for ${summary.id.value}", error)
+                            }
+                    }
                     val summaries = runCatching { container.conversationStore.list() }
                         .onFailure { error ->
                             android.util.Log.w("BramPersist", "conversation list failed after save", error)
@@ -1093,6 +1107,7 @@ class MainViewModel(
                 lastMetrics = null,
                 permissionMode = PermissionMode.AUTO,
                 privacyClass = it.defaultPrivacyClass,
+                thinkingOverride = null,
                 lastContextTokens = null,
                 sessionInputTokens = 0,
                 sessionOutputTokens = 0,
@@ -1108,6 +1123,7 @@ class MainViewModel(
             val messages = runCatching { container.conversationStore.load(target) }.getOrDefault(emptyList())
             val mode = runCatching { container.conversationStore.permissionMode(target) }.getOrDefault(PermissionMode.AUTO)
             val privacy = runCatching { container.conversationStore.privacyClass(target) }.getOrDefault(PrivacyClass.STANDARD)
+            val thinking = runCatching { container.conversationStore.thinkingEnabled(target) }.getOrNull()
             conversationId = target
             hintedDraftSkills.clear()
             container.approvalGate.setMode(mode)
@@ -1121,6 +1137,7 @@ class MainViewModel(
                     lastMetrics = null,
                     permissionMode = mode,
                     privacyClass = privacy,
+                    thinkingOverride = thinking,
                     lastContextTokens = null,
                     sessionInputTokens = 0,
                     sessionOutputTokens = 0,
@@ -1889,6 +1906,28 @@ class MainViewModel(
     }
 
     /**
+     * Overrides whether this conversation asks its model to reason first, in place of the
+     * profile's own setting. Reasoning is a load-time setting, so a change that would leave a
+     * differently-configured context resident unloads it — the next turn reloads under the new
+     * value, exactly as changing the profile's own setting does.
+     */
+    fun updateThinkingEnabled(enabled: Boolean?) {
+        val previous = mutableState.value
+        mutableState.update { it.copy(thinkingOverride = enabled) }
+        val profile = previous.profiles.firstOrNull { it.id == previous.activeProfileId }
+        val effective = enabled ?: profile?.thinkingEnabled
+        val id = conversationId
+        viewModelScope.launch {
+            if (profile != null && effective != profile.thinkingEnabled &&
+                previous.loadedModelId != null
+            ) {
+                runCatching { unloadModelInternal(forget = false) }
+            }
+            runCatching { container.conversationStore.setThinkingEnabled(id, enabled) }
+        }
+    }
+
+    /**
      * Changes the active conversation's privacy class: LOCAL_ONLY keeps its content on the device,
      * PRIVATE_REMOTE_ALLOWED lets remote processing in but prefers local, STANDARD has no
      * preference. Persisted per conversation like the tool-permission mode.
@@ -1946,7 +1985,7 @@ class MainViewModel(
         }
     }
 
-    /** A first imported model becomes Primary without making the user understand routing first. */
+    /** A first imported model becomes the selected profile without making the user understand routing first. */
     private suspend fun ensurePrimaryRoutingProfile() {
         if (!routingPoolRestored) return
         val snapshot = mutableState.value
@@ -2628,7 +2667,7 @@ class MainViewModel(
                 threads = threads,
                 gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0,
                 deviceFilter = backend.devicePrefix,
-                enableThinking = profile.thinkingEnabled,
+                enableThinking = state.thinkingOverride ?: profile.thinkingEnabled,
                 flashAttention = profile.flashAttention,
                 kvCacheType = profile.kvCacheType,
                 batchTokens = profile.batchTokens,
@@ -4662,7 +4701,7 @@ class MainViewModel(
         val conversationCharacters = requestMessages.sumOf { it.content.length }
         val latestRequest = requestMessages.lastOrNull { it.role == MessageRole.USER }?.content.orEmpty()
         val workload = RoutingWorkloadClassifier.classify(latestRequest, conversationCharacters)
-        preferredLocalProfile(snapshot, workload)?.let { prepareLocalProfile(it) }
+        preferredLocalProfile(snapshot)?.let { prepareLocalProfile(it) }
         val runSnapshot = mutableState.value
         val plan = routeSelection(
             runSnapshot,
@@ -5464,8 +5503,8 @@ class MainViewModel(
                 privacyClass = privacyClass,
                 requiredCapabilities = setOf(ModelCapability.TEXT),
                 minimumContextTokens = MINIMUM_CONTEXT_TOKENS,
-                // Routine work favors the efficient Primary. Demanding work prepares Power first
-                // and lets the router weigh remote offload when conversation privacy permits it.
+                // Demanding work still biases the router toward quality; it just no longer swaps
+                // to a second designated model to get it.
                 preferQuality = preferQuality,
                 localBias = if (privacyClass == PrivacyClass.PRIVATE_REMOTE_ALLOWED) 2.0 else 1.0,
             ),
@@ -5497,15 +5536,10 @@ class MainViewModel(
         return ordered
     }
 
-    /** Which local role to prepare before routing; only one llama.cpp model is resident at a time. */
-    private fun preferredLocalProfile(snapshot: AppUiState, workload: RoutingWorkload): String? {
+    /** Which local profile to prepare before routing; only one llama.cpp model is resident at a time. */
+    private fun preferredLocalProfile(snapshot: AppUiState): String? {
         if (snapshot.routingMode == RoutingMode.REMOTE_ONLY) return null
-        val preferred = when (workload) {
-            RoutingWorkload.ROUTINE -> snapshot.routingPool.primaryTargetId
-            RoutingWorkload.DEMANDING -> snapshot.routingPool.powerTargetId
-                ?: snapshot.routingPool.primaryTargetId
-        }
-        return preferred
+        return snapshot.routingPool.primaryTargetId
             ?.takeUnless { it.startsWith(REMOTE_PREFIX) }
             ?.takeIf { id -> snapshot.profiles.any { it.id == id } }
     }
