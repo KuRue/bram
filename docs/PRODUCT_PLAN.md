@@ -12,11 +12,27 @@ Keep Bram's graphite/copper and warm-paper themes, staggered dot field, and laun
 Use factual headings, compact rows, and details on demand. Keep measurements and failure reasons
 available without turning every card into a diagnostics report.
 
-Recommended top-level navigation: **Home · Chats · Automations · Models**. Settings is a toolbar
-icon. Chats includes an Agents filter and access to saved agent definitions; avoid adding a fifth
-small navigation target. A chat is a conversation, an agent is a reusable instruction/tool/model
-configuration, a run is an execution, and an automation is a trigger that starts a run. A hardware
-profile configures inference; it is not an agent. Keep these names distinct in UI and storage.
+Navigation uses a **sidebar**, with a modal drawer on phones and a persistent sidebar when width
+allows. There is no bottom navigation bar. The top brand control combines the launcher’s dotted
+lowercase b mark with “ram”; selecting it returns to Home. Home remains the default launch screen.
+
+Below the brand: New chat, chat search, and recent chats/agent conversations. Below the chat section:
+**Profiles**, **Settings**, and **Tools**, with icons and labels. Profiles opens the compact model
+profile list, with files and server connections inside it. Settings expands to General, System,
+Hardware recipes, and Appearance; Tools expands to Permissions/tools, Agents, Automations, Skills,
+and MCP servers. Automations keeps its dedicated screen and run history, reached through Tools.
+These expandable groups expose secondary destinations without a long set of permanent buttons.
+
+On phones the menu button opens the drawer; selecting a destination, Back, or tapping the scrim
+closes it. Preserve chat search/scroll and expanded groups while navigating. On larger screens,
+keep the sidebar visible with a collapse control. Mark the active destination, expose expanded
+state and accessible names, restore focus after dismissal, and keep touch targets at least 48dp.
+The brand is a normal accessible Home action, not an unlabeled decorative logo. Deep links still
+open the requested conversation/run and Back returns through the actual navigation history.
+
+A chat is a conversation, an agent is a reusable instruction/tool/model configuration, a run is
+an execution, and an automation is a trigger that starts a run. A hardware profile configures
+inference; it is not an agent. Keep these names distinct in UI and storage.
 
 The [interactive layout sketch](prototypes/product-layout.html) illustrates the proposed hierarchy,
 compact rows, and existing color palettes. It uses example activity data, not statistics from the
@@ -74,7 +90,7 @@ copy rule for the app, documentation, and future screenshots.
 
 ### Profiles, introduction, and Add model
 
-Models has a search/filter bar, compact profile rows, and one Add action. A model detail groups
+Profiles has a search/filter bar, compact profile rows, and one Add action. A model detail groups
 its profiles and file metadata; a profile detail groups **Overview / Performance / Settings**.
 Overview shows current configuration, evidence date, and load action. Performance holds benchmark
 history, charts, and configuration runs. Settings contains advanced knobs and raw diagnostics.
