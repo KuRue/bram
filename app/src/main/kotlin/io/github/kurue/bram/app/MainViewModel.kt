@@ -1170,7 +1170,9 @@ class MainViewModel(
         // The CPU is always there, so a runtime that cannot be asked still yields a usable answer
         // rather than an empty list that would make every profile look unloadable.
         return runCatching {
-            val devices = container.llamaCppClient.devices()
+            val devices = if (tuningRuns.inFlight()) {
+                tuningNativeCall("devices") { container.llamaCppClient.devices() }
+            } else container.llamaCppClient.devices()
             val names = (0 until devices.optJSONArray("devices")?.length().orZero())
                 .map { index -> devices.getJSONArray("devices").getJSONObject(index).optString("name") }
             listOf(RuntimeBackend.CPU) + RuntimeBackend.entries.filter { backend ->
@@ -1663,6 +1665,22 @@ class MainViewModel(
      * for its probe window — and the sweep wedged silently. One round-trip + [Thread.sleep]
      * avoids repeated dispatcher round-trips while explicitly observing cancellation.
      */
+    private suspend fun tuningNativeCall(
+        label: String,
+        call: suspend () -> JSONObject,
+    ): JSONObject {
+        val result = AtomicReference<Result<JSONObject>?>()
+        val worker = thread(name = "bram-tune-$label") {
+            result.set(runCatching { runBlocking { call() } })
+        }
+        watchThread(worker, TuningLimits.nowMillis() + CANDIDATE_TIMEOUT_MILLIS)
+        if (worker.isAlive) {
+            container.llamaCppClient.restartInferenceProcess()
+            error("$label timed out; previous settings kept.")
+        }
+        return checkNotNull(result.get()).getOrThrow()
+    }
+
     private suspend fun watchThread(
         thread: Thread,
         deadlineMillis: Long,
@@ -5199,7 +5217,10 @@ class MainViewModel(
      *   for a moment should.
      */
     private suspend fun unloadModelInternal(forget: Boolean = true) {
-        runCatching { container.llamaCppClient.unload() }
+        runCatching {
+            if (tuningRuns.inFlight()) tuningNativeCall("unload") { container.llamaCppClient.unload() }
+            else container.llamaCppClient.unload()
+        }
         if (forget) runCatching { container.localModelStore.setLastLoadedModelId(null) }
         mutableState.update {
             it.copy(
