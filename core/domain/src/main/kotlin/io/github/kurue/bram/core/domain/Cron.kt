@@ -129,7 +129,10 @@ object Cron {
                 if (hour == day.hour) minute >= day.minute else true
             }
             minutesInHour.firstOrNull()?.let { minute ->
-                return day.withHour(hour).withMinute(minute)
+                val candidate = day.withHour(hour).withMinute(minute)
+                // A local time that does not exist (a daylight-saving gap) is shifted forward by
+                // java.time; the schedule asked for a time that never happens that day, so skip it.
+                if (candidate.hour == hour && candidate.minute == minute) return candidate
             }
         }
         return null

@@ -127,7 +127,11 @@ internal fun HomeScreen(
                 val task = tasksByConversation[summary.id.value]
                 RecentRow(
                     title = task?.displayName ?: summary.title,
-                    kind = if (task != null) "Task" else "Chat",
+                    kind = when {
+                        task?.automationId != null -> "Automation"
+                        task != null -> "Task"
+                        else -> "Chat"
+                    },
                     status = task?.state?.label,
                     updatedAt = summary.updatedAtEpochMillis,
                     onClick = { onOpenConversation(summary.id.value) },
@@ -209,6 +213,7 @@ private fun MonthCard(state: AppUiState, onShiftMonth: (Long) -> Unit) {
                 MetricRow("Generated on servers", compactCount(activity.remoteGeneratedTokens))
                 MetricRow("Chat turns", (activity.completedByOrigin[RunOrigin.CHAT] ?: 0).toString())
                 MetricRow("Tasks", (activity.completedByOrigin[RunOrigin.TASK] ?: 0).toString())
+                MetricRow("Automations", (activity.completedByOrigin[RunOrigin.AUTOMATION] ?: 0).toString())
                 MetricRow("Failed or cancelled", activity.unfinishedRuns.toString())
             }
         }
@@ -252,7 +257,7 @@ private fun RecentRow(title: String, kind: String, status: String?, updatedAt: L
     GlassSurface(Modifier.fillMaxWidth().clickable(onClick = onClick).testTag("home-recent")) {
         Row(Modifier.padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(30.dp)) {
-                Text(if (kind == "Task") "◇" else "▤", color = MaterialTheme.colorScheme.primary)
+                Text(if (kind == "Chat") "▤" else "◇", color = MaterialTheme.colorScheme.primary)
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)

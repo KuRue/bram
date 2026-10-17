@@ -970,7 +970,7 @@ class MainViewModel(
                 sampler = snapshot.activeProfile?.sampler ?: SamplerSettings(),
                 profileInstructions = runInstructions(snapshot, selection.runtime.model.contextWindowTokens),
                 rootRunId = taskRootId,
-                origin = RunOrigin.TASK,
+                origin = if (task.automationId != null) RunOrigin.AUTOMATION else RunOrigin.TASK,
             )
             try {
                 container.agent().run(request, selection.runtime).collect { event ->
@@ -4658,7 +4658,11 @@ class MainViewModel(
         }
     }
 
-    fun saveAutomation(name: String, cron: String, prompt: String) {
+    /**
+     * Creates an automation, or updates [id]'s. Editing keeps its id, enabled state, and history;
+     * only the definition changes.
+     */
+    fun saveAutomation(name: String, cron: String, prompt: String, id: String? = null) {
         viewModelScope.launch {
             when {
                 name.isBlank() -> status("An automation needs a name")
@@ -4667,23 +4671,39 @@ class MainViewModel(
                     status("The schedule \"$cron\" is not a valid cron expression: minute hour day-of-month month day-of-week")
                 else -> {
                     val now = System.currentTimeMillis()
+                    val existing = id?.let { wanted -> container.automationStore.automations().firstOrNull { it.id == wanted } }
                     container.automationStore.save(
-                        Automation(
+                        (existing ?: Automation(
                             id = UUID.randomUUID().toString(),
+                            name = "",
+                            cron = "",
+                            prompt = "",
+                            enabled = true,
+                            updatedAtEpochMillis = now,
+                        )).copy(
                             name = name.trim(),
                             cron = cron.trim(),
                             prompt = prompt.trim(),
-                            enabled = true,
                             updatedAtEpochMillis = now,
                         ),
                     )
                     container.automationRunner.rescheduleAll()
-                    status("Automation saved; it fires on its schedule from now on.")
+                    status(if (existing != null) "Automation updated." else "Automation saved; it runs on its schedule from now on.")
                     refreshAutomations()
                 }
             }
         }
     }
+
+    /** Runs an automation once now, without resuming it if it is paused. */
+    fun runAutomationNow(automationId: String) {
+        viewModelScope.launch {
+            val started = container.automationRunner.runNow(automationId)
+            status(if (started) "Running now; the result appears in its history." else "A run of this automation is still pending.")
+            refreshAutomations()
+        }
+    }
+
 
     fun removeAutomation(automationId: String) {
         viewModelScope.launch {
