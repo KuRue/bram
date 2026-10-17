@@ -2142,29 +2142,27 @@ class MainViewModel(
             // so the reference decode runs once for its own numbers — the reference bar is part of
             // the comparison either way.
             if (measured.isEmpty()) {
-                val cpuTiming = referenceAttempt(model, profile, threads, onSlow = {})
-                if (cpuTiming != null) {
-                    mutableState.update {
-                        it.copy(
-                            autoConfigure = it.autoConfigure?.let { progress ->
-                                progress.copy(results = progress.results.map { entry ->
-                                    if (entry.isReference) {
-                                        entry.copy(
-                                            promptTokPerSec = if (cpuTiming.optLong("promptMillis", 0L) > 0) {
-                                                val promptTokens = cpuTiming.optInt("promptTokens", 0)
-                                                if (promptTokens > 0) promptTokens * 1000.0 / cpuTiming.optLong("promptMillis") else 0.0
-                                            } else 0.0,
-                                            decodeTokPerSec = if (cpuTiming.optLong("decodeMillis", 0L) > 0) {
-                                                REFERENCE_TOKENS * 1000.0 / cpuTiming.optLong("decodeMillis")
-                                            } else 0.0,
-                                        )
-                                    } else {
-                                        entry
-                                    }
-                                })
-                            },
-                        )
-                    }
+                val cpuTiming = measureCpuReference(model, profile, threads)
+                mutableState.update {
+                    it.copy(
+                        autoConfigure = it.autoConfigure?.let { progress ->
+                            progress.copy(results = progress.results.map { entry ->
+                                if (entry.isReference) {
+                                    entry.copy(
+                                        promptTokPerSec = if (cpuTiming.optLong("promptMillis", 0L) > 0) {
+                                            val promptTokens = cpuTiming.optInt("promptTokens", 0)
+                                            if (promptTokens > 0) promptTokens * 1000.0 / cpuTiming.optLong("promptMillis") else 0.0
+                                        } else 0.0,
+                                        decodeTokPerSec = if (cpuTiming.optLong("decodeMillis", 0L) > 0) {
+                                            REFERENCE_TOKENS * 1000.0 / cpuTiming.optLong("decodeMillis")
+                                        } else 0.0,
+                                    )
+                                } else {
+                                    entry
+                                }
+                            })
+                        },
+                    )
                 }
             }
 
@@ -2817,7 +2815,7 @@ class MainViewModel(
             runCatching { unloadModelInternal(forget = false) }
             mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
             refreshDeviceProfile()
-            if (!tuningRuns.inFlight()) restoreLoaded?.let { loadModel(it) }
+            restoreLoaded?.let { loadModel(it) }
         }
     }
 
@@ -3806,7 +3804,7 @@ class MainViewModel(
             runCatching { unloadModelInternal(forget = false) }
             mutableState.update { it.copy(isValidatingAccelerator = false, status = null) }
             refreshDeviceProfile()
-            if (!tuningRuns.inFlight()) restoreLoaded?.let { loadModel(it) }
+            restoreLoaded?.let { loadModel(it) }
         }
     }
 
