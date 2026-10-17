@@ -473,9 +473,14 @@ fun BramApp(viewModel: MainViewModel) {
                             AppPanel.AUTOMATIONS -> AutomationsScreen(
                                 state = state,
                                 onBack = { panel = AppPanel.CAPABILITIES },
-                                onSaveAutomation = viewModel::saveAutomation,
-                                onRemoveAutomation = viewModel::removeAutomation,
-                                onSetAutomationEnabled = viewModel::setAutomationEnabled,
+                                onSave = viewModel::saveAutomation,
+                                onRemove = viewModel::removeAutomation,
+                                onSetEnabled = viewModel::setAutomationEnabled,
+                                onRunNow = viewModel::runAutomationNow,
+                                onOpenConversation = {
+                                    viewModel.openConversation(it)
+                                    panel = null
+                                },
                             )
                             AppPanel.MEMORIES -> MemoriesScreen(
                                 state = state,
@@ -880,6 +885,7 @@ private fun BramDrawer(
             ) {
                 listOf(
                     listOf("Models" to AppPanel.MODELS, "Tasks" to AppPanel.TASKS),
+                    listOf("Automations" to AppPanel.AUTOMATIONS),
                     listOf("Capabilities" to AppPanel.CAPABILITIES, "Settings" to AppPanel.SETTINGS),
                     // The per-conversation tool-approval mode and privacy class live here; before
                     // the drawer carried them they were only reachable through the top pill's
@@ -3393,60 +3399,6 @@ private fun SkillsScreen(
     }
 }
 
-@Composable
-private fun AutomationsScreen(
-    state: AppUiState,
-    onBack: () -> Unit,
-    onSaveAutomation: (String, String, String) -> Unit,
-    onRemoveAutomation: (String) -> Unit,
-    onSetAutomationEnabled: (String, Boolean) -> Unit,
-) {
-    var adding by rememberSaveable { mutableStateOf(false) }
-    var name by rememberSaveable { mutableStateOf("") }
-    var cron by rememberSaveable { mutableStateOf("0 9 * * *") }
-    var prompt by rememberSaveable { mutableStateOf("") }
-    Column(
-        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-            .padding(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        PanelHandle()
-        DestinationHeader("Automations", "Capabilities", onBack)
-        Text(
-            "Scheduled prompts enter the task queue and use the same routing and approval rules as other work.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        state.automationStatus?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-        if (state.automations.isEmpty()) EmptyDestination("No automations", "Create one when Bram should work on a schedule.")
-        else state.automations.forEach { AutomationCard(it, onSetAutomationEnabled, onRemoveAutomation) }
-        if (!adding) {
-            Button(onClick = { adding = true }, modifier = Modifier.fillMaxWidth()) { Text("New automation") }
-        } else {
-            GlassSurface(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("New automation", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    OutlinedTextField(name, { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(
-                        cron,
-                        { cron = it },
-                        label = { Text("Schedule") },
-                        supportingText = { Text("minute hour day month weekday — for example, 0 9 * * 1-5") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(prompt, { prompt = it }, label = { Text("Prompt") }, modifier = Modifier.fillMaxWidth())
-                    Button(
-                        onClick = { onSaveAutomation(name, cron, prompt) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Save automation") }
-                    TextButton(onClick = { adding = false }, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
-                }
-            }
-        }
-        state.error?.let { ErrorCard(it) }
-        Spacer(Modifier.height(24.dp))
-    }
-}
 
 @Composable
 private fun MemoriesScreen(
@@ -3582,7 +3534,7 @@ private fun DestinationCard(
 }
 
 @Composable
-private fun EmptyDestination(title: String, subtitle: String) {
+internal fun EmptyDestination(title: String, subtitle: String) {
     GlassSurface(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, fontWeight = FontWeight.SemiBold)
@@ -4301,49 +4253,6 @@ private fun capabilityDelta(active: SkillVersion?, draft: SkillVersion): String 
     return parts.joinToString(" · ")
 }
 
-@Composable
-private fun AutomationCard(
-    automation: Automation,
-    onSetEnabled: (String, Boolean) -> Unit,
-    onRemove: (String) -> Unit,
-) {
-    GlassSurface(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(automation.name, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        automation.cron,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = automation.enabled,
-                    onCheckedChange = { onSetEnabled(automation.id, it) },
-                )
-            }
-            Text(
-                automation.prompt.take(140),
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            val schedule = listOfNotNull(
-                automation.lastRunAtEpochMillis?.let { "last: ${formatWhen(it)}" },
-                automation.nextRunAtEpochMillis?.let { "next: ${formatWhen(it)}" },
-            ).joinToString(" · ")
-            Text(
-                schedule.ifBlank { if (automation.enabled) "next: never (the schedule cannot fire)" else "paused" },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row {
-                TextButton(onClick = { onRemove(automation.id) }) { Text("Remove") }
-            }
-        }
-    }
-}
 
 private fun formatWhen(epochMillis: Long): String =
     java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)

@@ -57,17 +57,39 @@ class AutomationRunner(
             val automation = store.automations().firstOrNull { it.id == automationId }
                 ?: return@launch
             if (!automation.enabled) return@launch
-            val now = System.currentTimeMillis()
-            store.save(automation.copy(lastRunAtEpochMillis = now, updatedAtEpochMillis = now))
-            // scheduledAt = now puts the task at the head of the queue; the queue defers it when
-            // no model is loaded, exactly like a one-off scheduled task.
-            taskRunner.enqueue(
-                displayName = automation.name,
-                prompt = automation.prompt,
-                scheduledAtEpochMillis = now,
-            )
-            reschedule(automation.copy(lastRunAtEpochMillis = now))
+            enqueueRun(automation)
+            reschedule(store.automations().firstOrNull { it.id == automationId } ?: automation)
         }
+    }
+
+    /**
+     * Runs an automation now, whether or not it is paused: a manual run does not resume the
+     * schedule. Returns false when a run of it is still pending.
+     */
+    suspend fun runNow(automationId: String): Boolean {
+        val automation = store.automations().firstOrNull { it.id == automationId } ?: return false
+        return enqueueRun(automation)
+    }
+
+    /**
+     * Queues one run unless a previous run of the same automation is still queued, waiting for a
+     * model, or running: occurrences of one schedule never overlap, and a backlog of missed
+     * fires collapses into the run already waiting rather than piling up behind it.
+     */
+    private suspend fun enqueueRun(automation: Automation): Boolean {
+        val pending = taskRunner.tasks.value.any { it.automationId == automation.id && !it.isFinished }
+        if (pending) return false
+        val now = System.currentTimeMillis()
+        store.save(automation.copy(lastRunAtEpochMillis = now, updatedAtEpochMillis = now))
+        // scheduledAt = now puts the task at the head of the queue; the queue defers it when no
+        // model is loaded, exactly like a one-off scheduled task.
+        taskRunner.enqueue(
+            displayName = automation.name,
+            prompt = automation.prompt,
+            scheduledAtEpochMillis = now,
+            automationId = automation.id,
+        )
+        return true
     }
 
     private sealed interface AutomationOutcome {

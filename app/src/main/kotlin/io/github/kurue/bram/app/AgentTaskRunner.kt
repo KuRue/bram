@@ -75,7 +75,12 @@ class AgentTaskRunner(
         }
     }
 
-    fun enqueue(displayName: String, prompt: String, scheduledAtEpochMillis: Long? = null): AgentTask {
+    fun enqueue(
+        displayName: String,
+        prompt: String,
+        scheduledAtEpochMillis: Long? = null,
+        automationId: String? = null,
+    ): AgentTask {
         val task = AgentTask(
             id = UUID.randomUUID().toString(),
             displayName = displayName,
@@ -84,6 +89,7 @@ class AgentTaskRunner(
             createdAtEpochMillis = System.currentTimeMillis(),
             scheduledAtEpochMillis = scheduledAtEpochMillis,
             state = TaskState.QUEUED,
+            automationId = automationId,
         )
         val updated = listOf(task) + mutableTasks.value
         mutableTasks.value = updated

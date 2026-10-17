@@ -39,6 +39,8 @@ data class AgentTask(
     val resultSummary: String? = null,
     val error: String? = null,
     val activityLog: List<String> = emptyList(),
+    /** The automation that started this run, or null for a task created by hand. */
+    val automationId: String? = null,
 ) {
     val isFinished: Boolean
         get() = state == TaskState.SUCCEEDED || state == TaskState.FAILED || state == TaskState.CANCELLED

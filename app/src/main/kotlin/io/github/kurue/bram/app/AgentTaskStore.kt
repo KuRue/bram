@@ -47,6 +47,7 @@ class AgentTaskStore(context: Context) {
         .put("finishedAtEpochMillis", finishedAtEpochMillis)
         .put("resultSummary", resultSummary)
         .put("error", error)
+        .put("automationId", automationId)
         .put(
             "activityLog",
             JSONArray().apply { activityLog.forEach { put(it) } },
@@ -68,6 +69,7 @@ class AgentTaskStore(context: Context) {
         finishedAtEpochMillis = if (isNull("finishedAtEpochMillis")) null else optLong("finishedAtEpochMillis"),
         resultSummary = if (isNull("resultSummary")) null else optString("resultSummary"),
         error = if (isNull("error")) null else optString("error"),
+        automationId = if (!has("automationId") || isNull("automationId")) null else optString("automationId"),
         activityLog = optJSONArray("activityLog")?.let { array ->
             (0 until array.length()).mapNotNull { index -> array.optString(index, "").takeIf(String::isNotBlank) }
         }.orEmpty(),
