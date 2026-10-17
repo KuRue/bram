@@ -8,6 +8,45 @@ This document describes what is in the app today. The plan behind it — a publi
 user-added sources, evidence upload — is [§6 of the product plan](PRODUCT_PLAN.md#6-hardware-recipes-and-additional-repositories),
 and the parts of it that are not implemented yet are listed at the bottom.
 
+## Recipe sources
+
+Open **Settings → Hardware → Recipe sources** to inspect the bundled snapshot or add an external
+one. Paste an HTTPS URL ending in `/index.json`, or `owner/repository@<full 40-character commit>`
+for a GitHub repository with an index at its root. GitHub shorthand uses the raw content at that
+immutable commit. To change that commit, add the new URL as a separate source; an existing generic
+HTTPS URL can publish a new revision at the same location.
+
+**Download for review** checks every document's schema, hash, recipe ID, and version. It does not
+activate anything. Review the source URL, revision, index SHA-256, device/model conditions, settings,
+maintainer, and evidence before choosing **Trust and pin snapshot**. Every user-added source is
+labelled external, including one whose index declares itself official. The bundled snapshot is
+trusted through the app's distribution; no network source can grant itself that status.
+
+Trust in this version means **explicitly accepting those snapshot bytes**. The SHA-256 pin checks
+integrity, not publisher identity. Signed network indexes, verification keys, and key-rotation review
+are not implemented; the app makes no signature/authorship claim. External source trust is kept
+separate from the eventual local measurement gate, and this screen cannot apply settings yet.
+
+**Check for update** downloads another review. Only accepting it replaces the active pin. A failed
+download, hash/schema check, or cache write keeps the accepted snapshot. Changing a source ID or
+reusing a currently cached revision for different bytes is refused. Approving an old review cannot
+overwrite a source that changed since the review was downloaded.
+
+Accepted sources are available offline after restart. The app retains the current and previous
+accepted snapshots; **Restore revision** swaps them without making a network request. Removing a
+source confirms removal of its cached suggestions; it does not edit profiles or bundled recipes.
+A corrupt cache is reported separately, so healthy sources and the bundled snapshot stay visible.
+Review drafts are held in memory and are never implicitly accepted after restart.
+
+Downloads accept HTTPS only, no credentials/query/fragment, and no nonstandard port. Redirects are
+refused. Recipe files must be plain JSON filenames beside the index, without paths or escaped URL
+characters. Limits are 256 KiB per index, 64 KiB per recipe, 16 recipes and 1 MiB per snapshot,
+8 external sources, and two snapshots per source. Each source is stored in one atomically replaced
+file capped at 5 MiB (including JSON encoding), bounding the accepted cache to 40 MiB. Cache writes
+sync both file contents and directory changes, including source removal. Network connect/read
+timeouts are 10 seconds, within a shared 45-second snapshot download budget checked
+between requests and reads. Updates are manual; there is no periodic refresh.
+
 ## The bundled snapshot
 
 ```
@@ -62,12 +101,12 @@ effect, and a failed check keeps the local known-good profile. That local revali
 
 ## Not implemented yet
 
-The format, the matcher, and the snapshot are in place; these are not:
+The format, matcher, bundled snapshot, source cache, review screen, and rollback are in place;
+these are not:
 
-- the source manager (adding a GitHub repository or HTTPS index, pinned revisions, key-change
-  review, offline cache, rollback);
+- signed network indexes, pinned verification keys, and key-change review;
 - local revalidation before a proposal is applied, and the device-local exclusion recorded when it
   fails;
-- the Settings → Hardware → Recipe sources screen;
+- profile-specific matching and before/after proposals in the settings screen;
 - evidence upload;
 - the public recipe repository, its JSON Schema, contribution template, and fixtures.
