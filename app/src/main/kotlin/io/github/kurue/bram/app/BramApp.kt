@@ -2735,12 +2735,14 @@ private fun RunJournalRow(entry: RunJournalEntry) {
                     RunStatus.RUNNING -> "Running"
                     RunStatus.SUCCEEDED -> "Succeeded"
                     RunStatus.FAILED -> "Failed"
+                    RunStatus.CANCELLED -> "Cancelled"
                 },
                 style = MaterialTheme.typography.labelMedium,
                 color = when (entry.status) {
                     RunStatus.FAILED -> MaterialTheme.colorScheme.error
                     RunStatus.SUCCEEDED -> MaterialTheme.colorScheme.primary
                     RunStatus.RUNNING -> MaterialTheme.colorScheme.tertiary
+                    RunStatus.CANCELLED -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
             Text(

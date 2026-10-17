@@ -92,6 +92,10 @@ class CompactionTest {
         assertEquals(1, journal.entries.size)
         val recorded = journal.entries.single()
         assertEquals(RunStatus.SUCCEEDED, recorded.status)
+        // Recorded as running first, so Home can show work in progress.
+        assertEquals(listOf(RunStatus.RUNNING, RunStatus.SUCCEEDED), journal.statuses)
+        assertTrue(recorded.usageMeasured)
+        assertEquals(0, recorded.toolCalls)
         assertEquals(100, recorded.inputTokens)
         assertEquals(50, recorded.outputTokens)
         assertTrue(recorded.finishedAtEpochMillis!! >= recorded.startedAtEpochMillis)
@@ -132,10 +136,15 @@ class CompactionTest {
     }
 }
 
+/** Keyed by id like the real journal, which replaces a run's row on every upsert. */
 private class CapturingJournal : RunJournal {
-    val entries = mutableListOf<RunJournalEntry>()
+    private val byId = linkedMapOf<String, RunJournalEntry>()
+    /** Every status a run was written with, in order. */
+    val statuses = mutableListOf<RunStatus>()
+    val entries: List<RunJournalEntry> get() = byId.values.toList()
     override suspend fun upsert(entry: RunJournalEntry) {
-        entries += entry
+        byId[entry.id] = entry
+        statuses += entry.status
     }
 }
 

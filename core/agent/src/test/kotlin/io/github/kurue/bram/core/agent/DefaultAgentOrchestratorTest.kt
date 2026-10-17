@@ -26,6 +26,14 @@ import io.github.kurue.bram.core.domain.ToolResultBudget
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.CompletableDeferred
+import io.github.kurue.bram.core.domain.RunStatus
+import io.github.kurue.bram.core.domain.RunOrigin
+import io.github.kurue.bram.core.domain.RunJournalEntry
+import io.github.kurue.bram.core.domain.RunJournal
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -689,6 +697,100 @@ class DefaultAgentOrchestratorTest {
     }
 
     /** An orchestrator with the defaults these tests need; only the runtime varies. */
+    private class KeyedJournal : RunJournal {
+        val byId = linkedMapOf<String, RunJournalEntry>()
+        override suspend fun upsert(entry: RunJournalEntry) {
+            byId[entry.id] = entry
+        }
+    }
+
+    private fun journaledOrchestrator(
+        journal: RunJournal,
+        handler: ToolHandler,
+        decision: ToolApprovalDecision,
+    ) = DefaultAgentOrchestrator(
+        contextWindowManager = ContextWindowManager(),
+        memoryStore = InMemoryMemoryStore(),
+        toolRegistry = StaticToolRegistry(listOf(handler)),
+        approvalGate = object : ToolApprovalGate {
+            override suspend fun decide(
+                tool: ToolDefinition,
+                argumentsJson: String,
+                recovered: Boolean,
+                untrustedContext: Boolean,
+            ) = decision
+        },
+        journal = journal,
+    )
+
+    private val journalRequest = AgentRunRequest(
+        conversationId = ConversationId("journal"),
+        messages = listOf(ConversationMessage(role = MessageRole.USER, content = "Run the tool")),
+        identity = AgentIdentity(id = "bram", version = "test", displayName = "Bram", systemPrompt = "You are Bram."),
+        rootRunId = "turn-1",
+        origin = RunOrigin.TASK,
+    )
+
+    @Test
+    fun `the journal counts a tool call that ran, and records origin and root`() = runBlocking {
+        val journal = KeyedJournal()
+        val handler = CountingHandler("asked_about")
+        journaledOrchestrator(journal, handler, ToolApprovalDecision.ALLOW_ONCE)
+            .run(journalRequest, ToolCallingRuntime(argumentsJson = """{"count":2}""")).toList()
+
+        val entry = journal.byId.values.single()
+        assertEquals(1, handler.executions)
+        assertEquals(1, entry.toolCalls)
+        assertEquals(1, entry.toolTurns)
+        assertEquals("turn-1", entry.rootRunId)
+        assertEquals(RunOrigin.TASK, entry.origin)
+        assertEquals(false, entry.remote)
+        // The fake runtime reports no usage, which is unknown rather than zero.
+        assertFalse(entry.usageMeasured)
+    }
+
+    @Test
+    fun `a refused call is a tool round but not a tool call`() = runBlocking {
+        val journal = KeyedJournal()
+        val handler = CountingHandler("asked_about")
+        journaledOrchestrator(journal, handler, ToolApprovalDecision.DENY)
+            .run(journalRequest, ToolCallingRuntime(argumentsJson = """{"count":2}""")).toList()
+
+        val entry = journal.byId.values.single()
+        assertEquals(0, handler.executions)
+        assertEquals(0, entry.toolCalls)
+        assertEquals(1, entry.toolTurns)
+    }
+
+    @Test
+    fun `a stopped run is recorded as cancelled`() = runBlocking {
+        val journal = KeyedJournal()
+        val started = CompletableDeferred<Unit>()
+        val stalling = object : ModelRuntime {
+            override val model = ModelDescriptor(
+                id = ModelId("stall"), displayName = "Stall", providerName = "Test", modelName = "stall",
+                location = ModelLocation.REMOTE, contextWindowTokens = 4_096, capabilities = TOOL_CAPABLE,
+            )
+            override suspend fun availability() = RuntimeAvailability(available = true, summary = "Ready")
+            override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+                started.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        val run = launch {
+            journaledOrchestrator(journal, CountingHandler("asked_about"), ToolApprovalDecision.ALLOW_ONCE)
+                .run(journalRequest, stalling).toList()
+        }
+        started.await()
+        assertEquals(RunStatus.RUNNING, journal.byId.values.single().status)
+        run.cancelAndJoin()
+
+        val entry = journal.byId.values.single()
+        assertEquals(RunStatus.CANCELLED, entry.status)
+        assertEquals(true, entry.remote)
+        assertTrue(entry.finishedAtEpochMillis != null)
+    }
+
     private fun orchestratorWith(): DefaultAgentOrchestrator = DefaultAgentOrchestrator(
         contextWindowManager = ContextWindowManager(),
         memoryStore = InMemoryMemoryStore(),
