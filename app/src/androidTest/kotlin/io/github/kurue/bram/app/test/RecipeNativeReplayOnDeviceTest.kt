@@ -18,7 +18,7 @@ import java.security.MessageDigest
 
 /** Opt-in real JNI check using the generated, sub-megabyte procedural model; no model download. */
 class RecipeNativeReplayOnDeviceTest {
-    @Test fun profileReplayUsesChatThreadsAndPoolsWhileTheReferenceStaysFixed() = runBlocking {
+    @Test fun profileReplayUsesChatThreadsAndPoolsWhileTheReferenceStaysFixed() = runBlocking<Unit> {
         val path = InstrumentationRegistry.getArguments().getString("recipeFixture").orEmpty()
         assumeTrue("Pass -e recipeFixture with an app-private generated fixture GGUF", path.isNotBlank())
         val app = ApplicationProvider.getApplicationContext<BramApplication>()

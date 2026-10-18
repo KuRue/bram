@@ -1,6 +1,6 @@
 # Native recipe replay check
 
-`recipe_fixture.py` writes a deterministic 930 KiB GGUF with procedural weights. It always prefers
+`recipe_fixture.py` writes a deterministic, sub-megabyte GGUF with procedural weights. It always prefers
 the byte token `A`. It exercises loading, complete token replay, split prompt/decode threads, and
 tuned pool attachment. Its output and timings are not model-quality or performance evidence.
 
