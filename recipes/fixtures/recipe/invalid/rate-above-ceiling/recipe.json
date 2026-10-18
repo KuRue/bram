@@ -1,0 +1,51 @@
+{
+  "schema": "bram.hardware-recipe",
+  "schemaVersion": 1,
+  "id": "example-soc-model-cpu",
+  "version": 1,
+  "maintainer": "Example maintainer",
+  "evidenceDate": "2026-10-18",
+  "match": {
+    "socs": [
+      "example-soc"
+    ]
+  },
+  "runtime": {
+    "engineCommits": [
+      "a94d563ed801d1da1b8c2432946de07d0231bb3d"
+    ],
+    "settingsSchemaVersion": 1,
+    "availableBackends": [
+      "cpu"
+    ]
+  },
+  "model": {
+    "architectures": [
+      "lfm2"
+    ],
+    "quantizations": [
+      "q4_0"
+    ]
+  },
+  "workload": {
+    "promptTokens": 512,
+    "decodeTokens": 128,
+    "contextDepth": 0,
+    "preference": "chat"
+  },
+  "proposal": {
+    "backend": "cpu",
+    "threads": 4,
+    "batchTokens": 512
+  },
+  "evidence": {
+    "method": "Bram benchmark, three repetitions",
+    "agreement": 1.0,
+    "promptTokPerSec": 100001
+  },
+  "limits": {
+    "revalidateOn": [
+      "engine_commit"
+    ]
+  }
+}

@@ -619,6 +619,11 @@ data class AppUiState(
     /** The last automation action's result, shown under the automations section. */
     val automationStatus: String? = null,
     val recipeSources: RecipeSourcesUi = RecipeSourcesUi(),
+    /**
+     * The llama.cpp commit this build runs, as the native runtime reports it. A recipe records the
+     * engine it was measured on, so the value is shown where a contributor can copy it.
+     */
+    val engineBuild: String = "",
     val recipeDeviceIdentity: RecipeDeviceIdentity? = null,
     val recipeRuntimeAvailable: Boolean = false,
     val recipeValidationRecords: List<RecipeValidationRecord> = emptyList(),
@@ -1724,7 +1729,8 @@ class MainViewModel(
         }
         mutableState.update {
             val phone = it.deviceProfile
-            it.copy(measurementFingerprint = key, recipeRuntimeAvailable = probe?.optBoolean("nativeRuntimeLinked") == true,
+            it.copy(measurementFingerprint = key, engineBuild = engine,
+                recipeRuntimeAvailable = probe?.optBoolean("nativeRuntimeLinked") == true,
                 recipeDeviceIdentity = phone?.let { hardware ->
                 RecipeDeviceIdentity(hardware.manufacturer, hardware.model, hardware.soc,
                     android.os.Build.VERSION.SDK_INT, cpu, engine,

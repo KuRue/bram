@@ -70,6 +70,17 @@ jobs:
             # on 2026-10-13; CI used to run two of them, which left every change to :core:domain,
             # :runtime:openai, :runtime:litertlm and :app unverified until somebody remembered to
             # run the rest by hand.
+            # The recipe format has two implementations: the JSON Schemas contributors write
+            # against, and the Kotlin parser that reads untrusted sources on the phone. Both are
+            # checked against one fixture corpus, so a rule that changes on one side fails here
+            # instead of surprising a contributor. Fast, and independent of Gradle, so it runs
+            # before the build.
+            - name: Check recipe schemas against the fixture corpus
+              shell: bash
+              run: |
+                  python3 -m pip install --quiet jsonschema
+                  python3 recipes/validate.py
+
             - name: Verify Gradle wrapper, test, lint, and build
               shell: bash
               run: |
