@@ -90,6 +90,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -1494,6 +1495,17 @@ private fun ModelsScreen(
             }
         }
         if (showAdvancedTools) {
+            item {
+                val activeProfile = state.profiles.firstOrNull { profile -> profile.id == state.activeProfileId }
+                val activeModel = activeProfile?.let { profile -> state.localModels.firstOrNull { it.id == profile.modelId } }
+                RuntimeIdentityCard(
+                    runtimeIdentityLines(
+                        engineBuild = state.engineBuild,
+                        deviceIdentity = state.deviceProfile?.profileFingerprint.orEmpty(),
+                        model = activeModel,
+                    ),
+                )
+            }
             state.modelLoadDetail?.let { detail -> item { InfoCard("Active runtime", detail) } }
             if (state.modelStorageBytes > 0) {
                 item {

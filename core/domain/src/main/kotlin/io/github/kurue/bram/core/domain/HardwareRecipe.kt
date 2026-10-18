@@ -320,24 +320,25 @@ private object RecipeDocuments {
         requireString(obj, "schema", "index", problems) { value ->
             if (value == RECIPE_INDEX_SCHEMA) null else "must be \"$RECIPE_INDEX_SCHEMA\""
         }
-        val schemaVersion = intIn(obj, "schemaVersion", "index", problems, 1, 1_000_000)
+        val schemaVersion = requiredIntIn(obj, "schemaVersion", "index", problems, 1, 1_000_000)
         if (schemaVersion != null && schemaVersion != RECIPE_SCHEMA_VERSION) {
             problems += "index.schemaVersion: this app reads version $RECIPE_SCHEMA_VERSION, not $schemaVersion"
         }
         val source = obj.optJSONObject("source")?.let { sourceObject ->
             checkKeys(sourceObject, "source", problems, setOf("id", "name", "kind"))
             RecipeSource(
-                id = text(sourceObject, "id", "source", problems, 120).orEmpty(),
-                name = text(sourceObject, "name", "source", problems, 120).orEmpty(),
-                kind = enumOf(sourceObject, "kind", "source", problems, RecipeSourceKind.entries) { it.wire }
+                id = requiredText(sourceObject, "id", "source", problems, 120).orEmpty(),
+                name = requiredText(sourceObject, "name", "source", problems, 120).orEmpty(),
+                // Trust is decided by this field, so a document that omits it is not read as external.
+                kind = requiredEnumOf(sourceObject, "kind", "source", problems, RecipeSourceKind.entries) { it.wire }
                     ?: RecipeSourceKind.EXTERNAL,
             )
         } ?: run {
             problems += "source: required"
             null
         }
-        val revision = text(obj, "revision", "index", problems, 120)
-        val generatedAt = text(obj, "generatedAt", "index", problems, 40)?.also {
+        val revision = requiredText(obj, "revision", "index", problems, 120)
+        val generatedAt = requiredText(obj, "generatedAt", "index", problems, 40)?.also {
             if (!TIMESTAMP_PATTERN.matches(it)) problems += "index.generatedAt: expected yyyy-MM-dd or yyyy-MM-ddTHH:MM:SSZ, got \"$it\""
         }
         val recipes = arrayIn(obj, "recipes", "index.recipes", problems, 1, 256) { element, path ->
@@ -387,17 +388,17 @@ private object RecipeDocuments {
         requireString(obj, "schema", "recipe", problems) { value ->
             if (value == RECIPE_SCHEMA) null else "must be \"$RECIPE_SCHEMA\""
         }
-        val schemaVersion = intIn(obj, "schemaVersion", "recipe", problems, 1, 1_000_000)
+        val schemaVersion = requiredIntIn(obj, "schemaVersion", "recipe", problems, 1, 1_000_000)
         if (schemaVersion != null && schemaVersion != RECIPE_SCHEMA_VERSION) {
             problems += "recipe.schemaVersion: this app reads version $RECIPE_SCHEMA_VERSION, not $schemaVersion"
         }
-        val id = text(obj, "id", "recipe", problems, 120)
+        val id = requiredText(obj, "id", "recipe", problems, 120)
         if (id != null && !ID_PATTERN.matches(id)) {
             problems += "recipe.id: must match ${ID_PATTERN.pattern}, got \"$id\""
         }
-        val version = intIn(obj, "version", "recipe", problems, 1, 1_000_000)
-        val maintainer = text(obj, "maintainer", "recipe", problems, 120)
-        val evidenceDate = text(obj, "evidenceDate", "recipe", problems, 10)?.also {
+        val version = requiredIntIn(obj, "version", "recipe", problems, 1, 1_000_000)
+        val maintainer = requiredText(obj, "maintainer", "recipe", problems, 120)
+        val evidenceDate = requiredText(obj, "evidenceDate", "recipe", problems, 10)?.also {
             if (!DATE_PATTERN.matches(it)) problems += "recipe.evidenceDate: expected yyyy-MM-dd, got \"$it\""
         }
         val match = objectOf(obj, "match", "match", problems)
@@ -449,14 +450,14 @@ private object RecipeDocuments {
 
     private fun runtimeObject(obj: JSONObject, problems: MutableList<String>): RecipeRuntime {
         checkKeys(obj, "runtime", problems, setOf("engineCommits", "settingsSchemaVersion", "availableBackends"))
-        val commits = stringList(obj, "engineCommits", "runtime", problems, 1, 16, 40)?.also { commits ->
+        val commits = requiredStringList(obj, "engineCommits", "runtime", problems, 1, 16, 40)?.also { commits ->
             commits.forEachIndexed { index, commit ->
                 if (!ENGINE_COMMIT_PATTERN.matches(commit)) {
                     problems += "runtime.engineCommits[$index]: expected a hex engine commit, got \"$commit\""
                 }
             }
         }.orEmpty()
-        val settingsSchemaVersion = intIn(obj, "settingsSchemaVersion", "runtime", problems, 1, 1_000)
+        val settingsSchemaVersion = requiredIntIn(obj, "settingsSchemaVersion", "runtime", problems, 1, 1_000)
         if (settingsSchemaVersion != null && settingsSchemaVersion > RECIPE_SCHEMA_VERSION) {
             problems += "runtime.settingsSchemaVersion: newer than this app's $RECIPE_SCHEMA_VERSION"
         }
@@ -471,8 +472,8 @@ private object RecipeDocuments {
 
     private fun modelObject(obj: JSONObject, problems: MutableList<String>): RecipeModel {
         checkKeys(obj, "model", problems, setOf("architectures", "quantizations", "sha256", "sizeBytes", "minContextTokens"))
-        val architectures = stringList(obj, "architectures", "model", problems, 1, 32, 64).orEmpty()
-        val quantizations = stringList(obj, "quantizations", "model", problems, 1, 32, 64).orEmpty()
+        val architectures = requiredStringList(obj, "architectures", "model", problems, 1, 32, 64).orEmpty()
+        val quantizations = requiredStringList(obj, "quantizations", "model", problems, 1, 32, 64).orEmpty()
         val sha256 = text(obj, "sha256", "model", problems, 64)?.also {
             if (!SHA256_PATTERN.matches(it)) problems += "model.sha256: expected 64 lowercase hex characters"
         }
@@ -629,6 +630,77 @@ private object RecipeDocuments {
             .forEach { problems += "$path.$it: unknown field" }
     }
 
+    /**
+     * A field a document must carry. Identity is not optional: a recipe with no maintainer, date,
+     * or schema version is not something to interpret generously, and the parser would otherwise
+     * reach a non-null assertion with nothing to assert.
+     */
+    private fun requiredText(
+        obj: JSONObject,
+        key: String,
+        path: String,
+        problems: MutableList<String>,
+        maxLength: Int,
+    ): String? {
+        if (!obj.has(key) || obj.isNull(key)) {
+            problems += "$path.$key: required"
+            return null
+        }
+        return text(obj, key, path, problems, maxLength)
+    }
+
+    /** A bounded integer a document must carry; absent is named as required, not silently zero. */
+    private fun requiredIntIn(
+        obj: JSONObject,
+        key: String,
+        path: String,
+        problems: MutableList<String>,
+        min: Int,
+        max: Int,
+    ): Int? {
+        if (!obj.has(key) || obj.isNull(key)) {
+            problems += "$path.$key: required"
+            return null
+        }
+        return intIn(obj, key, path, problems, min, max)
+    }
+
+    /**
+     * A list a document must carry and that must not be empty: an empty engine-commit or model list
+     * can never match anything, so accepting it would be accepting a recipe that cannot apply.
+     */
+    private fun requiredStringList(
+        obj: JSONObject,
+        key: String,
+        path: String,
+        problems: MutableList<String>,
+        minSize: Int,
+        maxSize: Int,
+        maxEntryLength: Int,
+    ): List<String>? {
+        if (!obj.has(key) || obj.isNull(key)) {
+            problems += "$path.$key: required"
+            return null
+        }
+        return stringList(obj, key, path, problems, minSize, maxSize, maxEntryLength)
+    }
+
+    /** An enum value a document must carry; absent is named as required rather than defaulted. */
+    private fun <T> requiredEnumOf(
+        obj: JSONObject,
+        key: String,
+        path: String,
+        problems: MutableList<String>,
+        entries: List<T>,
+        wire: (T) -> String,
+    ): T? {
+        if (!obj.has(key) || obj.isNull(key)) {
+            problems += "$path.$key: required"
+            return null
+        }
+        return enumOf(obj, key, path, problems, entries, wire)
+    }
+
     /** Like [text], but accepts "" — for fields where empty is a value (the CPU mask). */
     private fun textAllowingBlank(
         obj: JSONObject,
@@ -736,12 +808,13 @@ private object RecipeDocuments {
     ): Double? {
         if (!obj.has(key) || obj.isNull(key)) return null
         val value = obj.get(key)
-        if (value !is Number && value !is String) {
+        // Numbers only: a quoted "1.0" is a different document from 1.0, and the schema says so too.
+        if (value !is Number) {
             problems += "$path.$key: expected a number"
             return null
         }
-        val asDouble = runCatching { value.toString().toDouble() }.getOrNull()
-        if (asDouble == null || !asDouble.isFinite()) {
+        val asDouble = value.toDouble()
+        if (!asDouble.isFinite()) {
             problems += "$path.$key: expected a finite number"
             return null
         }

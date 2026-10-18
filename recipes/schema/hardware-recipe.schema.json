@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/KuRue/bram-hardware-recipes/main/schema/hardware-recipe.schema.json",
+  "title": "Bram hardware recipe",
+  "description": "Measured settings for one device, engine build, and model. The declared properties are the entire vocabulary: every object refuses unknown fields, so a document cannot carry a prompt, a script, a URL, a permission, or a way past Bram's CPU agreement gate. Bram's own parser (core:domain HardwareRecipe) implements the same rules, and both are exercised against the same fixture corpus in recipes/fixtures.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "id",
+    "version",
+    "maintainer",
+    "evidenceDate",
+    "match",
+    "runtime",
+    "model",
+    "workload",
+    "proposal",
+    "evidence",
+    "limits"
+  ],
+  "properties": {
+    "schema": {
+      "const": "bram.hardware-recipe"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/recipeId"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "maintainer": {
+      "$ref": "#/$defs/shortText"
+    },
+    "evidenceDate": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "The day the evidence was measured (yyyy-MM-dd)."
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which phones the recipe is for. Every condition must hold, and a chip the recipe never names means the recipe does not apply at all.",
+      "anyOf": [
+        {
+          "required": [
+            "models"
+          ]
+        },
+        {
+          "required": [
+            "socs"
+          ]
+        }
+      ],
+      "properties": {
+        "manufacturers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/aliasText"
+          }
+        },
+        "models": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/aliasText"
+          }
+        },
+        "socs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/aliasText"
+          }
+        },
+        "requireCpuFeatures": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "enum": [
+              "fp16",
+              "dotprod",
+              "i8mm",
+              "bf16",
+              "sve"
+            ]
+          }
+        },
+        "minAndroidApi": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the evidence is valid for.",
+      "required": [
+        "engineCommits",
+        "settingsSchemaVersion",
+        "availableBackends"
+      ],
+      "properties": {
+        "engineCommits": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/engineCommit"
+          }
+        },
+        "settingsSchemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "availableBackends": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/backend"
+          }
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which models the settings were measured for. The hash names the exact file the evidence came from.",
+      "required": [
+        "architectures",
+        "quantizations"
+      ],
+      "properties": {
+        "architectures": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/aliasText"
+          }
+        },
+        "quantizations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/aliasText"
+          }
+        },
+        "sha256": {
+          "$ref": "#/$defs/hex64"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minContextTokens": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 1048576
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The workload the numbers were taken under.",
+      "properties": {
+        "promptTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "decodeTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "contextDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "preference": {
+          "enum": [
+            "chat",
+            "long_context"
+          ]
+        }
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Settings to try, as a diff: an absent field means leave that setting alone. Only settings Bram already offers can be named, each bounded.",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/backend"
+        },
+        "contextTokens": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 1048576
+        },
+        "threads": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "decodeThreads": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "cpuMask": {
+          "$ref": "#/$defs/hexMask"
+        },
+        "poll": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 100
+        },
+        "flashAttention": {
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ]
+        },
+        "kvCache": {
+          "enum": [
+            "f16",
+            "q8_0"
+          ]
+        },
+        "loadMode": {
+          "enum": [
+            "auto",
+            "mmap",
+            "no_mmap"
+          ]
+        },
+        "batchTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "ubatchTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "threadPriority": {
+          "enum": [
+            "normal",
+            "high"
+          ]
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The numbers, with the method that produced them. An absent field means not measured; it is never read as zero.",
+      "properties": {
+        "method": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "agreement": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "promptTokPerSec": {
+          "$ref": "#/$defs/rate"
+        },
+        "promptSpread": {
+          "$ref": "#/$defs/rate"
+        },
+        "decodeTokPerSec": {
+          "$ref": "#/$defs/rate"
+        },
+        "decodeSpread": {
+          "$ref": "#/$defs/rate"
+        },
+        "depthDecodeTokPerSec": {
+          "$ref": "#/$defs/rate"
+        },
+        "depthDecodeSpread": {
+          "$ref": "#/$defs/rate"
+        },
+        "batteryCelsiusStart": {
+          "$ref": "#/$defs/celsius"
+        },
+        "batteryCelsiusEnd": {
+          "$ref": "#/$defs/celsius"
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "When the recipe stops being trusted, and what the maintainer already found broken.",
+      "properties": {
+        "expiresAfterDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "revalidateOn": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "enum": [
+              "engine_commit",
+              "model_hash",
+              "settings_schema"
+            ]
+          }
+        },
+        "incompatible": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "recipeId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]{2,120}$"
+    },
+    "shortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "aliasText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hexMask": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{0,16}$"
+    },
+    "engineCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{7,40}$"
+    },
+    "backend": {
+      "enum": [
+        "cpu",
+        "vulkan",
+        "opencl",
+        "hexagon"
+      ]
+    },
+    "rate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "celsius": {
+      "type": "number",
+      "minimum": -40,
+      "maximum": 120
+    }
+  }
+}

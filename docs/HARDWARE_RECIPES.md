@@ -144,11 +144,21 @@ source/revision/hash provenance independently of the source cache; removing a so
 remove that provenance. These regression fixtures establish local correctness agreement and timing;
 they do not establish general model quality or a universal speed claim.
 
+## Writing a recipe
+
+The JSON Schemas, a fixture corpus, and the checker live in [`recipes/`](../recipes/README.md):
+`python3 recipes/validate.py` checks the schemas against the corpus and against the snapshot the app
+ships, and takes a single file so a contributor can check one before opening a pull request. Bram's
+parser is checked against the same corpus in `RecipeFixtureCorpusTest`, so the two cannot drift
+apart quietly. [recipes/CONTRIBUTING.md](../recipes/CONTRIBUTING.md) has the measurement and evidence
+rules, and where in the app each value comes from.
+
 ## Not implemented yet
 
-The format, matcher, bundled snapshot, source cache, review screen, and rollback are in place;
-these are not:
+The format, matcher, bundled snapshot, source cache, review screen, rollback, local validation, the
+schemas, and the fixture corpus are in place; these are not:
 
 - signed network indexes, pinned verification keys, and key-change review;
 - evidence upload;
-- the public recipe repository, its JSON Schema, contribution template, and fixtures.
+- the public recipe repository itself — the owner creates it, and `recipes/` is the content that
+  moves into it.
