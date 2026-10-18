@@ -122,8 +122,10 @@ class LlamaCppServiceClient(context: Context) : Closeable {
         JSONObject(requireService().referenceDecode(tokenCount, padTokens))
     }
 
-    suspend fun teacherForced(forcedTokens: IntArray, padTokens: Int = 0): JSONObject = withContext(Dispatchers.IO) {
-        JSONObject(requireService().teacherForced(forcedTokens, padTokens))
+    suspend fun teacherForced(forcedTokens: IntArray, padTokens: Int = 0, useProfileThreads: Boolean = false): JSONObject = withContext(Dispatchers.IO) {
+        val service = requireService()
+        JSONObject(if (useProfileThreads) service.teacherForcedProfile(forcedTokens, padTokens)
+            else service.teacherForced(forcedTokens, padTokens))
     }
 
     private fun JSONObject.toReasoningFormat(): ReasoningFormat {

@@ -115,7 +115,7 @@ enum class RecipeCpuFeature(val wire: String) {
 enum class RecipeBackend(val wire: String, val profileId: String) {
     CPU("cpu", ""),
     VULKAN("vulkan", "VULKAN"),
-    OPENCL("opencl", "GPUOpenCL"),
+    OPENCL("opencl", "OPENCL"),
     HEXAGON("hexagon", "HEXAGON"),
     ;
 

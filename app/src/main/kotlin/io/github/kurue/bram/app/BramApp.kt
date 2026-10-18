@@ -445,6 +445,8 @@ fun BramApp(viewModel: MainViewModel) {
                                 onDismissReview = viewModel::dismissRecipeSourceReview,
                                 onRollback = viewModel::rollbackRecipeSource,
                                 onRemove = viewModel::removeRecipeSource,
+                                applicationState = state,
+                                onValidate = viewModel::validateRecipe,
                             )
                             AppPanel.CAPABILITIES -> CapabilitiesScreen(
                                 state = state,

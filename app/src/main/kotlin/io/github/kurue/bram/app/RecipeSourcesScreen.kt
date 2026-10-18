@@ -22,6 +22,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import io.github.kurue.bram.core.domain.RecipeFidelity
+import io.github.kurue.bram.core.domain.RecipeVerdict
 
 @Composable
 internal fun RecipeSourcesScreen(
@@ -32,6 +34,8 @@ internal fun RecipeSourcesScreen(
     onDismissReview: () -> Unit,
     onRollback: (String) -> Unit,
     onRemove: (String) -> Unit,
+    applicationState: AppUiState? = null,
+    onValidate: (String, String) -> Unit = { _, _ -> },
 ) {
     var url by rememberSaveable { mutableStateOf("") }
     var removing by rememberSaveable { mutableStateOf<String?>(null) }
@@ -43,7 +47,7 @@ internal fun RecipeSourcesScreen(
         PanelHandle()
         DestinationHeader("Recipe sources", "Settings", onBack)
         Text("Snapshots suggest measured settings. Local validation is required before settings can be applied.")
-        Text("Applying recipes is not available in this build.", style = MaterialTheme.typography.bodySmall)
+        applicationState?.let { RecipeMatchesSection(it, onValidate) }
         state.error?.let { ErrorCard(it) }
         state.message?.let { Text(it) }
         state.bundled?.let { snapshot ->
@@ -101,6 +105,64 @@ internal fun RecipeSourcesScreen(
             },
             dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } },
         )
+    }
+}
+
+@Composable
+internal fun RecipeMatchesSection(state: AppUiState, onValidate: (String, String) -> Unit) {
+    var chosenId by rememberSaveable { mutableStateOf<String?>(null) }
+    val profile = state.profiles.firstOrNull { it.id == chosenId }
+        ?: state.profiles.firstOrNull { it.id == state.activeProfileId } ?: state.profiles.firstOrNull()
+    Text("Local configuration", style = MaterialTheme.typography.titleMedium)
+    if (profile == null) {
+        Text("Add a local GGUF model to find recipes for its profile.", style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    state.profiles.forEach { candidate ->
+        TextButton(onClick = { chosenId = candidate.id }, modifier = Modifier.testTag("recipe-profile-${candidate.id}")) {
+            Text(if (candidate.id == profile.id) "✓ ${candidate.name}" else candidate.name)
+        }
+    }
+    if (profile.recipeProvenance.isNotBlank()) {
+        Text("Last validated recipe: ${profile.recipeProvenance}", style = MaterialTheme.typography.bodySmall)
+    }
+    val previews = recipePreviews(state, profile.id)
+    if (previews.isEmpty()) Text("No accepted recipe matches this phone and model.", modifier = Modifier.testTag("recipe-no-matches"))
+    previews.forEach { preview ->
+        GlassSurface(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(preview.candidate.recipe.id, style = MaterialTheme.typography.titleSmall)
+                Text("${preview.sourceName} · ${preview.revision} · ${if (preview.official) "Bundled" else "External"}")
+                Text(if (preview.candidate.fidelity == RecipeFidelity.EXACT) "Exact match · local validation still required" else "Compatible seed · local validation required")
+                preview.candidate.reasons.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                Text("Evidence: ${preview.candidate.recipe.evidenceDate}", style = MaterialTheme.typography.bodySmall)
+                preview.candidate.changes.forEach { change -> Text("${change.label}: ${change.from} → ${change.to}") }
+                preview.candidate.recipe.limits.incompatible.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                preview.record?.let { record ->
+                    val label = when (record.verdict) {
+                        RecipeVerdict.REJECTED -> "Excluded for this device, build, model and settings"
+                        RecipeVerdict.KEPT -> "Current settings kept"
+                        RecipeVerdict.INTERRUPTED -> "Interrupted"
+                        RecipeVerdict.CHECKING -> "Checking"
+                        RecipeVerdict.APPLIED -> "Applied after local validation"
+                    }
+                    Text("$label: ${record.detail}", modifier = Modifier.testTag("recipe-validation-record"))
+                    if (record.incumbentMillis > 0 && record.proposedMillis > 0) {
+                        Text("Paired replay time: ${record.incumbentMillis} → ${record.proposedMillis} ms in total", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                preview.blocked?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                Text("Checks full CPU agreement, paired speed, and the proposed context within 10 minutes. Cancel keeps the current profile.", style = MaterialTheme.typography.bodySmall)
+                Button(
+                    onClick = { onValidate(profile.id, preview.key) },
+                    enabled = preview.blocked == null && !state.recipeSources.busy &&
+                        !state.isGenerating && !state.isLoadingModel && !state.isLoadingLiteRt &&
+                        !state.isValidatingAccelerator && state.benchmarkingProfileId == null &&
+                        state.autoConfigure?.finished != false,
+                    modifier = Modifier.testTag("recipe-validate"),
+                ) { Text(if (preview.record?.verdict == RecipeVerdict.REJECTED) "Retry validation and apply if faster" else "Validate and apply if faster") }
+            }
+        }
     }
 }
 

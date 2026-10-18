@@ -209,6 +209,7 @@ class ModelProfileStore(context: Context) {
             },
         )
         .put("measuredFingerprint", measuredFingerprint)
+        .put("recipeProvenance", recipeProvenance)
         .put("isDefault", isDefault)
 
     private fun JSONObject.toProfile(): ModelProfile {
@@ -301,6 +302,7 @@ class ModelProfileStore(context: Context) {
                 }
             }.orEmpty(),
             measuredFingerprint = optString("measuredFingerprint"),
+            recipeProvenance = optString("recipeProvenance"),
             isDefault = optBoolean("isDefault"),
         )
     }

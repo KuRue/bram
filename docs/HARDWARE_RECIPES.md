@@ -25,7 +25,7 @@ trusted through the app's distribution; no network source can grant itself that 
 Trust in this version means **explicitly accepting those snapshot bytes**. The SHA-256 pin checks
 integrity, not publisher identity. Signed network indexes, verification keys, and key-rotation review
 are not implemented; the app makes no signature/authorship claim. External source trust is kept
-separate from the eventual local measurement gate, and this screen cannot apply settings yet.
+separate from the local measurement gate described below.
 
 **Check for update** downloads another review. Only accepting it replaces the active pin. A failed
 download, hash/schema check, or cache write keeps the accepted snapshot. Changing a source ID or
@@ -95,9 +95,53 @@ model's architecture and quantization all match. Then it is either:
 A phone whose chip the recipe never named does not see it at all: thread counts and CPU masks are
 shaped by the SoC, so a matching device-name string is not enough to carry them.
 
-Every candidate — exact included — still has to be validated locally before its settings take
-effect, and a failed check keeps the local known-good profile. That local revalidation is
-[slice 7's remaining work](#not-implemented-yet).
+An unknown local content hash or a recipe without the measured model hash is only a seed. A
+different model size is also stated as a difference. OpenCL proposals use the profile's `OPENCL`
+backend identity; the runtime's `GPUOpenCL` device prefix is not a profile ID.
+
+## Preview and local validation
+
+The source screen's **Local configuration** section selects a local GGUF profile and lists matching
+recipes from the bundled snapshot and accepted external snapshots. A pending source review never
+supplies candidates. Each match shows its source/revision, exact-or-seed status, differences,
+evidence date, known incompatibilities, and the proposed before/after settings. Selecting **Validate
+and apply if faster** explicitly chooses that candidate; loading a source never changes a profile.
+
+Validation uses the existing tuning ownership, CPU reference, native call watches, cancellation,
+cooldown, memory gate, and 5% noise margin. Unknown runtimes, unsupported settings, unavailable
+backends, Vulkan's automatic-policy exclusion, unavailable cores, out-of-range context/batches, and
+settings that would be silently sanitized are refused before loading. Split GGUFs are not offered
+for validation until the app has an identity for the complete multipart content. Expert-streaming
+profiles are not yet supported by this validator.
+
+The local measurement uses Bram's fixed 24-token CPU reference and teacher-forced replay. Padding
+starts at the recipe's context depth, limited to the context both profiles support with a 256-token
+reserve. Kernels warm up before recorded timing. Profile replays attach the same tuned threadpools
+and prompt/decode thread counts as chat;
+the fixed CPU reference keeps its own thread settings. The replay reports those counts and whether
+the custom pool was applied; ignored threadpool settings cannot pass validation. Two pairs run in
+reversed order. Every replay must return the complete CPU sequence and pass the existing 90% agreement
+threshold; a matching short prefix cannot pass. Prompt plus decode time must beat the incumbent by
+more than 5% **in both pairs**. A final replay must also pass agreement near the proposed context
+limit, against a CPU reference at that depth. The timing total shown is for those local paired
+replays; the published pp512/tg128 benchmark numbers remain separate evidence.
+
+The pass stops within the existing ten-minute bound and can be cancelled. A native hang uses the
+existing inference-process restart path. Thermal drift or memory pressure interrupts the comparison
+instead of granting a win. No profile settings are written during measurement. Before committing,
+the source pin, device/runtime fingerprint, and saved profile are checked again. Only a fully
+validated winner is saved; the short persistence step disables cancellation. The original loaded
+profile is restored after a normal finish; cancellation/failure reports when a reload is required.
+
+Failures, inconclusive speed, and interrupted runs keep the incumbent. Device-local results are
+bounded to 128 records and 256 KiB, keyed by source and recipe hashes, exact model content,
+device/OS/driver/app/engine fingerprint, settings combinations, and validation-method version.
+An excluded recipe has an explicit **Retry validation** action; changing any key ingredient leaves
+the old exclusion behind. Process recovery marks an unfinished check Interrupted and never grants
+approval from it. Even a previous pass is measured again when requested. Applied profiles retain
+source/revision/hash provenance independently of the source cache; removing a source does not
+remove that provenance. These regression fixtures establish local correctness agreement and timing;
+they do not establish general model quality or a universal speed claim.
 
 ## Not implemented yet
 
@@ -105,8 +149,5 @@ The format, matcher, bundled snapshot, source cache, review screen, and rollback
 these are not:
 
 - signed network indexes, pinned verification keys, and key-change review;
-- local revalidation before a proposal is applied, and the device-local exclusion recorded when it
-  fails;
-- profile-specific matching and before/after proposals in the settings screen;
 - evidence upload;
 - the public recipe repository, its JSON Schema, contribution template, and fixtures.

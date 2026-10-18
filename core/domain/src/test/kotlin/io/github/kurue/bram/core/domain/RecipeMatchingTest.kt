@@ -149,11 +149,9 @@ class RecipeMatchingTest {
     }
 
     @Test
-    fun `an unhashed local file matches on shape, and stays exact`() {
-        // The app only hashes when it has to; a recipe whose evidence names the file still applies
-        // when the local copy is the right size and shape.
+    fun `an unhashed local file matches on shape but is only a seed`() {
         val candidate = candidates(model = lfm.copy(sha256 = null)).single()
-        assertEquals(RecipeFidelity.EXACT, candidate.fidelity)
+        assertEquals(RecipeFidelity.SEED, candidate.fidelity)
     }
 
     @Test
