@@ -104,15 +104,17 @@ class HttpsRecipeDownloadTest {
         val assets = File("src/main/assets/hardware-recipes/official-v1")
         val directory = java.nio.file.Files.createTempDirectory("recipe-https-test").toFile()
         val requests = mutableListOf<String>()
+        val signer = RecipeTestSigner()
         try {
             val store = RecipeSources(directory, { File(assets, it).readBytes() }, HttpsRecipeDownload { url ->
                 requests += url
-                Connection(body = File(assets, java.net.URI(url).path.substringAfterLast('/')).readBytes())
+                Connection(body = if (url.endsWith("/index.signature.json")) signer.sign(File(assets, "index.json").readBytes())
+                    else File(assets, java.net.URI(url).path.substringAfterLast('/')).readBytes())
             })
             val review = store.review("https://example.org/snapshot/index.json")
-            assertEquals(2, requests.size)
+            assertEquals(3, requests.size)
             assertTrue(requests.last().endsWith("-cpu.json"))
-            store.accept(review)
+            store.accept(review, review.snapshot.signature!!.fingerprint)
             assertEquals(review.snapshot.pin, store.sources().single().current.pin)
         } finally {
             directory.deleteRecursively()

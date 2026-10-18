@@ -69,10 +69,16 @@ class RecipeNativeReplayOnDeviceTest {
             put("recipes", JSONArray().put(JSONObject().put("id", "native-fixture-batch").put("version", 1)
                 .put("file", "recipe.json").put("sha256", digest)))
         }.toString().toByteArray()
+        val signer = RecipeTestSigner()
         val reviewed = RecipeSources(File(app.filesDir, "recipe-sources"), { name ->
             app.assets.open("hardware-recipes/official-v1/$name").use { it.readBytes() }
-        }, RecipeDownload { url, _, _ -> if (url.endsWith("/index.json")) index else fixture })
-        reviewed.accept(reviewed.review(sourceUrl))
+        }, RecipeDownload { url, _, _ -> when {
+            url.endsWith("/index.json") -> index
+            url.endsWith("/index.signature.json") -> signer.sign(index)
+            else -> fixture
+        } })
+        val review = reviewed.review(sourceUrl)
+        reviewed.accept(review, review.snapshot.signature!!.fingerprint)
         val holder = ViewModelStore()
         lateinit var vm: MainViewModel
         try {

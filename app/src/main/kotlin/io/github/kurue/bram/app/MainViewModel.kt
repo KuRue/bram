@@ -4862,11 +4862,11 @@ class MainViewModel(
         }
     }
 
-    fun acceptRecipeSource() {
+    fun acceptRecipeSource(approvedKeyFingerprint: String? = null) {
         val review = mutableState.value.recipeSources.review ?: return
         recipeSourceAction {
-            container.recipeSources.accept(review)
-            container.recipeSources.load().copy(message = "Snapshot pinned and available offline")
+            container.recipeSources.accept(review, approvedKeyFingerprint)
+            container.recipeSources.load().copy(message = "Signing key and snapshot pinned · available offline")
         }
     }
 

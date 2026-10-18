@@ -82,9 +82,11 @@ data class RecipePreview(
     val proposed: ModelProfile,
     val blocked: String?,
     val record: RecipeValidationRecord?,
+    val signingKeyFingerprint: String? = null,
 ) {
     val provenance: String get() = "${if (official) "Bundled" else "External"}: $sourceName ($sourceId), $origin, revision $revision, index SHA-256 $snapshotPin; " +
-        "recipe ${candidate.recipe.id} v${candidate.recipe.version}, SHA-256 $recipeHash"
+        "recipe ${candidate.recipe.id} v${candidate.recipe.version}, SHA-256 $recipeHash" +
+        (signingKeyFingerprint?.let { "; signing key SHA-256 $it" } ?: "")
 }
 
 /** Only accepted/current snapshots participate. An unaccepted review never suggests live settings. */
@@ -99,7 +101,7 @@ fun recipePreviews(state: AppUiState, profileId: String): List<RecipePreview> {
         RecipeMatcher.candidates(snapshot.recipes, device, modelIdentity, profile).map { candidate ->
             val proposed = candidate.recipe.proposal.applyTo(profile)
             val digest = snapshot.index.recipes.first { it.id == candidate.recipe.id }.sha256
-            val key = recipeSha256(listOf(origin, snapshot.index.source.kind.wire, snapshot.pin, digest, model.sha256, state.measurementFingerprint,
+            val key = recipeSha256(listOf(origin, snapshot.index.source.kind.wire, snapshot.pin, snapshot.signature?.fingerprint.orEmpty(), digest, model.sha256, state.measurementFingerprint,
                 profile.recipeConfigurationIdentity(), proposed.recipeConfigurationIdentity(), "recipe-check-v1")
                 .joinToString("\n").toByteArray(Charsets.UTF_8))
             val blocked = when {
@@ -112,7 +114,7 @@ fun recipePreviews(state: AppUiState, profileId: String): List<RecipePreview> {
             }
             RecipePreview(key, snapshot.index.source.name, snapshot.index.source.id, origin, snapshot.index.revision,
                 snapshot.pin, digest, snapshot.index.source.kind == RecipeSourceKind.OFFICIAL,
-                candidate, proposed, blocked, state.recipeValidationRecords.firstOrNull { it.key == key })
+                candidate, proposed, blocked, state.recipeValidationRecords.firstOrNull { it.key == key }, snapshot.signature?.fingerprint)
         }
     }.sortedWith(compareBy<RecipePreview>({ it.candidate.fidelity != RecipeFidelity.EXACT }, { !it.official }, { it.candidate.recipe.id }))
 }

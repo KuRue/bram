@@ -16,6 +16,7 @@ class RecipeSourcesTest {
     private val recipeFile = JSONObject(index).getJSONArray("recipes").getJSONObject(0).getString("file")
     private var recipe = File(assets, recipeFile).readBytes()
     private var offline = false
+    private val signer = RecipeTestSigner()
     private val requests = mutableListOf<String>()
     private val url = "https://recipes.example/snapshot/index.json"
 
@@ -25,9 +26,15 @@ class RecipeSourcesTest {
         RecipeDownload { request, _, _ ->
             requests += request
             if (offline) throw IOException("offline")
-            if (request.endsWith("/index.json")) index.toByteArray() else recipe
+            when {
+                request.endsWith("/index.json") -> index.toByteArray()
+                request.endsWith("/index.signature.json") -> signer.sign(index.toByteArray())
+                else -> recipe
+            }
         },
     )
+
+    private fun accept(store: RecipeSources, review: RecipeSourceReview) { store.accept(review, review.snapshot.signature!!.fingerprint) }
 
     private fun revision(value: String) { index = JSONObject(index).put("revision", value).toString() }
     private fun refused(message: String, action: () -> Unit) {
@@ -42,8 +49,8 @@ class RecipeSourcesTest {
         val review = store.review(url)
         assertTrue(store.sources().isEmpty())
         assertEquals(RecipeSourceKind.EXTERNAL, review.snapshot.index.source.kind)
-        assertEquals(listOf(url, "https://recipes.example/snapshot/$recipeFile"), requests)
-        store.accept(review)
+        assertEquals(listOf(url, "https://recipes.example/snapshot/index.signature.json", "https://recipes.example/snapshot/$recipeFile"), requests)
+        accept(store, review)
         assertEquals(review.snapshot.pin, store.sources().single().current.pin)
     }
 
@@ -51,11 +58,11 @@ class RecipeSourcesTest {
         val directory = temporary.newFolder()
         val store = manager(directory)
         val first = store.review(url)
-        store.accept(first)
+        accept(store, first)
         revision("next")
         val second = store.review(url)
         assertEquals(first.snapshot.pin, store.sources().single().current.pin)
-        store.accept(second)
+        accept(store, second)
         offline = true
         requests.clear()
         val restarted = manager(directory)
@@ -69,9 +76,9 @@ class RecipeSourcesTest {
 
     @Test fun `failed refresh preserves both pin and rollback`() {
         val store = manager()
-        store.accept(store.review(url))
+        accept(store, store.review(url))
         revision("next")
-        store.accept(store.review(url))
+        accept(store, store.review(url))
         val before = store.sources()
         recipe = "tampered".toByteArray()
         refused("hash mismatch") { store.review(url) }
@@ -83,7 +90,7 @@ class RecipeSourcesTest {
 
     @Test fun `revision and source identity cannot be silently rewritten`() {
         val store = manager()
-        store.accept(store.review(url))
+        accept(store, store.review(url))
         val original = index
         index = JSONObject(index).put("generatedAt", "2026-10-18").toString()
         refused("reused revision") { store.review(url) }
@@ -97,24 +104,24 @@ class RecipeSourcesTest {
         val store = manager()
         val first = store.review(url)
         revision("next")
-        store.accept(store.review(url))
-        refused("changed since review") { store.accept(first) }
+        accept(store, store.review(url))
+        refused("changed since review") { accept(store, first) }
         assertEquals("next", store.sources().single().current.index.revision)
     }
 
     @Test fun `identical refresh preserves previous snapshot`() {
         val store = manager()
-        store.accept(store.review(url))
+        accept(store, store.review(url))
         revision("next")
-        store.accept(store.review(url))
+        accept(store, store.review(url))
         val before = store.sources()
-        store.accept(store.review(url))
+        accept(store, store.review(url))
         assertEquals(before, store.sources())
     }
 
     @Test fun `source removal cannot affect bundled recipes`() {
         val store = manager()
-        store.accept(store.review(url))
+        accept(store, store.review(url))
         store.remove(url)
         assertTrue(store.sources().isEmpty())
         assertEquals(1, store.bundled().recipes.size)
@@ -122,7 +129,7 @@ class RecipeSourcesTest {
 
     @Test fun `too many sources are refused before making a request`() {
         val store = manager()
-        repeat(8) { number -> store.accept(store.review("https://recipes.example/$number/index.json")) }
+        repeat(8) { number -> accept(store, store.review("https://recipes.example/$number/index.json")) }
         requests.clear()
         refused("At most 8") { store.review("https://recipes.example/extra/index.json") }
         assertTrue(requests.isEmpty())
@@ -136,7 +143,7 @@ class RecipeSourcesTest {
             index = obj.toString()
             requests.clear()
             assertTrue("must refuse $file", runCatching { store.review(url) }.isFailure)
-            assertEquals(listOf(url), requests)
+            assertEquals(listOf(url, "https://recipes.example/snapshot/index.signature.json"), requests)
         }
     }
 
@@ -171,8 +178,8 @@ class RecipeSourcesTest {
     @Test fun `corrupt cached source is reported without hiding other sources or bundle`() {
         val directory = temporary.newFolder()
         val store = manager(directory)
-        store.accept(store.review(url))
-        store.accept(store.review("https://recipes.example/other/index.json"))
+        accept(store, store.review(url))
+        accept(store, store.review("https://recipes.example/other/index.json"))
         val file = directory.listFiles()!!.first()
         file.writeText("corrupted")
         val loaded = store.load()
@@ -185,7 +192,7 @@ class RecipeSourcesTest {
     @Test fun `cached index bytes are rechecked on restart`() {
         val directory = temporary.newFolder()
         val store = manager(directory)
-        store.accept(store.review(url))
+        accept(store, store.review(url))
         val file = directory.listFiles()!!.single()
         val obj = JSONObject(file.readText())
         val current = obj.getJSONObject("current")
