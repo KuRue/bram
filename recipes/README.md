@@ -23,6 +23,13 @@ python3 recipes/validate.py path/to/recipe.json   # one document, for a contribu
 
 It needs `jsonschema` (`pip install jsonschema`). CI runs the first form on every change.
 
+## Publishing a source
+
+The app downloads a network source only with a detached `index.signature.json` beside `index.json`,
+signed over the final index bytes with the publisher's P-256 key. Sign after the last edit to the
+index; [`tools/recipe-signing`](../tools/recipe-signing/README.md) has the helper, the format, and how
+users check the key fingerprint. The schemas stay unchanged: the signature is a separate file.
+
 ## Why there are two implementations, and one corpus
 
 Bram enforces the format in Kotlin (`core:domain`, `HardwareRecipe`), because that is what reads an
