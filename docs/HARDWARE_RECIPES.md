@@ -16,31 +16,49 @@ for a GitHub repository with an index at its root. GitHub shorthand uses the raw
 immutable commit. To change that commit, add the new URL as a separate source; an existing generic
 HTTPS URL can publish a new revision at the same location.
 
-**Download for review** checks every document's schema, hash, recipe ID, and version. It does not
-activate anything. Review the source URL, revision, index SHA-256, device/model conditions, settings,
-maintainer, and evidence before choosing **Trust and pin snapshot**. Every user-added source is
-labelled external, including one whose index declares itself official. The bundled snapshot is
-trusted through the app's distribution; no network source can grant itself that status.
+**Download for review** verifies the detached `index.signature.json`, then every document's schema,
+hash, recipe ID, and version. It does not activate anything. New sources show the signing key's
+SHA-256 fingerprint. Compare it with the publisher through a separately trusted channel, tick the
+key approval, then choose **Trust key and pin snapshot**. A valid first signature establishes
+control of a key; it does not independently identify its owner. Review the source URL, revision,
+index hash, device/model conditions, proposal and evidence as well.
 
-Trust in this version means **explicitly accepting those snapshot bytes**. The SHA-256 pin checks
-integrity, not publisher identity. Signed network indexes, verification keys, and key-rotation review
-are not implemented; the app makes no signature/authorship claim. External source trust is kept
-separate from the local measurement gate described below.
+The app pins a P-256 public key and the accepted snapshot in one atomic cache update. A same-key
+update verifies its signature and still needs snapshot review. A different key shows both old and
+new fingerprints and **Signing key changed**; **Replace key and pin snapshot** stays disabled until
+that new key is explicitly approved. This also applies if the index bytes are unchanged. Failed,
+missing, or unsupported signatures never fall back to unsigned downloads. A validly signed index
+whose `generatedAt` is older than the pinned snapshot is refused as a replay; going back uses
+**Restore revision**. Every user-added source
+is labelled external, including one whose index declares itself official. The bundle is trusted
+through the app distribution, and a network signature cannot grant that status.
+
+The detached proof signs a domain-separated exact index byte sequence; its recipe hashes bind all
+recipe documents. See [the signing protocol and publisher helper](../tools/recipe-signing/README.md)
+for the format, supported key encoding, signing command, and fingerprint calculation. Signed source
+trust remains separate from local configuration validation: a signature cannot bypass that gate.
 
 **Check for update** downloads another review. Only accepting it replaces the active pin. A failed
 download, hash/schema check, or cache write keeps the accepted snapshot. Changing a source ID or
 reusing a currently cached revision for different bytes is refused. Approving an old review cannot
-overwrite a source that changed since the review was downloaded.
+overwrite a source that changed since the review was downloaded, including a rollback, key change,
+or removal and re-addition at the same content hash.
 
-Accepted sources are available offline after restart. The app retains the current and previous
-accepted snapshots; **Restore revision** swaps them without making a network request. Removing a
+Accepted sources are available offline after restart, with cached signatures reverified. The app
+retains the current and previous accepted snapshots; **Restore revision** swaps them without a
+network request only when both use the current pinned signing key. After a key replacement,
+restoring a snapshot under the old key is disabled: that key needs a fresh explicit review.
+Legacy unsigned caches remain readable offline and are labelled unsigned. Their next download
+must be signed and needs first-key approval; accepting it upgrades the cache without changing
+profiles. Unsigned legacy snapshots cannot be restored after that upgrade. Removing a
 source confirms removal of its cached suggestions; it does not edit profiles or bundled recipes.
 A corrupt cache is reported separately, so healthy sources and the bundled snapshot stay visible.
 Review drafts are held in memory and are never implicitly accepted after restart.
 
 Downloads accept HTTPS only, no credentials/query/fragment, and no nonstandard port. Redirects are
 refused. Recipe files must be plain JSON filenames beside the index, without paths or escaped URL
-characters. Limits are 256 KiB per index, 64 KiB per recipe, 16 recipes and 1 MiB per snapshot,
+characters. Limits are 256 KiB per index, 4 KiB per detached proof, 64 KiB per recipe, 16 recipes and 1 MiB
+per index plus recipe documents,
 8 external sources, and two snapshots per source. Each source is stored in one atomically replaced
 file capped at 5 MiB (including JSON encoding), bounding the accepted cache to 40 MiB. Cache writes
 sync both file contents and directory changes, including source removal. Network connect/read
@@ -146,9 +164,8 @@ they do not establish general model quality or a universal speed claim.
 
 ## Not implemented yet
 
-The format, matcher, bundled snapshot, source cache, review screen, and rollback are in place;
-these are not:
+The format, matcher, bundled snapshot, signed source cache, key review, and rollback are in
+place; these are not:
 
-- signed network indexes, pinned verification keys, and key-change review;
 - evidence upload;
 - the public recipe repository, its JSON Schema, contribution template, and fixtures.

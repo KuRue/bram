@@ -2,6 +2,7 @@ package io.github.kurue.bram.app
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -9,6 +10,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -30,7 +32,7 @@ internal fun RecipeSourcesScreen(
     state: RecipeSourcesUi,
     onBack: () -> Unit,
     onReview: (String) -> Unit,
-    onAccept: () -> Unit,
+    onAccept: (String?) -> Unit,
     onDismissReview: () -> Unit,
     onRollback: (String) -> Unit,
     onRemove: (String) -> Unit,
@@ -60,9 +62,10 @@ internal fun RecipeSourcesScreen(
                 modifier = Modifier.testTag("recipe-refresh"),
             ) { Text("Check for update") }
             source.previous?.let { previous ->
-                TextButton(onClick = { onRollback(source.url) }, enabled = !state.busy) {
+                TextButton(onClick = { onRollback(source.url) }, enabled = !state.busy && source.canRollback) {
                     Text("Restore ${previous.index.revision}")
                 }
+                if (!source.canRollback) Text("Previous snapshot uses another or unsigned key. A new key review is required to restore it.", style = MaterialTheme.typography.bodySmall)
             }
             TextButton(onClick = { removing = source.url }, enabled = !state.busy) { Text("Remove source") }
         }
@@ -83,14 +86,22 @@ internal fun RecipeSourcesScreen(
             Text("Reading source…")
         }
         state.review?.let { review ->
+            var keyApproved by rememberSaveable(review.url, review.expectedState, review.snapshot.pin, review.snapshot.signature?.publicKey) { mutableStateOf(false) }
             SourceSnapshotCard(review.snapshot, "Review · not active", review.url)
-            Text(
-                if (review.snapshot.pin == review.expectedPin) "This is the pinned snapshot; no update is needed."
-                else "Trust this snapshot only if you trust its publisher. SHA-256 checks the bytes; it does not verify the author. Every update needs review.",
-            )
+            if (review.needsKeyApproval) {
+                Text(if (review.changesKey) "Signing key changed" else "Trust a signing key", modifier = Modifier.testTag("recipe-key-review"))
+                review.expectedKey?.let { Text("Pinned key SHA-256: ${recipeSha256(java.util.Base64.getDecoder().decode(it))}", style = MaterialTheme.typography.bodySmall) }
+                Text("Compare the new key fingerprint with the publisher through a separate trusted channel. A valid signature proves control of this key; it does not independently identify its owner.", style = MaterialTheme.typography.bodySmall)
+                Row {
+                    Checkbox(checked = keyApproved, onCheckedChange = { keyApproved = it }, enabled = !state.busy,
+                        modifier = Modifier.testTag("recipe-key-approve"))
+                    Text(if (review.changesKey) "I verified and approve replacing the pinned signing key" else "I verified and trust this signing key")
+                }
+            } else Text("Signature verified with the pinned signing key. Review the snapshot changes before accepting.")
             review.expectedPin?.let { Text("Replaces pin: $it", style = MaterialTheme.typography.bodySmall) }
-            Button(onClick = onAccept, enabled = !state.busy, modifier = Modifier.testTag("recipe-source-accept")) {
-                Text(if (review.expectedPin == null) "Trust and pin snapshot" else "Pin reviewed snapshot")
+            Button(onClick = { onAccept(if (review.needsKeyApproval) review.snapshot.signature?.fingerprint else null) },
+                enabled = !state.busy && (!review.needsKeyApproval || keyApproved), modifier = Modifier.testTag("recipe-source-accept")) {
+                Text(if (review.changesKey) "Replace key and pin snapshot" else if (review.needsKeyApproval) "Trust key and pin snapshot" else "Pin reviewed snapshot")
             }
             TextButton(onClick = onDismissReview, enabled = !state.busy) { Text("Discard review") }
         }
@@ -175,6 +186,10 @@ private fun SourceSnapshotCard(snapshot: RecipeSnapshot, status: String, url: St
             Text(snapshot.index.source.name, style = MaterialTheme.typography.titleMedium)
             Text(status, style = MaterialTheme.typography.labelMedium)
             Text("Revision ${snapshot.index.revision} · ${snapshot.recipes.size} recipes")
+            if (url != null) {
+                Text(snapshot.signature?.let { "Verified signature · key SHA-256: ${it.fingerprint}" }
+                    ?: "Unsigned cached snapshot · check for update to review a signing key", style = MaterialTheme.typography.bodySmall)
+            }
             url?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             SelectionContainer { Text("SHA-256: ${snapshot.pin}", style = MaterialTheme.typography.bodySmall) }
             TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag(inspectionTag)) {

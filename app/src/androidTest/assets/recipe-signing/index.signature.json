@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "algorithm": "SHA256withECDSA",
+  "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEd71xnM6pz2rFMh6xknZYJFLrBiGz50R4PRGvHMdqCY7B1lDEmh6qpA2HKxYeZPxgr9AIjnREkSf6Qlh4qn9tpw==",
+  "signature": "MEQCIAUDhJU1jLyQO+25vHOaZBZuiq4ov6yBBF+kPfNMkm0fAiA6m75QFh389MLyK7pm3oFdSXDzbd/paZ5pHMOWoz2LuA=="
+}

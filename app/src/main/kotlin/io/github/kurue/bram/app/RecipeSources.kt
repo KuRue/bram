@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.UUID
 import javax.net.ssl.HttpsURLConnection
 
 private const val MAX_EXTERNAL_SOURCES = 8
@@ -29,6 +30,7 @@ data class RecipeSnapshot(
     val documents: Map<String, String>,
     val index: RecipeIndex,
     val recipes: List<HardwareRecipe>,
+    val signature: RecipeSignature? = null,
 ) {
     val pin: String get() = recipeSha256(indexJson.toByteArray(StandardCharsets.UTF_8))
 }
@@ -37,14 +39,23 @@ data class StoredRecipeSource(
     val url: String,
     val current: RecipeSnapshot,
     val previous: RecipeSnapshot? = null,
-)
+    val pinnedKey: String? = null,
+    val stateId: String = "",
+) {
+    val canRollback: Boolean get() = previous != null && previous.signature?.publicKey == pinnedKey
+}
 
 /** An uncommitted download, with the old pin it was reviewed against to reject stale approvals. */
 data class RecipeSourceReview(
     val url: String,
     val snapshot: RecipeSnapshot,
     val expectedPin: String?,
-)
+    val expectedKey: String? = null,
+    val expectedState: String? = null,
+) {
+    val needsKeyApproval: Boolean get() = snapshot.signature?.publicKey != expectedKey
+    val changesKey: Boolean get() = expectedKey != null && needsKeyApproval
+}
 
 data class RecipeSourcesUi(
     val bundled: RecipeSnapshot? = null,
@@ -142,10 +153,17 @@ class RecipeSources(
         require(old != null || sourceFiles().size < MAX_EXTERNAL_SOURCES) { "At most $MAX_EXTERNAL_SOURCES external sources can be cached" }
         val deadline = System.nanoTime() + 45_000_000_000L
         val indexBytes = download.read(url, io.github.kurue.bram.core.domain.MAX_RECIPE_INDEX_BYTES, deadline)
-        val snapshot = readSnapshot(indexBytes, external = true) { name ->
+        require(indexBytes.size <= io.github.kurue.bram.core.domain.MAX_RECIPE_INDEX_BYTES) { "Index is too large" }
+        val signatureBytes = download.read(URI(url).resolve(RecipeSignature.FILE_NAME).toASCIIString(), RecipeSignature.MAX_BYTES, deadline)
+        val snapshot = readSnapshot(indexBytes, external = true, signatureBytes = signatureBytes) { name ->
             require(System.nanoTime() < deadline) { "Recipe source download exceeded its 45-second budget" }
             download.read(URI(url).resolve(name).toASCIIString(), io.github.kurue.bram.core.domain.MAX_RECIPE_DOCUMENT_BYTES, deadline)
         }
+        checkUpdateIdentity(old, snapshot)
+        return RecipeSourceReview(url, snapshot, old?.current?.pin, old?.pinnedKey, old?.stateId)
+    }
+
+    private fun checkUpdateIdentity(old: StoredRecipeSource?, snapshot: RecipeSnapshot) {
         old?.let {
             require(snapshot.index.source.id == it.current.index.source.id) { "Source identity changed; add it at a separate URL and review it as a new source" }
             (listOf(it.current) + listOfNotNull(it.previous)).forEach { known ->
@@ -153,29 +171,46 @@ class RecipeSources(
                     "Source reused revision ${snapshot.index.revision} for different bytes; publish a new revision"
                 }
             }
+            // A validly signed but older index is a replay, not an update; Restore is the only way back.
+            require(snapshot.pin == it.current.pin || !generatedBefore(snapshot.index.generatedAt, it.current.index.generatedAt)) {
+                "Downloaded index (generated ${snapshot.index.generatedAt}) is older than the pinned snapshot " +
+                    "(${it.current.index.generatedAt}); accepted snapshot kept"
+            }
         }
-        return RecipeSourceReview(url, snapshot, old?.current?.pin)
     }
 
+    // Both forms are validated UTC timestamps; a date-only value compares by day.
+    private fun generatedBefore(candidate: String, pinned: String): Boolean =
+        if (candidate.length == pinned.length) candidate < pinned else candidate.take(10) < pinned.take(10)
+
     @Synchronized
-    fun accept(review: RecipeSourceReview) {
+    fun accept(review: RecipeSourceReview, approvedKeyFingerprint: String? = null) {
         val url = normalizeUrl(review.url)
         val file = fileFor(url)
         val old = file.takeIf { it.exists() }?.let(::readStored)
-        require(old?.current?.pin == review.expectedPin) { "Source changed since review; check it again" }
+        require(old?.current?.pin == review.expectedPin && old?.pinnedKey == review.expectedKey && old?.stateId == review.expectedState) {
+            "Source changed since review; check it again"
+        }
         require(old != null || sourceFiles().size < MAX_EXTERNAL_SOURCES) { "Source cache is full" }
         // Review values are in-memory data, but recheck bytes at the persistence boundary as well.
-        val snapshot = readSnapshot(review.snapshot.indexJson.toByteArray(StandardCharsets.UTF_8), true) { name ->
+        val proof = requireNotNull(review.snapshot.signature) { "A signed index is required for network sources" }
+        val snapshot = readSnapshot(review.snapshot.indexJson.toByteArray(StandardCharsets.UTF_8), true,
+            signatureBytes = proof.json().toByteArray(StandardCharsets.UTF_8)) { name ->
             review.snapshot.documents.getValue(name).toByteArray(StandardCharsets.UTF_8)
         }
-        if (snapshot.pin == old?.current?.pin) return
-        writeStored(StoredRecipeSource(url, snapshot, old?.current))
+        checkUpdateIdentity(old, snapshot)
+        if (proof.publicKey != old?.pinnedKey) {
+            require(approvedKeyFingerprint == proof.fingerprint) { "Explicit approval of this signing key fingerprint is required" }
+        }
+        if (snapshot.pin == old?.current?.pin && proof.publicKey == old?.pinnedKey) return
+        writeStored(StoredRecipeSource(url, snapshot, old?.current, proof.publicKey))
     }
 
     @Synchronized
     fun rollback(url: String) {
         val old = readStored(fileFor(normalizeUrl(url)))
         val previous = requireNotNull(old.previous) { "No previous snapshot is cached" }
+        require(old.canRollback) { "The previous snapshot uses a different or unsigned key; restoring it requires a new key review" }
         writeStored(old.copy(current = previous, previous = old.current))
     }
 
@@ -199,22 +234,33 @@ class RecipeSources(
     private fun readStored(file: File): StoredRecipeSource {
         require(file.length() in 1..MAX_CACHE_FILE_BYTES.toLong()) { "Cache file is empty or too large" }
         val obj = JSONObject(file.readText(StandardCharsets.UTF_8))
-        require(obj.getInt("version") == 1) { "Unsupported recipe cache version" }
+        val version = obj.getInt("version")
+        require(version in 1..2) { "Unsupported recipe cache version" }
         val url = normalizeUrl(obj.getString("url"))
         require(fileFor(url).name == file.name) { "Cache URL does not match its file" }
         fun snapshot(value: JSONObject): RecipeSnapshot {
             val docs = value.getJSONObject("documents")
-            return readSnapshot(value.getString("index").toByteArray(StandardCharsets.UTF_8), true) {
+            val indexBytes = value.getString("index").toByteArray(StandardCharsets.UTF_8)
+            require(recipeSha256(indexBytes) == value.getString("pin")) { "Cached index hash mismatch" }
+            val signature = if (version == 2) value.optString("signature").takeIf { it.isNotEmpty() }?.toByteArray(StandardCharsets.UTF_8) else null
+            return readSnapshot(indexBytes, true, signatureBytes = signature) {
                 docs.getString(it).toByteArray(StandardCharsets.UTF_8)
             }.also { require(it.pin == value.getString("pin")) { "Cached index hash mismatch" } }
         }
-        return StoredRecipeSource(url, snapshot(obj.getJSONObject("current")), obj.optJSONObject("previous")?.let(::snapshot))
+        val current = snapshot(obj.getJSONObject("current"))
+        val pinnedKey = if (version == 2) obj.optString("pinnedKey").takeIf { it.isNotEmpty() } else null
+        require(current.signature?.publicKey == pinnedKey) { "Cached snapshot does not match its pinned signing key" }
+        require(version != 2 || pinnedKey != null) { "Signed cache is missing its pinned signing key" }
+        return StoredRecipeSource(url, current, obj.optJSONObject("previous")?.let(::snapshot), pinnedKey,
+            if (version == 2) obj.getString("stateId").also { require(it.isNotBlank()) } else "legacy:${recipeSha256(file.readBytes())}")
     }
 
     private fun writeStored(source: StoredRecipeSource) {
         fun encode(snapshot: RecipeSnapshot): JSONObject = JSONObject()
             .put("index", snapshot.indexJson).put("documents", JSONObject(snapshot.documents)).put("pin", snapshot.pin)
-        val bytes = JSONObject().put("version", 1).put("url", source.url)
+            .apply { snapshot.signature?.let { put("signature", it.json()) } }
+        val bytes = JSONObject().put("version", if (source.pinnedKey == null) 1 else 2).put("url", source.url)
+            .put("pinnedKey", source.pinnedKey).put("stateId", UUID.randomUUID().toString())
             .put("current", encode(source.current)).apply {
                 source.previous?.let { put("previous", encode(it)) }
             }.toString().toByteArray(StandardCharsets.UTF_8)
@@ -269,9 +315,11 @@ class RecipeSources(
         internal fun readSnapshot(
             indexBytes: ByteArray,
             external: Boolean,
+            signatureBytes: ByteArray? = null,
             readDocument: (String) -> ByteArray,
         ): RecipeSnapshot {
             require(indexBytes.size <= io.github.kurue.bram.core.domain.MAX_RECIPE_INDEX_BYTES) { "Index is too large" }
+            val signature = signatureBytes?.let { RecipeSignature.verify(indexBytes, it) }
             fun decode(bytes: ByteArray): String = StandardCharsets.UTF_8.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
                 .decode(ByteBuffer.wrap(bytes)).toString()
@@ -288,6 +336,7 @@ class RecipeSources(
                 require(digest.file.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]*\\.json")) && !digest.file.contains("..")) {
                     "Recipe file must be a plain JSON filename: ${digest.file}"
                 }
+                require(digest.file !in setOf("index.json", RecipeSignature.FILE_NAME)) { "Recipe file uses a reserved index filename" }
                 val bytes = readDocument(digest.file)
                 require(bytes.size <= io.github.kurue.bram.core.domain.MAX_RECIPE_DOCUMENT_BYTES) { "Recipe is too large: ${digest.file}" }
                 size += bytes.size
@@ -303,7 +352,7 @@ class RecipeSources(
                 recipe
             }
             val index = if (external) parsed.copy(source = parsed.source.copy(kind = RecipeSourceKind.EXTERNAL)) else parsed
-            return RecipeSnapshot(indexJson, documents, index, recipes)
+            return RecipeSnapshot(indexJson, documents, index, recipes, signature)
         }
     }
 }
