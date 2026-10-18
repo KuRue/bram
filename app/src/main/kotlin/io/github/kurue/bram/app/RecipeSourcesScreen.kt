@@ -22,6 +22,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import android.content.ClipboardManager
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import io.github.kurue.bram.core.domain.ModelProfile
+import io.github.kurue.bram.core.domain.RecipeDraft
+import io.github.kurue.bram.core.domain.RecipeExport
 import io.github.kurue.bram.core.domain.RecipeFidelity
 import io.github.kurue.bram.core.domain.RecipeVerdict
 
@@ -36,8 +42,10 @@ internal fun RecipeSourcesScreen(
     onRemove: (String) -> Unit,
     applicationState: AppUiState? = null,
     onValidate: (String, String) -> Unit = { _, _ -> },
+    onSaveRecipe: (RecipeExport) -> Unit = {},
 ) {
     var url by rememberSaveable { mutableStateOf("") }
+    var chosenProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var removing by rememberSaveable { mutableStateOf<String?>(null) }
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
@@ -47,7 +55,13 @@ internal fun RecipeSourcesScreen(
         PanelHandle()
         DestinationHeader("Recipe sources", "Settings", onBack)
         Text("Snapshots suggest measured settings. Local validation is required before settings can be applied.")
-        applicationState?.let { RecipeMatchesSection(it, onValidate) }
+        applicationState?.let { app ->
+            // One profile choice serves both sections: matches to validate, and the measurement to
+            // share. They describe the same profile, so they cannot disagree about which one.
+            val chosen = exportableProfileId(app, chosenProfileId)
+            RecipeMatchesSection(app, chosen, { chosenProfileId = it }, onValidate)
+            RecipeExportSection(app, app.profiles.firstOrNull { it.id == chosen }, onSaveRecipe)
+        }
         state.error?.let { ErrorCard(it) }
         state.message?.let { Text(it) }
         state.bundled?.let { snapshot ->
@@ -109,9 +123,13 @@ internal fun RecipeSourcesScreen(
 }
 
 @Composable
-internal fun RecipeMatchesSection(state: AppUiState, onValidate: (String, String) -> Unit) {
-    var chosenId by rememberSaveable { mutableStateOf<String?>(null) }
-    val profile = state.profiles.firstOrNull { it.id == chosenId }
+internal fun RecipeMatchesSection(
+    state: AppUiState,
+    chosenProfileId: String?,
+    onChooseProfile: (String) -> Unit,
+    onValidate: (String, String) -> Unit,
+) {
+    val profile = state.profiles.firstOrNull { it.id == chosenProfileId }
         ?: state.profiles.firstOrNull { it.id == state.activeProfileId } ?: state.profiles.firstOrNull()
     Text("Local configuration", style = MaterialTheme.typography.titleMedium)
     if (profile == null) {
@@ -119,7 +137,7 @@ internal fun RecipeMatchesSection(state: AppUiState, onValidate: (String, String
         return
     }
     state.profiles.forEach { candidate ->
-        TextButton(onClick = { chosenId = candidate.id }, modifier = Modifier.testTag("recipe-profile-${candidate.id}")) {
+        TextButton(onClick = { onChooseProfile(candidate.id) }, modifier = Modifier.testTag("recipe-profile-${candidate.id}")) {
             Text(if (candidate.id == profile.id) "✓ ${candidate.name}" else candidate.name)
         }
     }
@@ -163,6 +181,70 @@ internal fun RecipeMatchesSection(state: AppUiState, onValidate: (String, String
                     modifier = Modifier.testTag("recipe-validate"),
                 ) { Text(if (preview.record?.verdict == RecipeVerdict.REJECTED) "Retry validation and apply if faster" else "Validate and apply if faster") }
             }
+        }
+    }
+}
+
+/**
+ * The other direction from a source: this phone measured something, and the person may want to
+ * publish it. Nothing is exported until they ask, and the document is shown before it is saved —
+ * including the sentence that says what is deliberately not in it.
+ */
+@Composable
+internal fun RecipeExportSection(state: AppUiState, profile: ModelProfile?, onSave: (RecipeExport) -> Unit) {
+    Text("Share this measurement", style = MaterialTheme.typography.titleMedium)
+    if (profile == null) {
+        Text("Add a local GGUF model first: a recipe describes one profile's measurement.", style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    var maintainer by rememberSaveable { mutableStateOf("") }
+    var showDocument by rememberSaveable { mutableStateOf(false) }
+    val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
+    val draft = remember(state, profile, maintainer) { recipeExportFor(state, profile.id, maintainer.trim()) }
+    OutlinedTextField(
+        value = maintainer,
+        onValueChange = { maintainer = it.take(120) },
+        label = { Text("Maintainer (your name or handle, as it should appear)") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().testTag("recipe-maintainer"),
+    )
+    when (draft) {
+        is RecipeDraft.NotReady -> Text(draft.reason, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("recipe-export-not-ready"))
+        is RecipeDraft.Ready -> {
+            val export = draft.export
+            Text(export.provenance, style = MaterialTheme.typography.bodySmall)
+            Text(
+                "This document names the device, the engine build, the model's content hash, the " +
+                    "settings and the measurements. It cannot carry a prompt, a conversation, a file " +
+                    "name, a note, or anything you typed: the export has no field for them.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = { showDocument = !showDocument }, modifier = Modifier.testTag("recipe-export-preview")) {
+                Text(if (showDocument) "Hide the document" else "Preview the document")
+            }
+            if (showDocument) {
+                GlassSurface(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SelectionContainer { Text(export.document, style = MaterialTheme.typography.bodySmall) }
+                        Text("Index entry to paste beside it:", style = MaterialTheme.typography.labelSmall)
+                        SelectionContainer { Text(export.indexEntry, style = MaterialTheme.typography.bodySmall) }
+                        SelectionContainer { Text("SHA-256 ${export.sha256}", style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
+            }
+            Button(onClick = { onSave(export) }, modifier = Modifier.testTag("recipe-export-save")) {
+                Text("Save recipe file")
+            }
+            TextButton(
+                onClick = { clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Bram recipe", export.document)) },
+                modifier = Modifier.testTag("recipe-export-copy"),
+            ) { Text("Copy JSON") }
+            Text(
+                "Add it to a recipe repository, or to your own source, with the index entry and hash above.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

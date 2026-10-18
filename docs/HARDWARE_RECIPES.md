@@ -153,12 +153,31 @@ parser is checked against the same corpus in `RecipeFixtureCorpusTest`, so the t
 apart quietly. [recipes/CONTRIBUTING.md](../recipes/CONTRIBUTING.md) has the measurement and evidence
 rules, and where in the app each value comes from.
 
+## Sharing a measurement
+
+The same screen has the other direction: **Share this measurement** turns one profile's benchmark
+into a recipe its owner can publish. Nothing leaves the phone until they ask — the section computes a
+draft, shows the document, and saves it wherever the system file picker points. The index entry and
+SHA-256 come with it, because a source needs those beside the file.
+
+What makes that safe is structural rather than a promise. The exporter reads named fields — the
+device identity, the engine commit, the model's content hash, the profile's runtime settings, and
+the benchmark — and writes named fields, so a system prompt, a conversation, a file name or a tuning
+note cannot ride along: there is no path from them to the document. `RecipeExportTest` puts a private
+system prompt in the profile and asserts it is absent from the output.
+
+It refuses rather than guesses. No engine commit, no model hash, no benchmark taken on *this* build,
+a split GGUF without one file's hash, a device that will not say what it is, or a missing maintainer
+each produce a sentence saying what is missing, and no document. A number it does write always comes
+with the method that produced it, including the spread and the battery temperatures.
+
 ## Not implemented yet
 
 The format, matcher, bundled snapshot, source cache, review screen, rollback, local validation, the
-schemas, and the fixture corpus are in place; these are not:
+schemas, the fixture corpus, and exporting a measurement are in place; these are not:
 
 - signed network indexes, pinned verification keys, and key-change review;
-- evidence upload;
+- uploading from inside Bram: a shared document is saved to a file, and publishing it is a pull
+  request or a source you host;
 - the public recipe repository itself — the owner creates it, and `recipes/` is the content that
   moves into it.
