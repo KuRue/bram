@@ -1,0 +1,19 @@
+{
+  "schema": "bram.hardware-recipes.index",
+  "schemaVersion": 1,
+  "source": {
+    "id": "example.recipes",
+    "name": "Example recipes",
+    "kind": "external"
+  },
+  "revision": "2026-10-18.1",
+  "generatedAt": "2026-10-18",
+  "recipes": [
+    {
+      "id": "example-soc-model-cpu",
+      "version": 1,
+      "file": "example-soc-model-cpu.json",
+      "sha256": "zzz"
+    }
+  ]
+}
