@@ -24,4 +24,6 @@ interface IInferenceService {
     String benchmark(String requestJson);
     // Bypasses the native executor so a wedged load/decode cannot block shutdown.
     oneway void shutdown();
+    // Profile validation uses the chat thread counts and tuned pools; the CPU reference stays fixed.
+    String teacherForcedProfile(in int[] forcedTokens, int padTokens);
 }

@@ -34,6 +34,13 @@ import io.github.kurue.bram.core.domain.ConfigurationBudget
 import io.github.kurue.bram.core.domain.ConfigurationPlanner
 import io.github.kurue.bram.core.domain.TrialCostEstimate
 import io.github.kurue.bram.core.domain.TrialScore
+import io.github.kurue.bram.core.domain.RecipeBackend
+import io.github.kurue.bram.core.domain.RecipeDeviceIdentity
+import io.github.kurue.bram.core.domain.CpuFeatures
+import io.github.kurue.bram.core.domain.RecipeValidationRunner
+import io.github.kurue.bram.core.domain.RecipeValidationDecision
+import io.github.kurue.bram.core.domain.RecipeTrial
+import io.github.kurue.bram.core.domain.RecipeVerdict
 import io.github.kurue.bram.core.domain.ActivitySummary
 import io.github.kurue.bram.core.domain.MonthActivity
 import java.time.YearMonth
@@ -87,6 +94,7 @@ import org.json.JSONObject
 import java.util.UUID
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
@@ -611,6 +619,9 @@ data class AppUiState(
     /** The last automation action's result, shown under the automations section. */
     val automationStatus: String? = null,
     val recipeSources: RecipeSourcesUi = RecipeSourcesUi(),
+    val recipeDeviceIdentity: RecipeDeviceIdentity? = null,
+    val recipeRuntimeAvailable: Boolean = false,
+    val recipeValidationRecords: List<RecipeValidationRecord> = emptyList(),
     /** Newest-first remembered facts and instructions, for the memory browser. */
     val memories: List<MemoryRecord> = emptyList(),
     /** Display name of the resident embedding model, or null when recall is keyword-only. */
@@ -737,6 +748,8 @@ class MainViewModel(
     @Volatile
     private var conversationChosen = false
     private val tuningThreads = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
+    @Volatile private var activeRecipeKey: String? = null
+    @Volatile private var recipeCommitted = false
     private val tuningRuns by lazy {
         TuningRunControl(viewModelScope, onStopped = ::settleStoppedTuning)
     }
@@ -744,7 +757,12 @@ class MainViewModel(
     private fun launchTuning(block: suspend CoroutineScope.() -> Unit) {
         if (benchmarkRuns.inFlight() || container.taskRunner.tasks.value.any { it.state == TaskState.RUNNING }) return
         val restoreLoaded = mutableState.value.loadedModelId
-        tuningRuns.start(onCompleted = { restoreLoaded?.let { loadModel(it) } }) {
+        val restoreProfile = mutableState.value.activeProfileId
+        tuningRuns.start(onCompleted = {
+            if (restoreLoaded != null) {
+                if (restoreProfile != null) loadProfile(restoreProfile) else loadModel(restoreLoaded)
+            }
+        }) {
             block()
             mutableState.update {
                 it.copy(
@@ -763,6 +781,11 @@ class MainViewModel(
     }
 
     private suspend fun settleStoppedTuning(message: String) {
+        val settledMessage = if (activeRecipeKey != null && recipeCommitted) {
+            "Validated recipe settings were saved. Reload the model to continue."
+        } else message
+        val interruptedKey = activeRecipeKey?.takeUnless { recipeCommitted }
+        activeRecipeKey = null
         // Retain the run until the service is stopped and its watched calls have unwound.
         val workers = tuningThreads.toList()
         workers.forEach { it.interrupt() }
@@ -781,19 +804,24 @@ class MainViewModel(
                 modelLoadDetail = null,
                 cooldownOverride = false,
                 status = null,
-                error = message,
+                error = settledMessage,
                 autoConfigure = it.autoConfigure?.copy(
                     finished = true, stopping = false, phase = AutoConfigurePhase.DONE,
                     waitingForCooldown = false, measuringIndex = null,
-                    measuringPlanPhase = null, measuringPlanCandidate = null, current = message,
+                    measuringPlanPhase = null, measuringPlanCandidate = null, current = settledMessage,
                 ),
             )
         }
         stopStatusService()
+        interruptedKey?.let { key ->
+            runCatching { recordRecipeValidation(RecipeValidationRecord(key, RecipeVerdict.INTERRUPTED, settledMessage)) }
+                .onFailure { android.util.Log.e("BramTune", "Could not record interrupted recipe validation", it) }
+        }
     }
 
     fun cancelAutoConfigure() {
         if (!tuningRuns.inFlight()) return
+        if (mutableState.value.autoConfigure?.stopping == true) return
         mutableState.update {
             it.copy(autoConfigure = it.autoConfigure?.copy(stopping = true, current = "Cancelling configuration…"))
         }
@@ -827,6 +855,11 @@ class MainViewModel(
 
     init {
         refreshRecipeSources()
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { container.recipeValidationHistory.recover() } }
+                .onSuccess { records -> mutableState.update { it.copy(recipeValidationRecords = records) } }
+                .onFailure { error -> mutableState.update { it.copy(error = "Recipe validation history: ${error.message}") } }
+        }
         restoreRoutingSettings()
         mutableState.update { it.copy(onboardingCompleted = container.onboardingStore.completed()) }
         // Adding the first model or server finishes the guide for good, however it was added.
@@ -1686,7 +1719,18 @@ class MainViewModel(
             engineBuild = engine,
             cpuFeatures = MeasurementFingerprint.cpuFeatureFlags(systemInfo),
         ).key
-        mutableState.update { it.copy(measurementFingerprint = key) }
+        val cpu = withContext(Dispatchers.IO) {
+            runCatching { CpuFeatures.parse(java.io.File("/proc/cpuinfo").readText()) }.getOrNull()
+        }
+        mutableState.update {
+            val phone = it.deviceProfile
+            it.copy(measurementFingerprint = key, recipeRuntimeAvailable = probe?.optBoolean("nativeRuntimeLinked") == true,
+                recipeDeviceIdentity = phone?.let { hardware ->
+                RecipeDeviceIdentity(hardware.manufacturer, hardware.model, hardware.soc,
+                    android.os.Build.VERSION.SDK_INT, cpu, engine,
+                    it.availableBackends.mapNotNull { backend -> RecipeBackend.entries.firstOrNull { value -> value.name == backend.name } }.toSet())
+            })
+        }
     }
 
     /**
@@ -2722,6 +2766,7 @@ class MainViewModel(
     }
 
     fun deleteProfile(profileId: String) {
+        if (tuningRuns.inFlight()) return
         viewModelScope.launch {
             val state = mutableState.value
             val profile = state.profiles.firstOrNull { it.id == profileId } ?: return@launch
@@ -2745,6 +2790,7 @@ class MainViewModel(
     }
 
     fun updateProfile(profile: ModelProfile) {
+        if (tuningRuns.inFlight()) return
         viewModelScope.launch {
             val state = mutableState.value
             val previous = state.profiles.firstOrNull { it.id == profile.id }
@@ -4655,6 +4701,144 @@ class MainViewModel(
         val memories = runCatching { container.memoryStore.mostImportant(MEMORY_INJECTION_LIMIT) }
             .getOrDefault(emptyList())
         return MemoryPrompt.append(prompt, memories)
+    }
+
+    private suspend fun recordRecipeValidation(record: RecipeValidationRecord) {
+        val records = withContext(Dispatchers.IO) { container.recipeValidationHistory.save(record) }
+        mutableState.update { it.copy(recipeValidationRecords = records) }
+    }
+
+    /** Explicitly validates one reviewed delta; no setting is saved during measurement. */
+    fun validateRecipe(profileId: String, previewKey: String) {
+        val snapshot = mutableState.value
+        val preview = recipePreviews(snapshot, profileId).firstOrNull { it.key == previewKey } ?: return
+        preview.blocked?.let { reason -> mutableState.update { it.copy(error = reason) }; return }
+        if (tuningRuns.inFlight() || snapshot.isLoadingModel || snapshot.isLoadingLiteRt ||
+            snapshot.isGenerating || snapshot.isValidatingAccelerator || snapshot.isImporting ||
+            snapshot.measuringBandwidth || snapshot.convertingProfileId != null) return
+        val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
+        val model = snapshot.localModels.firstOrNull { it.id == profile.modelId } ?: return
+        launchTuning {
+            activeRecipeKey = preview.key
+            recipeCommitted = false
+            mutableState.update { it.copy(isValidatingAccelerator = true, error = null, cooldownOverride = false,
+                autoConfigure = AutoConfigureProgress(profile.id, profile.name, 0, 0, "Preparing recipe validation…",
+                    depth = ConfigDepth.THOROUGH, budgetMillis = ConfigDepth.THOROUGH.budgetMillis,
+                    startedAtMillis = TuningLimits.nowMillis())) }
+            try {
+                recordRecipeValidation(RecipeValidationRecord(preview.key, RecipeVerdict.CHECKING, "Validation in progress"))
+                val detected = detectBackendsNow()
+                mutableState.update { it.copy(availableBackends = detected) }
+                refreshMeasurementFingerprint()
+                recipeEnvironment(recipePreviews(mutableState.value, profile.id).any { it.key == preview.key && it.blocked == null },
+                    "The device, runtime, source or profile changed since preview; review the recipe again")
+                sweepGate()?.let { error(it) }
+                waitForCooldown()
+                val initialThermal = mutableState.value.deviceProfile?.thermalStatus.orEmpty()
+                suspend fun checkpoint() {
+                    currentCoroutineContext().ensureActive()
+                    refreshDeviceProfile()
+                    recipeEnvironment(mutableState.value.deviceProfile?.thermalStatus.orEmpty() == initialThermal,
+                        "Thermal state changed during the paired checks; previous settings kept. Let the phone cool before retrying.")
+                    sweepGate()?.let { throw RecipeEnvironmentChanged(it) }
+                }
+                val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+                val referenceThreads = (cores - 2).coerceIn(1, 4)
+                val decision = RecipeValidationRunner.run(
+                    profile, preview.proposed, preview.candidate.recipe.workload.contextDepth,
+                    reference = { at, padding ->
+                        val canonical = at.copy(backendId = "", flashAttention = FlashAttentionMode.AUTO, kvCacheType = KvCacheType.F16)
+                        try {
+                            measureCpuReference(model, canonical, referenceThreads, padding).optJSONArray("tokens").toIntList()
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (failure: Exception) { throw RecipeEnvironmentChanged("CPU reference unavailable: ${failure.message}") }
+                    },
+                    trial = { at, tokens, padding ->
+                        val loaded = tuningNativeCall("recipe-load") { loadRecipeCandidate(at, model, cores) }
+                        check(loaded.optBoolean("cpuValidated") && loaded.optInt("contextTokens") == at.contextTokens) {
+                            "The runtime could not load and self-test the requested context"
+                        }
+                        // Warm the loaded kernels before the recorded replay. Each replay clears KV.
+                        tuningNativeCall("recipe-warmup") { container.llamaCppClient.teacherForced(tokens.take(4).toIntArray(), useProfileThreads = true) }
+                        val result = tuningNativeCall("recipe-replay") { container.llamaCppClient.teacherForced(tokens.toIntArray(), padding, useProfileThreads = true) }
+                        val promptThreads = at.threads.takeIf { it > 0 } ?: referenceThreads
+                        check(result.optBoolean("profileThreads") && result.optInt("threads") == promptThreads &&
+                            result.optInt("decodeThreads") == (at.decodeThreads.takeIf { it > 0 } ?: promptThreads)) {
+                            "The runtime did not measure the requested prompt/decode thread counts"
+                        }
+                        val needsPool = at.cpuMask.isNotEmpty() || at.cpuStrict || at.poll >= 0 ||
+                            at.threadPriority == io.github.kurue.bram.core.domain.ThreadPriority.HIGH
+                        check(!needsPool || result.optBoolean("customThreadpool")) { "The runtime could not apply the requested threadpool settings" }
+                        RecipeTrial(result.optJSONArray("predictions").toIntList(), result.optLong("promptMillis"), result.optLong("decodeMillis"))
+                    },
+                    checkpoint = ::checkpoint,
+                    phase = { message -> mutableState.update { it.copy(autoConfigure = it.autoConfigure?.copy(current = message)) } },
+                )
+                checkpoint()
+                refreshMeasurementFingerprint()
+                recipeEnvironment(recipePreviews(mutableState.value, profile.id).any { it.key == preview.key && it.blocked == null },
+                    "The source, runtime or profile changed during validation; previous settings kept")
+                recipeEnvironment(container.modelProfileStore.find(profile.id) == profile,
+                    "The saved profile changed during validation; previous settings kept")
+                currentCoroutineContext().ensureActive()
+                if (decision.verdict == RecipeVerdict.APPLIED) {
+                    // The complete validation has finished. Retain ownership through the short
+                    // persistence boundary; cancellation cannot leave half of the approved record.
+                    mutableState.update { it.copy(autoConfigure = it.autoConfigure?.copy(stopping = true, current = "Saving validated recipe…")) }
+                    withContext(NonCancellable) {
+                        container.modelProfileStore.save(preview.proposed.copy(
+                            autoConfiguredNote = decision.detail,
+                            autoConfiguredAtEpochMillis = System.currentTimeMillis(),
+                            measuredFingerprint = mutableState.value.measurementFingerprint,
+                            recipeProvenance = preview.provenance,
+                            // Prior measurements describe the old settings, so do not present them as current.
+                            measurements = emptyList(), tuning = emptyList(), batchTuneNote = "", batchTunedAtEpochMillis = 0,
+                        ))
+                        recipeCommitted = true
+                        recordRecipeValidation(RecipeValidationRecord(preview.key, decision.verdict, decision.detail,
+                            incumbentMillis = decision.incumbentMillis, proposedMillis = decision.proposedMillis))
+                        syncProfiles(mutableState.value.localModels)
+                    }
+                } else recordRecipeValidation(RecipeValidationRecord(preview.key, decision.verdict, decision.detail,
+                    incumbentMillis = decision.incumbentMillis, proposedMillis = decision.proposedMillis))
+                tuningNativeCall("recipe-unload") { container.llamaCppClient.unload() }
+                mutableState.update { it.copy(loadedModelId = null, loadedBackend = null, cpuValidated = false,
+                    modelLoadDetail = null, autoConfigure = it.autoConfigure?.copy(finished = true, stopping = false,
+                        current = decision.detail, phase = AutoConfigurePhase.DONE)) }
+                activeRecipeKey = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (!recipeCommitted) {
+                    recordRecipeValidation(RecipeValidationRecord(preview.key,
+                        if (failure is RecipeEnvironmentChanged) RecipeVerdict.INTERRUPTED else RecipeVerdict.REJECTED,
+                        "Validation could not finish: ${failure.message}. Previous settings kept."))
+                    activeRecipeKey = null
+                }
+                throw failure
+            }
+        }
+    }
+
+    private suspend fun loadRecipeCandidate(profile: ModelProfile, model: LocalModelRecord, cores: Int): JSONObject {
+        val backend = RuntimeBackend.fromId(profile.backendId)
+        return container.llamaCppClient.load(
+            model.copy(preferredContextTokens = profile.contextTokens),
+            threads = profile.threads.takeIf { it > 0 } ?: (cores - 2).coerceIn(1, 4),
+            decodeThreads = profile.decodeThreads,
+            gpuLayers = if (backend.offloadsToAccelerator) FULL_GPU_OFFLOAD else 0,
+            deviceFilter = backend.devicePrefix, enableThinking = profile.thinkingEnabled,
+            flashAttention = profile.flashAttention, kvCacheType = profile.kvCacheType,
+            batchTokens = profile.batchTokens, ubatchTokens = profile.ubatchTokens,
+            cpuMask = profile.cpuMask, cpuStrict = profile.cpuStrict, poll = profile.poll,
+            threadPriority = profile.threadPriority, loadMode = profile.loadMode, hexFlags = profile.hexFlags,
+            streamExperts = profile.streamExperts, streamCacheMb = profile.streamCacheMb,
+            streamDenseAnon = profile.streamDenseAnon, streamOverlap = profile.streamOverlap,
+        )
+    }
+
+    private fun recipeEnvironment(condition: Boolean, message: String) {
+        if (!condition) throw RecipeEnvironmentChanged(message)
     }
 
     fun refreshRecipeSources() = recipeSourceAction {

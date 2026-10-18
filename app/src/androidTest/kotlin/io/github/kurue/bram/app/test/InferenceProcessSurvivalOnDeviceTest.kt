@@ -62,6 +62,7 @@ class InferenceProcessSurvivalOnDeviceTest {
                 // down on the first.
                 runCatching { withTimeout(30_000L) { client.referenceDecode(8) } }
                 runCatching { withTimeout(30_000L) { client.teacherForced(intArrayOf(1, 2), 0) } }
+                runCatching { withTimeout(30_000L) { client.teacherForced(intArrayOf(1, 2), 0, useProfileThreads = true) } }
                 runCatching { withTimeout(30_000L) { client.parseReply("hello") } }
                 runCatching { withTimeout(30_000L) { client.benchmark("pp", 8, 0, 1) } }
                 runCatching { withTimeout(30_000L) { client.memoryBandwidth(16, 1) } }

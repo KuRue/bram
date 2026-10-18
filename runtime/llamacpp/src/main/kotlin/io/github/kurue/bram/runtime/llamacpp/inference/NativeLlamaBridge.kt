@@ -43,6 +43,7 @@ internal class NativeLlamaBridge {
     ): String
     external fun referenceDecode(tokenCount: Int, padTokens: Int): String
     external fun teacherForced(forcedTokens: IntArray, padTokens: Int): String
+    external fun teacherForcedProfile(forcedTokens: IntArray, padTokens: Int): String
     external fun parseReply(reply: String): String
     external fun formatChat(
         roles: Array<String>,

@@ -75,8 +75,14 @@ object RecipeMatcher {
         if (recipe.runtime.engineCommits.none { it.equals(device.engineCommit, ignoreCase = true) }) {
             reasons += "measured on engine ${recipe.runtime.engineCommits.firstOrNull() ?: "unknown"}, this build is ${device.engineCommit}"
         }
-        if (recipe.model.sha256 != null && model.sha256 != null && recipe.model.sha256 != model.sha256) {
+        if (recipe.model.sha256 != null && model.sha256 == null) {
+            reasons += "this model's content hash is unknown"
+        } else if (recipe.model.sha256 != null && recipe.model.sha256 != model.sha256) {
             reasons += "measured on different model bytes"
+        }
+        if (recipe.model.sha256 == null) reasons += "the recipe does not identify the measured model bytes"
+        if (recipe.model.sizeBytes != null && recipe.model.sizeBytes != model.sizeBytes) {
+            reasons += "measured on a different model size"
         }
 
         return RecipeCandidate(

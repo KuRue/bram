@@ -329,6 +329,8 @@ data class ModelProfile(
      * kernels changed — and the card says so instead of trusting them.
      */
     val measuredFingerprint: String = "",
+    /** Source identity and hashes of the last locally validated recipe; retained if its source is removed. */
+    val recipeProvenance: String = "",
     /**
      * Whether Bram made this profile rather than the user. A model gets one on import so it is
      * usable immediately, and an untouched default can be renamed or reshaped without the user

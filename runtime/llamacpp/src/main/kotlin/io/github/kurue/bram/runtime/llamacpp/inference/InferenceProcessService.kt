@@ -119,6 +119,11 @@ class InferenceProcessService : Service() {
             return runSerialized { bridge.teacherForced(forcedTokens ?: IntArray(0), padTokens) }
         }
 
+        override fun teacherForcedProfile(forcedTokens: IntArray?, padTokens: Int): String {
+            val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
+            return runSerialized { bridge.teacherForcedProfile(forcedTokens ?: IntArray(0), padTokens) }
+        }
+
         override fun parseReply(reply: String?): String {
             val bridge = nativeBridge() ?: return backend.unavailableJson().toString()
             return runSerialized { bridge.parseReply(reply.orEmpty()) }

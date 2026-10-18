@@ -362,8 +362,8 @@ llama_context * create_context(int context_tokens = 0, bool attach_streamer = fa
         g_state.ubatch_tokens > 0
             ? std::min(g_state.ubatch_tokens, static_cast<int>(params.n_batch))
             : std::min(128, static_cast<int>(params.n_batch)));
-    // Only the chat context takes the separate decode count; the reference and self-test contexts
-    // keep one count so the CPU yardstick does not move with a tuning choice.
+    // Chat and explicit profile trials take the separate decode count; CPU references and
+    // self-tests keep one count so their yardstick does not move with a tuning choice.
     params.n_threads = chat_threads && g_state.decode_threads > 0 ? g_state.decode_threads : g_state.threads;
     params.n_threads_batch = g_state.threads;
     params.no_perf = false;
@@ -1813,9 +1813,8 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_reference
 // only for the next-token prediction at each position, so a numerical difference cannot compound
 // into unrelated text the way free-running generation does. This isolates "does the accelerator
 // compute the same thing" from "did one early token send generation somewhere else".
-extern "C" JNIEXPORT jstring JNICALL
-Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherForced(
-    JNIEnv * env, jobject, jintArray forced_tokens, jint pad_tokens) {
+static jstring teacher_forced(
+    JNIEnv * env, jintArray forced_tokens, jint pad_tokens, bool profile_threads) {
     return guarded_string(env, [&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_state.model == nullptr) throw std::runtime_error("Load a model before the agreement check");
@@ -1832,7 +1831,10 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
 
         const auto tokens = padded_measurement_prompt(pad_tokens);
 
-        llama_context * context = create_context();
+        llama_context * context = create_context(0, false, profile_threads);
+        if (profile_threads && g_state.chat_pool != nullptr) {
+            llama_attach_threadpool(context, g_state.chat_pool, g_state.chat_pool_batch);
+        }
         const auto context_guard = std::unique_ptr<llama_context, decltype(&llama_free)>(context, llama_free);
         const auto prompt_start = std::chrono::steady_clock::now();
         decode_prompt(context, tokens);
@@ -1861,17 +1863,33 @@ Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherFo
         const auto prompt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prompt_end - prompt_start).count();
         const auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start).count();
         __android_log_print(ANDROID_LOG_INFO, "BramLlama",
-            "bram_teacher_forced: gpu_layers=%d predictions=%s prompt_ms=%lld decode_ms=%lld",
-            g_state.gpu_layers, predictions.str().c_str(),
+            "bram_teacher_forced: profile_threads=%d gpu_layers=%d predictions=%s prompt_ms=%lld decode_ms=%lld",
+            profile_threads ? 1 : 0, g_state.gpu_layers, predictions.str().c_str(),
             static_cast<long long>(prompt_ms), static_cast<long long>(decode_ms));
         std::ostringstream result;
         result << "{\"predictions\":" << predictions.str()
+               << ",\"profileThreads\":" << (profile_threads ? "true" : "false")
+               << ",\"threads\":" << g_state.threads
+               << ",\"decodeThreads\":" << (profile_threads && g_state.decode_threads > 0 ? g_state.decode_threads : g_state.threads)
+               << ",\"customThreadpool\":" << (profile_threads && g_state.custom_threadpool ? "true" : "false")
                << ",\"gpuLayers\":" << g_state.gpu_layers
                << ",\"promptTokens\":" << tokens.size()
                << ",\"promptMillis\":" << prompt_ms
                << ",\"decodeMillis\":" << decode_ms << "}";
         return result.str();
     });
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherForced(
+    JNIEnv * env, jobject, jintArray forced_tokens, jint pad_tokens) {
+    return teacher_forced(env, forced_tokens, pad_tokens, false);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_kurue_bram_runtime_llamacpp_inference_NativeLlamaBridge_teacherForcedProfile(
+    JNIEnv * env, jobject, jintArray forced_tokens, jint pad_tokens) {
+    return teacher_forced(env, forced_tokens, pad_tokens, true);
 }
 
 // Splits a finished reply into reasoning and answer using the same chat format that produced the
