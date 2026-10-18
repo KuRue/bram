@@ -2,7 +2,9 @@
 
 `recipe_fixture.py` writes a deterministic, sub-megabyte GGUF with procedural weights. It always prefers
 the byte token `A`. It exercises loading, complete token replay, split prompt/decode threads, and
-tuned pool attachment. Its output and timings are not model-quality or performance evidence.
+tuned pool attachment. A second check imports it through the real catalog, accepts a test source,
+and runs paired validation through the real ViewModel, verifying the saved profile and provenance.
+Its output and timings are not model-quality or performance evidence.
 
 The generator requires NumPy and `gguf-py` from Bram's pinned llama.cpp source checkout, which a
 native build places beneath `runtime/llamacpp/.cxx/Release/.../_deps/llama_cpp-src/gguf-py`.
@@ -26,7 +28,8 @@ adb shell am instrument -w \
 ```
 
 Use a fresh application suffix for this run; it gives the check its own package and storage. The
-test is skipped without `recipeFixture`, so the normal cold-AVD suite stays model-free. A successful
-opt-in run logs `BramRecipeNativeTest` with full agreement, prompt=2/decode=1 and a custom pool.
+tests are skipped without `recipeFixture`, so the normal cold-AVD suite stays model-free. A successful
+opt-in run logs `BramRecipeNativeTest` with full agreement, prompt=2/decode=1 and a custom pool,
+plus the ViewModel's applied batch change and source provenance.
 The ordinary replay must still report one thread count and no tuned pool. After the run, unload
 and remove the test-only installations you created, then install ordinary APKs for the full suite.
