@@ -75,5 +75,7 @@ class RecipePreviewTest {
             sources = listOf(StoredRecipeSource("https://example.org/index.json", external)))), profile.id)
         assertTrue(choices.first().official)
         assertFalse(choices.last().official)
+        assertNotEquals(choices.first().key, choices.last().key)
+        assertTrue(choices.last().provenance.startsWith("External:"))
     }
 }

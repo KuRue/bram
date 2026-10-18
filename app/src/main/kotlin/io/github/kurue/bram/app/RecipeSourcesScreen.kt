@@ -152,12 +152,13 @@ internal fun RecipeMatchesSection(state: AppUiState, onValidate: (String, String
                     }
                 }
                 preview.blocked?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                Text("Checks full CPU agreement, paired speed, and the proposed context within 10 minutes. Cancel keeps the current profile.", style = MaterialTheme.typography.bodySmall)
+                Text("Requires 90% agreement across every CPU reference token (up to 24), over 5% improvement in both timing pairs, and a context check. Up to 10 minutes; Cancel keeps the current profile.", style = MaterialTheme.typography.bodySmall)
                 Button(
                     onClick = { onValidate(profile.id, preview.key) },
                     enabled = preview.blocked == null && !state.recipeSources.busy &&
                         !state.isGenerating && !state.isLoadingModel && !state.isLoadingLiteRt &&
-                        !state.isValidatingAccelerator && state.benchmarkingProfileId == null &&
+                        !state.isValidatingAccelerator && !state.isImporting && !state.measuringBandwidth &&
+                        state.convertingProfileId == null && state.benchmarkingProfileId == null &&
                         state.autoConfigure?.finished != false,
                     modifier = Modifier.testTag("recipe-validate"),
                 ) { Text(if (preview.record?.verdict == RecipeVerdict.REJECTED) "Retry validation and apply if faster" else "Validate and apply if faster") }

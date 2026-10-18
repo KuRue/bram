@@ -114,12 +114,13 @@ settings that would be silently sanitized are refused before loading. Split GGUF
 for validation until the app has an identity for the complete multipart content. Expert-streaming
 profiles are not yet supported by this validator.
 
-The local measurement uses Bram's fixed 24-token CPU reference and teacher-forced replay. Padding
+The local measurement uses Bram's fixed prompt, up to 24 CPU-generated reference tokens, and
+teacher-forced replay. Natural end-of-generation may finish the CPU reference earlier. Padding
 starts at the recipe's context depth, limited to the context both profiles support with a 256-token
 reserve. Kernels warm up before recorded timing. Profile replays attach the same tuned threadpools
 and prompt/decode thread counts as chat;
 the fixed CPU reference keeps its own thread settings. The replay reports those counts and whether
-the custom pool was applied; ignored threadpool settings cannot pass validation. Two pairs run in
+the custom pool was applied; failure to create the requested pool cannot pass validation. Two pairs run in
 reversed order. Every replay must return the complete CPU sequence and pass the existing 90% agreement
 threshold; a matching short prefix cannot pass. Prompt plus decode time must beat the incumbent by
 more than 5% **in both pairs**. A final replay must also pass agreement near the proposed context

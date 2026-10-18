@@ -63,16 +63,26 @@ class RecipeValidationTest {
         assertTrue(decision.detail.contains("intended context"))
     }
 
-    @Test fun `zero timings and incomplete references cannot grant approval`() = runBlocking {
+    @Test fun `zero timings and invalid references cannot grant approval`() = runBlocking {
         val badTime = RecipeValidationRunner.run(current, proposed, 0, reference = { _, _ -> tokens },
             trial = { _, _, _ -> RecipeTrial(tokens, 0, 10) })
         assertEquals(RecipeVerdict.INTERRUPTED, badTime.verdict)
-        for (reference in listOf(emptyList(), tokens.take(2))) {
+        for (reference in listOf(emptyList(), tokens + 24, listOf(-1))) {
             assertTrue(runCatching {
                 RecipeValidationRunner.run(current, proposed, 0, reference = { _, _ -> reference },
                     trial = { _, _, _ -> error("Must not measure without a full reference") })
             }.exceptionOrNull() is IllegalArgumentException)
         }
+    }
+
+    @Test fun `a naturally finished CPU reference may be shorter but every position must be replayed`() = runBlocking {
+        val ended = tokens.take(8)
+        val decision = RecipeValidationRunner.run(current, proposed, 0, reference = { _, _ -> ended },
+            trial = { profile, supplied, _ ->
+                assertEquals(ended, supplied)
+                trial(if (profile == current) 100 else 80, supplied)
+            })
+        assertEquals(RecipeVerdict.APPLIED, decision.verdict)
     }
 
     @Test fun `cancellation and environment changes escape before an approval can be returned`() = runBlocking {

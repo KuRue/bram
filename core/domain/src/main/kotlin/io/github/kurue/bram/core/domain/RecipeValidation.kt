@@ -90,8 +90,8 @@ object RecipeValidationRunner {
             check()
             phase("Recording CPU reference at $padding padding tokens…")
             return reference(at, padding).also {
-                require(it.size == REFERENCE_TOKENS && it.all { token -> token >= 0 }) {
-                    "CPU reference did not return all $REFERENCE_TOKENS tokens; previous settings kept"
+                require(it.size in 1..REFERENCE_TOKENS && it.all { token -> token >= 0 }) {
+                    "CPU reference returned an empty or invalid token sequence; previous settings kept"
                 }
             }
         }

@@ -73,6 +73,7 @@ data class RecipePreview(
     val key: String,
     val sourceName: String,
     val sourceId: String,
+    val origin: String,
     val revision: String,
     val snapshotPin: String,
     val recipeHash: String,
@@ -82,7 +83,7 @@ data class RecipePreview(
     val blocked: String?,
     val record: RecipeValidationRecord?,
 ) {
-    val provenance: String get() = "$sourceName ($sourceId), revision $revision, index SHA-256 $snapshotPin; " +
+    val provenance: String get() = "${if (official) "Bundled" else "External"}: $sourceName ($sourceId), $origin, revision $revision, index SHA-256 $snapshotPin; " +
         "recipe ${candidate.recipe.id} v${candidate.recipe.version}, SHA-256 $recipeHash"
 }
 
@@ -93,12 +94,12 @@ fun recipePreviews(state: AppUiState, profileId: String): List<RecipePreview> {
     val device = state.recipeDeviceIdentity ?: return emptyList()
     val modelIdentity = RecipeModelIdentity(model.architecture, model.quantization, model.fileSizeBytes,
         model.sha256.takeIf { it.isNotBlank() && model.parts.isEmpty() }, profile.contextTokens)
-    val snapshots = listOfNotNull(state.recipeSources.bundled) + state.recipeSources.sources.map { it.current }
-    return snapshots.flatMap { snapshot ->
+    val snapshots = listOfNotNull(state.recipeSources.bundled?.let { it to "bundled" }) + state.recipeSources.sources.map { it.current to it.url }
+    return snapshots.flatMap { (snapshot, origin) ->
         RecipeMatcher.candidates(snapshot.recipes, device, modelIdentity, profile).map { candidate ->
             val proposed = candidate.recipe.proposal.applyTo(profile)
             val digest = snapshot.index.recipes.first { it.id == candidate.recipe.id }.sha256
-            val key = recipeSha256(listOf(snapshot.pin, digest, model.sha256, state.measurementFingerprint,
+            val key = recipeSha256(listOf(origin, snapshot.index.source.kind.wire, snapshot.pin, digest, model.sha256, state.measurementFingerprint,
                 profile.recipeConfigurationIdentity(), proposed.recipeConfigurationIdentity(), "recipe-check-v1")
                 .joinToString("\n").toByteArray(Charsets.UTF_8))
             val blocked = when {
@@ -109,7 +110,7 @@ fun recipePreviews(state: AppUiState, profileId: String): List<RecipePreview> {
                 else -> recipeEligibility(proposed, model, state.deviceProfile?.cpuCoreCount ?: 1, device.availableBackends)
                     ?: recipeEligibility(profile, model, state.deviceProfile?.cpuCoreCount ?: 1, device.availableBackends)
             }
-            RecipePreview(key, snapshot.index.source.name, snapshot.index.source.id, snapshot.index.revision,
+            RecipePreview(key, snapshot.index.source.name, snapshot.index.source.id, origin, snapshot.index.revision,
                 snapshot.pin, digest, snapshot.index.source.kind == RecipeSourceKind.OFFICIAL,
                 candidate, proposed, blocked, state.recipeValidationRecords.firstOrNull { it.key == key })
         }

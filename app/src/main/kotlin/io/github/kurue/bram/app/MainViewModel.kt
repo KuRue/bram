@@ -4714,7 +4714,8 @@ class MainViewModel(
         val preview = recipePreviews(snapshot, profileId).firstOrNull { it.key == previewKey } ?: return
         preview.blocked?.let { reason -> mutableState.update { it.copy(error = reason) }; return }
         if (tuningRuns.inFlight() || snapshot.isLoadingModel || snapshot.isLoadingLiteRt ||
-            snapshot.isGenerating || snapshot.isValidatingAccelerator) return
+            snapshot.isGenerating || snapshot.isValidatingAccelerator || snapshot.isImporting ||
+            snapshot.measuringBandwidth || snapshot.convertingProfileId != null) return
         val profile = snapshot.profiles.firstOrNull { it.id == profileId } ?: return
         val model = snapshot.localModels.firstOrNull { it.id == profile.modelId } ?: return
         launchTuning {
@@ -4747,7 +4748,10 @@ class MainViewModel(
                     profile, preview.proposed, preview.candidate.recipe.workload.contextDepth,
                     reference = { at, padding ->
                         val canonical = at.copy(backendId = "", flashAttention = FlashAttentionMode.AUTO, kvCacheType = KvCacheType.F16)
-                        measureCpuReference(model, canonical, referenceThreads, padding).optJSONArray("tokens").toIntList()
+                        try {
+                            measureCpuReference(model, canonical, referenceThreads, padding).optJSONArray("tokens").toIntList()
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (failure: Exception) { throw RecipeEnvironmentChanged("CPU reference unavailable: ${failure.message}") }
                     },
                     trial = { at, tokens, padding ->
                         val loaded = tuningNativeCall("recipe-load") { loadRecipeCandidate(at, model, cores) }
