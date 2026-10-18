@@ -149,6 +149,7 @@ import io.github.kurue.bram.core.domain.KvCacheType
 import io.github.kurue.bram.core.domain.LoadMode
 import io.github.kurue.bram.core.domain.LocalModelRecord
 import io.github.kurue.bram.core.domain.ModelProfile
+import io.github.kurue.bram.core.domain.RecipeExport
 import io.github.kurue.bram.core.domain.QuantCompatibility
 import io.github.kurue.bram.core.domain.TuningDimension
 import io.github.kurue.bram.core.domain.ConfigDepth
@@ -217,6 +218,19 @@ fun BramApp(viewModel: MainViewModel) {
     }
     val skillPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importSkillDocument)
+    }
+    // A recipe leaves the app only where the person points it: the picker returns a URI, so the
+    // document it should receive is captured when the picker is launched.
+    var pendingRecipeExport by remember { mutableStateOf<RecipeExport?>(null) }
+    val recipeSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        val export = pendingRecipeExport
+        pendingRecipeExport = null
+        if (uri == null || export == null) return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { stream -> stream.write(export.document.toByteArray()) }
+        }.onFailure { error ->
+            android.util.Log.e("BramRecipeExport", "Could not write the recipe file", error)
+        }
     }
     // The system folder picker grants durable read/write access to one tree; the ViewModel takes
     // the persistable permission and remembers the folder, and Capabilities shows and clears it.
@@ -448,6 +462,10 @@ fun BramApp(viewModel: MainViewModel) {
                                 onRemove = viewModel::removeRecipeSource,
                                 applicationState = state,
                                 onValidate = viewModel::validateRecipe,
+                                onSaveRecipe = { export ->
+                                    pendingRecipeExport = export
+                                    recipeSaver.launch(export.fileName)
+                                },
                             )
                             AppPanel.CAPABILITIES -> CapabilitiesScreen(
                                 state = state,
