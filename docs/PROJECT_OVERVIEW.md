@@ -30,7 +30,7 @@ is built, [ROADMAP.md](../ROADMAP.md) what is next, and the
 
 ## Status
 
-Bram is **alpha** software, version `0.2.0-alpha01`. Local chat, conversations, tools, memory,
+Bram is **alpha** software, version `0.3.0-alpha01`. Local chat, conversations, tools, memory,
 skills, and automations work. Hardware results come from one phone, a Galaxy S25 Ultra
 (Snapdragon 8 Elite: Hexagon HTP v79, Adreno 830); the `s25u_sim` emulator covers the UI and the
 agent harness against a scripted mock server.
