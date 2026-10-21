@@ -193,7 +193,7 @@ with the method that produced it, including the spread and the battery temperatu
 **Publishing it** is a pull request to
 [`KuRue/bram-hardware-recipes`](https://github.com/KuRue/bram-hardware-recipes), or a source you
 host yourself. The screen copies the document, the index entry, and the hash; the repository's
-`CONTRIBUTING.md` says where they go, and its CI checks both implementations' rules. Bram holds no
+`CONTRIBUTING.md` says where they go, and its CI checks the schemas and the corpus. Bram holds no
 GitHub credential and uploads nothing on its own. An app that already reads untrusted sources
 should not also carry a token whose compromise would reach every repository the account can write.
 
