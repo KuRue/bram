@@ -30,13 +30,15 @@ feature status is in the [project overview](docs/PROJECT_OVERVIEW.md).
 | 19 — Device adaptation (phases 1–3) | Correctness-gated tuning sweeps, KleidiAI CPU kernels, measurement fingerprints, import compatibility report, on-device quant conversion, benchmarks |
 | Harness overhaul M0–M6 | Mock-server test bed, persisted tool history, result budgets, gate polish, tools v2, skills v2, streaming endpoints ([plan and results](docs/HARNESS_OVERHAUL.md)) |
 | First-run guide | Phone compatibility scan and a model recommendation for a fresh install (#58) |
+| 20 — Product plan slices | Home and sidebar, compact profiles and first-run, engine-pack mechanism (proven on the S25 Ultra), bounded adaptive configuration, automations, read-only child agents, hardware recipes end to end; released as `v0.3.0-alpha01` |
 
-## Planned product work
+## Shipped since the plan
 
-The owner’s requested navigation, profile/import UI, adaptive configuration, Home activity,
-automations, child agents, hardware recipes, and engine packs are
-planned in [Product and execution plan](docs/PRODUCT_PLAN.md). This is a proposal with delivery
-slices and acceptance gates; the application changes have not shipped.
+The [product plan](docs/PRODUCT_PLAN.md) proposal has landed: sidebar navigation and Home activity,
+compact profiles and first-run, the engine-pack mechanism (proven on the S25 Ultra), bounded
+adaptive configuration, automations, read-only child agents, and hardware recipes end to end —
+signed sources, local validation, export, and the public recipe repository. The first release in
+this line is `v0.3.0-alpha01`.
 
 ## Now — finish device adaptation (Milestone 19)
 
@@ -56,13 +58,6 @@ Design: [DEVICE_ADAPTATION.md](docs/DEVICE_ADAPTATION.md).
 
 ## Next
 
-- **Auto-configure can retry forever.** The KV-cache and attention steps time a reference padded
-  with 1,024 tokens against the 30-second limit meant for an unpadded one, and slow references are
-  retried without a cap. On the emulator it parked 10 times in 28 minutes; a slow phone would too.
-  Scale the limit to the prompt and cap the retries.
-- **Explain excluded backends in auto-configure.** The S25 Ultra scan enumerates Vulkan, but
-  `autoConfigure()` explicitly excludes it because of validation reliability. Show that policy
-  exclusion instead of an empty Backends section; it is not a fresh validation failure.
 - **First-run guide follow-ups.** Keep the example model families in `ModelAdvisor.tiers` current;
   lead with "Connect a server" when no local model can run. (The arm64 recommendation was confirmed
   on the S25 Ultra on 2026-10-17: 12 GB → about 4B comfortable, 8B at a push; ARMv8.6 with i8mm.)
@@ -74,8 +69,8 @@ Design: [DEVICE_ADAPTATION.md](docs/DEVICE_ADAPTATION.md).
 - **Test coverage.** `platform:android` (Keystore, conversation storage, memory database) has no
   unit tests. Decide whether the device suite should package the x86_64 runtime
   (`BRAM_EMULATOR_ABI=true`) so emulator runs cover local inference too.
-- **Smaller UI files.** `MainViewModel.kt` and `BramApp.kt` are about 5,000 lines each. Split them
-  by screen as features touch them, not in one pass.
+- **Smaller UI files.** `MainViewModel.kt` and `BramApp.kt` are about 6,400 and 4,500 lines. Split
+  them by screen as features touch them, not in one pass.
 
 ## Release build requirement
 
