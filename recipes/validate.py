@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the recipe schemas against the fixture corpus, and the bundled snapshot against both.
+"""Check the recipe schemas against the fixture corpus, and a recipe snapshot against both.
 
 Run from the repository root:
 
@@ -13,8 +13,9 @@ files through Bram's own parser. Both read the same ``expect.txt`` per invalid f
 that drifts between the schema and the app fails CI rather than surprising a contributor.
 
 Schemas validate documents; they cannot check that an index's hashes match the files beside it, or
-that a recipe's id agrees with the index entry that lists it. Both are checked here for the bundled
-snapshot, because that snapshot is shipped inside the app.
+that a recipe's id agrees with the index entry that lists it. Both are checked here for the snapshot
+shipped inside the app, or for the index published beside this script in the public repository. A
+checkout with neither (say, a single-file download) still checks the schemas and the corpus.
 """
 
 from __future__ import annotations
@@ -44,6 +45,21 @@ SECTIONS_WITHOUT_PREFIX = {
 }
 
 BUNDLED = REPO / "app" / "src" / "main" / "assets" / "hardware-recipes" / "official-v1"
+
+
+def snapshot_directory() -> Path | None:
+    """The index and recipes to check hashes for, or None when this checkout has neither.
+
+    In the app repository that is the snapshot shipped inside the APK. The same corpus is also the
+    public repository's content, where the published `index.json` sits beside this script and the
+    app sources do not exist; the checks apply to whichever directory is present.
+    """
+    if BUNDLED.is_dir():
+        return BUNDLED
+    if (RECIPES / "index.json").is_file():
+        return RECIPES
+    return None
+
 
 failures: list[str] = []
 
@@ -117,20 +133,21 @@ def check_invalid(kind: str) -> None:
             fail(f"{case.relative_to(REPO)}: expected a problem at {expectation}, the schema named {found}")
 
 
-def check_bundled_snapshot() -> None:
-    index_path = BUNDLED / "index.json"
+def check_snapshot(directory: Path) -> None:
+    index_path = directory / "index.json"
     if not index_path.is_file():
         fail(f"{index_path.relative_to(REPO)}: missing")
         return
     index = load(index_path)
     if index is None:
         return
+    label = "bundled" if directory == BUNDLED else "published"
     for error in VALIDATORS["index"].iter_errors(index):
-        fail(f"bundled index at {location('index', error)}: {error.message}")
+        fail(f"{label} index at {location('index', error)}: {error.message}")
     for digest in index.get("recipes", []):
-        recipe_path = BUNDLED / digest["file"]
+        recipe_path = directory / digest["file"]
         if not recipe_path.is_file():
-            fail(f"bundled index lists {digest['file']}, which is not beside it")
+            fail(f"{label} index lists {digest['file']}, which is not beside it")
             continue
         data = recipe_path.read_bytes()
         actual = hashlib.sha256(data).hexdigest()
@@ -138,7 +155,7 @@ def check_bundled_snapshot() -> None:
             fail(f"{digest['file']}: index hash {digest['sha256']} does not match the file's {actual}")
         recipe = json.loads(data)
         for error in VALIDATORS["recipe"].iter_errors(recipe):
-            fail(f"bundled {digest['file']} at {location('recipe', error)}: {error.message}")
+            fail(f"{label} {digest['file']} at {location('recipe', error)}: {error.message}")
         if recipe.get("id") != digest["id"] or recipe.get("version") != digest["version"]:
             fail(f"{digest['file']}: index says {digest['id']} v{digest['version']}, file says "
                  f"{recipe.get('id')} v{recipe.get('version')}")
@@ -182,14 +199,20 @@ def main(argv: list[str]) -> int:
     check_invalid("recipe")
     check_valid("index")
     check_invalid("index")
-    check_bundled_snapshot()
+    snapshot = snapshot_directory()
+    if snapshot is None:
+        print(f"no snapshot at {BUNDLED.relative_to(REPO)} or {RECIPES.relative_to(REPO)}/index.json; "
+              "checked the schemas and corpus only")
+    else:
+        check_snapshot(snapshot)
     if report() != 0:
         return 1
     valid = len(list((RECIPES / "fixtures" / "recipe" / "valid").glob("*.json"))) \
         + len(list((RECIPES / "fixtures" / "index" / "valid").glob("*.json")))
     invalid = len(list((RECIPES / "fixtures" / "recipe" / "invalid").iterdir())) \
         + len(list((RECIPES / "fixtures" / "index" / "invalid").iterdir()))
-    print(f"schemas, {valid} valid fixtures, {invalid} invalid fixtures, and the bundled snapshot all agree")
+    checked = f"the {('bundled' if snapshot == BUNDLED else 'published')} snapshot" if snapshot else "no snapshot"
+    print(f"schemas, {valid} valid fixtures, {invalid} invalid fixtures, and {checked} all agree")
     return 0
 
 

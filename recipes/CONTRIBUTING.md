@@ -57,8 +57,10 @@ Two rules that follow from how the app reads recipes:
   a seed for another, not evidence. If you did not measure the exact model file, do not name its
   hash.
 
-Then add your recipe to the index with its SHA-256 and open a pull request. CI runs the same checker
-over the whole corpus and over the snapshot the app ships.
+Then add your recipe to the index with its SHA-256 and open a pull request. The public home is
+[`KuRue/bram-hardware-recipes`](https://github.com/KuRue/bram-hardware-recipes); a source you host
+yourself works the same way. CI runs the same checker over the whole corpus and over every recipe
+the index lists.
 
 ## What maintainers check before merging
 

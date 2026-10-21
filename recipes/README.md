@@ -1,9 +1,10 @@
 # Hardware recipe schemas and fixtures
 
 This directory is the format's public face: the JSON Schemas a recipe is written against, a fixture
-corpus that pins what is accepted and refused, and the checker that keeps both honest. It is staged
-here so it can become the public **`KuRue/bram-hardware-recipes`** repository the product plan calls
-for — which is **the owner's to create**; nothing here publishes itself.
+corpus that pins what is accepted and refused, and the checker that keeps both honest. It is
+mirrored at [`KuRue/bram-hardware-recipes`](https://github.com/KuRue/bram-hardware-recipes), where
+recipes are contributed; this copy stays beside the app because the app's parser and CI read it
+from here.
 
 ```
 schema/hardware-recipe.schema.json   one recipe: identity, match, runtime, model, workload, proposal, evidence, limits
@@ -17,11 +18,12 @@ validate.py                          checks the schemas against the corpus *and*
 ## Checking your work
 
 ```bash
-python3 recipes/validate.py                       # the corpus and the app's bundled snapshot
+python3 recipes/validate.py                       # the corpus, plus the snapshot or published index beside it
 python3 recipes/validate.py path/to/recipe.json   # one document, for a contributor before a pull request
 ```
 
-It needs `jsonschema` (`pip install jsonschema`). CI runs the first form on every change.
+It needs `jsonschema` (`pip install jsonschema`). CI runs the first form on every change, in this
+repository and in the public one.
 
 ## Publishing a source
 
@@ -54,12 +56,18 @@ A rule that changes on one side and not the other fails CI rather than surprisin
 - **Whether the numbers are true.** A recipe can be perfectly well-formed and still wrong; that is
   what the `evidence` block and [CONTRIBUTING.md](CONTRIBUTING.md) are for.
 
-## Before this becomes the public repository
+## The public repository
 
-1. The owner creates `KuRue/bram-hardware-recipes` and decides its license (Apache-2.0 would match
-   the app, and the plan recommends a permissive license for schema and data — but it is the owner's
-   decision, exactly as the app's license was).
-2. These files move there unchanged, with a CI workflow that runs `validate.py` on every pull request
-   and a short `README` pointing readers at the app.
-3. The app's bundled snapshot stays the reviewed default; the public repository is a source a user
-   adds, under the review-and-pin rules in `docs/HARDWARE_RECIPES.md`.
+[`KuRue/bram-hardware-recipes`](https://github.com/KuRue/bram-hardware-recipes) is the public home,
+Apache-2.0 licensed like the app.
+
+- **Recipes live there.** A contributor's measurement and the index that lists it belong in that
+  repository, where its CI and review apply.
+- **The format lands here first.** Schema, fixture, and validator changes start in this repository,
+  so the Kotlin parser test and the published corpus move together; the schema, fixtures and
+  validator are then copied there byte for byte. Only the two READMEs and `CONTRIBUTING.md` name
+  paths of their own.
+- **The bundled snapshot stays the reviewed default.** The app ships `official-v1`. The public
+  repository is a source a user adds, under the review-and-pin rules in
+  `docs/HARDWARE_RECIPES.md`, and publishing it as a network source needs the publisher's key and
+  `index.signature.json` ([helper](../tools/recipe-signing/README.md)).

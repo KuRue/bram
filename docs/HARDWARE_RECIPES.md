@@ -5,8 +5,9 @@ a phone can start from someone else's sweep instead of running its own. Bram shi
 snapshot and reads it like any other source: strictly, and with the hashes checked.
 
 This document describes what is in the app today. The plan behind it — a public recipe repository,
-user-added sources, evidence upload — is [§6 of the product plan](PRODUCT_PLAN.md#6-hardware-recipes-and-additional-repositories),
-and the parts of it that are not implemented yet are listed at the bottom.
+user-added sources, evidence upload — is [§6 of the product plan](PRODUCT_PLAN.md#6-hardware-recipes-and-additional-repositories).
+The repository now exists; the parts of the plan that are still not implemented are listed at the
+bottom.
 
 ## Recipe sources
 
@@ -189,12 +190,20 @@ a split GGUF without one file's hash, a device that will not say what it is, or 
 each produce a sentence saying what is missing, and no document. A number it does write always comes
 with the method that produced it, including the spread and the battery temperatures.
 
+**Publishing it** is a pull request to
+[`KuRue/bram-hardware-recipes`](https://github.com/KuRue/bram-hardware-recipes), or a source you
+host yourself. The screen copies the document, the index entry, and the hash; the repository's
+`CONTRIBUTING.md` says where they go, and its CI checks the schemas and the corpus. Bram holds no
+GitHub credential and uploads nothing on its own. An app that already reads untrusted sources
+should not also carry a token whose compromise would reach every repository the account can write.
+
 ## Not implemented yet
 
 The format, matcher, bundled snapshot, signed source cache, key review, rollback, local validation,
-the schemas, the fixture corpus, and exporting a measurement are in place; these are not:
+the schemas, the fixture corpus, exporting a measurement, and the public repository are in place.
+One part of the plan is not:
 
-- uploading from inside Bram: a shared document is saved to a file, and publishing it is a pull
-  request or a source you host;
-- the public recipe repository itself — the owner creates it, and `recipes/` is the content that
-  moves into it.
+- **uploading with a GitHub account from inside Bram.** The app produces the document and leaves
+  publishing to a pull request or to a source you host, because it stores no token. The public
+  repository's index will be signed by its publisher when a snapshot is released; until then the
+  bundled snapshot remains the reviewed default.

@@ -252,7 +252,8 @@ internal fun RecipeExportSection(state: AppUiState, profile: ModelProfile?, onSa
                 modifier = Modifier.testTag("recipe-export-copy"),
             ) { Text("Copy JSON") }
             Text(
-                "Add it to a recipe repository, or to your own source, with the index entry and hash above.",
+                "Add it to github.com/KuRue/bram-hardware-recipes with a pull request, or to your own " +
+                    "source, using the index entry and hash above. Bram uploads nothing itself.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
