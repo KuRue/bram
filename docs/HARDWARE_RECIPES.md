@@ -205,5 +205,5 @@ One part of the plan is not:
 
 - **uploading with a GitHub account from inside Bram.** The app produces the document and leaves
   publishing to a pull request or to a source you host, because it stores no token. The public
-  repository's index will be signed by its publisher when a snapshot is released; until then the
-  bundled snapshot remains the reviewed default.
+  repository's index is signed with its publisher's key, which a person approves on first download;
+  the bundled snapshot remains the reviewed default.
