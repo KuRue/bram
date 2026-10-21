@@ -60,7 +60,9 @@ Two rules that follow from how the app reads recipes:
 Then add your recipe to the index with its SHA-256 and open a pull request. The public home is
 [`KuRue/bram-hardware-recipes`](https://github.com/KuRue/bram-hardware-recipes); a source you host
 yourself works the same way. CI runs the same checker over the whole corpus and over every recipe
-the index lists.
+the index lists. A pull request that changes `index.json` must include a freshly signed
+`index.signature.json`: CI verifies the proof against the exact index bytes, so an edited index
+without a new signature fails instead of reaching readers.
 
 ## What maintainers check before merging
 

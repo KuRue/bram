@@ -20,10 +20,13 @@ checkout with neither (say, a single-file download) still checks the schemas and
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import jsonschema
@@ -161,6 +164,50 @@ def check_snapshot(directory: Path) -> None:
                  f"{recipe.get('id')} v{recipe.get('version')}")
 
 
+def check_signature(directory: Path) -> None:
+    """Verify a detached index signature against the exact index bytes.
+
+    A published source carries `index.signature.json`. Checking it here catches the failure that
+    otherwise reaches readers: an index edited in a pull request without re-signing, which the app
+    would refuse as a bad proof while the files still look valid. The check uses the key inside the
+    proof, so it proves the sidecar matches the index, not who holds the key — that decision is the
+    app's first-use approval.
+    """
+    signature_path = directory / "index.signature.json"
+    if not signature_path.is_file():
+        return
+    try:
+        proof = json.loads(signature_path.read_text())
+        public = base64.b64decode(proof["publicKey"], validate=True)
+        signature = base64.b64decode(proof["signature"], validate=True)
+        if proof.get("version") != 1 or proof.get("algorithm") != "SHA256withECDSA":
+            raise ValueError(f"unsupported proof: version={proof.get('version')!r} algorithm={proof.get('algorithm')!r}")
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+        fail(f"{signature_path.relative_to(REPO)}: unreadable proof: {error}")
+        return
+    payload = b"Bram recipe index v1\n" + (directory / "index.json").read_bytes()
+    try:
+        with tempfile.TemporaryDirectory(prefix="bram-recipe-verify-") as folder:
+            folder = Path(folder)
+            (folder / "public.der").write_bytes(public)
+            (folder / "signature.bin").write_bytes(signature)
+            (folder / "payload").write_bytes(payload)
+            subprocess.run(["openssl", "pkey", "-pubin", "-inform", "DER", "-in", folder / "public.der",
+                            "-out", folder / "public.pem"], check=True, capture_output=True)
+            result = subprocess.run(["openssl", "dgst", "-sha256", "-verify", folder / "public.pem",
+                                     "-signature", folder / "signature.bin", folder / "payload"],
+                                    capture_output=True, text=True)
+    except FileNotFoundError:
+        fail("openssl is required to check index.signature.json")
+        return
+    except subprocess.CalledProcessError as error:
+        fail(f"{signature_path.relative_to(REPO)}: unusable public key: {error.stderr.decode(errors='replace').strip()}")
+        return
+    if result.returncode != 0:
+        fail(f"{signature_path.relative_to(REPO)}: signature does not match index.json "
+             f"({(result.stderr or result.stdout).strip()})")
+
+
 def check_paths(paths: list[str]) -> None:
     """Validate single documents, for a contributor checking a recipe before opening a pull request."""
     for name in paths:
@@ -205,6 +252,7 @@ def main(argv: list[str]) -> int:
               "checked the schemas and corpus only")
     else:
         check_snapshot(snapshot)
+        check_signature(snapshot)
     if report() != 0:
         return 1
     valid = len(list((RECIPES / "fixtures" / "recipe" / "valid").glob("*.json"))) \

@@ -23,7 +23,9 @@ python3 recipes/validate.py path/to/recipe.json   # one document, for a contribu
 ```
 
 It needs `jsonschema` (`pip install jsonschema`). CI runs the first form on every change, in this
-repository and in the public one.
+repository and in the public one. When the snapshot has an `index.signature.json`, that run also
+verifies the detached proof against the exact index bytes, so an index edited without re-signing
+fails here rather than in the app.
 
 ## Publishing a source
 
